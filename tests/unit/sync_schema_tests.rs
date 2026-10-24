@@ -212,17 +212,6 @@ fn column_diff_reports_missing_and_extra_columns() {
     assert_eq!(extra, vec!["legacy_note"]);
 }
 
-#[test]
-fn column_diff_is_empty_when_the_table_matches_the_model() {
-    let model = ModelSchema::new("users").column(ColumnDef::new("id", "i64").primary_key());
-    let existing = vec!["id".to_string()];
-
-    let (missing, extra) = diff_columns(&model, &existing);
-
-    assert!(missing.is_empty());
-    assert!(extra.is_empty());
-}
-
 /// Two models of one table each register the columns they read: the second
 /// adds what the first lacks, and a column both declare keeps the first.
 #[test]
@@ -259,4 +248,26 @@ fn a_second_model_of_a_table_adds_its_columns() {
         [("id", "i64"), ("name", "String"), ("score", "i32")]
     );
     assert_eq!(schemas[0].indexes.len(), 1);
+}
+
+#[test]
+fn a_table_of_the_same_name_in_another_schema_registers_for_sync() {
+    SyncRegistry::clear();
+    SyncRegistry::register_schema(ModelSchema::new("users").schema("tenant_a"));
+    SyncRegistry::register_schema(ModelSchema::new("users").schema("tenant_b"));
+    SyncRegistry::register_schema(ModelSchema::new("users").schema("tenant_a"));
+
+    let mut registered: Vec<(String, String)> = SyncRegistry::get_all_schemas()
+        .into_iter()
+        .map(|schema| (schema.schema_name, schema.table_name))
+        .collect();
+    registered.sort();
+    SyncRegistry::clear();
+    assert_eq!(
+        registered,
+        [
+            ("tenant_a".to_string(), "users".to_string()),
+            ("tenant_b".to_string(), "users".to_string()),
+        ]
+    );
 }

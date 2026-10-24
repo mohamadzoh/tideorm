@@ -1,9 +1,6 @@
 use super::BatchUpdateBuilder;
 use crate::model::Model as ModelTrait;
 
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-use crate::Database;
-
 #[tideorm::model(table = "batch_update_guard_users")]
 struct BatchUpdateGuardUser {
     #[tideorm(primary_key, auto_increment)]
@@ -11,78 +8,58 @@ struct BatchUpdateGuardUser {
     name: String,
 }
 
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-async fn setup_batch_cache_test_db() -> Database {
-    let db = crate::test_support::install_sqlite_global(&[
-        "CREATE TABLE batch_update_guard_users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
-    ])
-    .await;
-    crate::test_support::set_query_cache(true);
-    db
-}
-
+/// A batch update needs a filter that can leave a row out, as the
+/// `QueryBuilder` mutation terminals do. An empty negative list renders
+/// constant-true (`id NOT IN ()` holds for every row), so counting conditions
+/// would let a caller whose filter list came back empty rewrite the whole
+/// table; an OR group with such a member used to be accepted that way.
 #[test]
-fn batch_update_guard_rejects_unfiltered_updates() {
-    let err = BatchUpdateBuilder::<BatchUpdateGuardUser>::new()
-        .set("name", "updated")
-        .ensure_explicit_filters("update")
-        .unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("requires at least one explicit filter")
-    );
-}
+fn batch_update_guard_requires_a_filter_that_can_exclude_a_row() {
+    let update = || BatchUpdateGuardUser::update_all().set("name", "updated");
+    let no_ids = Vec::<i64>::new;
+    let cases = [
+        (
+            "no filter",
+            update(),
+            Some("requires at least one explicit filter"),
+        ),
+        (
+            "a limit alone",
+            update().limit(1),
+            Some("requires at least one explicit filter"),
+        ),
+        (
+            "an empty negative list",
+            update().where_not_in("id", no_ids()),
+            Some("unfiltered bulk mutations are blocked"),
+        ),
+        (
+            "an OR group with an empty negative list",
+            update()
+                .or_where_eq("name", "alice")
+                .or_where_not_in("id", no_ids()),
+            Some("unfiltered bulk mutations are blocked"),
+        ),
+        ("a where filter", update().where_eq("id", 1), None),
+        ("an OR filter", update().or_where_eq("name", "alice"), None),
+        (
+            "a real filter beside an empty negative list",
+            update()
+                .where_eq("name", "alice")
+                .where_not_in("id", no_ids()),
+            None,
+        ),
+    ];
 
-#[test]
-fn batch_update_guard_accepts_where_filters() {
-    assert!(
-        BatchUpdateGuardUser::update_all()
-            .set("name", "updated")
-            .where_eq("id", 1)
-            .ensure_explicit_filters("update")
-            .is_ok()
-    );
-}
-
-#[test]
-fn batch_update_guard_accepts_or_filters() {
-    assert!(
-        BatchUpdateGuardUser::update_all()
-            .set("name", "updated")
-            .or_where_eq("name", "alice")
-            .ensure_explicit_filters("update")
-            .is_ok()
-    );
-}
-
-#[test]
-fn batch_update_guard_rejects_an_or_group_with_a_vacuous_member() {
-    // `name = 'alice' OR id NOT IN ()` holds for every row, so the OR group does
-    // not filter anything; counting its members used to accept it.
-    let err = BatchUpdateGuardUser::update_all()
-        .set("name", "updated")
-        .or_where_eq("name", "alice")
-        .or_where_not_in("id", Vec::<i64>::new())
-        .ensure_explicit_filters("update")
-        .unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("unfiltered bulk mutations are blocked"),
-        "{err}"
-    );
-}
-
-#[test]
-fn batch_update_guard_rejects_limit_without_where() {
-    let err = BatchUpdateGuardUser::update_all()
-        .set("name", "updated")
-        .limit(1)
-        .ensure_explicit_filters("update")
-        .unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("requires at least one explicit filter")
-    );
+    for (case, update, refusal) in cases {
+        match (update.ensure_explicit_filters("update"), refusal) {
+            (Ok(()), None) => {}
+            (Err(error), Some(refusal)) => {
+                assert!(error.to_string().contains(refusal), "{case}: {error}")
+            }
+            (outcome, _) => panic!("{case}: unexpected {outcome:?}"),
+        }
+    }
 }
 
 #[test]
@@ -100,21 +77,15 @@ fn batch_update_when_sets_only_when_the_condition_holds() {
 }
 
 #[test]
-fn batch_update_builder_accepts_typed_update_columns() {
-    let builder = BatchUpdateBuilder::<BatchUpdateGuardUser>::new()
-        .set(BatchUpdateGuardUser::columns.name, "updated")
-        .increment(BatchUpdateGuardUser::columns.id, 1);
-
-    assert!(builder.updates.contains_key("name"));
-    assert!(builder.updates.contains_key("id"));
-}
-
-#[test]
-fn batch_update_builder_accepts_typed_filter_columns() {
+fn batch_update_builder_accepts_typed_columns() {
     let builder = BatchUpdateGuardUser::update_all()
+        .set(BatchUpdateGuardUser::columns.name, "updated")
+        .increment(BatchUpdateGuardUser::columns.id, 1)
         .where_eq(BatchUpdateGuardUser::columns.id, 1)
         .or_where_eq(BatchUpdateGuardUser::columns.name, "alice");
 
+    assert!(builder.updates.contains_key("name"));
+    assert!(builder.updates.contains_key("id"));
     assert_eq!(builder.conditions.len(), 1);
     assert_eq!(builder.conditions[0].column, "id");
     assert_eq!(builder.or_group.conditions.len(), 1);
@@ -181,11 +152,21 @@ fn batch_execute_returning_uses_backend_returning_capability() {
     );
 }
 
+/// `execute` and `execute_returning` each empty the query cache.
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
-async fn batch_execute_invalidates_cached_queries() {
+async fn batch_updates_invalidate_cached_queries() {
     let _guard = crate::test_support::global_db_lock().lock().await;
-    let _db = setup_batch_cache_test_db().await;
+    crate::test_support::install_sqlite_global(&[
+        "CREATE TABLE batch_update_guard_users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
+    ])
+    .await;
+    crate::test_support::set_query_cache(true);
+    let cached_name = || async {
+        let rows = crate::test_support::cached_rows::<BatchUpdateGuardUser>().await;
+        assert_eq!(crate::test_support::cached_entries(), 1);
+        rows[0].name.clone()
+    };
 
     let saved = BatchUpdateGuardUser {
         id: 0,
@@ -195,57 +176,35 @@ async fn batch_execute_invalidates_cached_queries() {
     .await
     .expect("seed save should succeed");
 
-    let cached_before = crate::test_support::cached_rows::<BatchUpdateGuardUser>().await;
-    assert_eq!(cached_before[0].name, "Alice");
-    assert_eq!(crate::test_support::cached_entries(), 1);
-
+    assert_eq!(cached_name().await, "Alice");
     let rows_affected = BatchUpdateGuardUser::update_all()
         .set("name", "Bob")
         .where_eq("id", saved.id)
         .execute()
         .await
         .expect("batch execute should succeed");
-
     assert_eq!(rows_affected, 1);
-    assert_eq!(crate::test_support::cached_entries(), 0);
+    assert_eq!(
+        crate::test_support::cached_entries(),
+        0,
+        "execute should empty the cache"
+    );
 
-    let fresh = crate::test_support::cached_rows::<BatchUpdateGuardUser>().await;
-    assert_eq!(fresh[0].name, "Bob");
-
-    crate::test_support::reset_globals_and_cache();
-}
-
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-#[tokio::test]
-async fn batch_execute_returning_invalidates_cached_queries() {
-    let _guard = crate::test_support::global_db_lock().lock().await;
-    let _db = setup_batch_cache_test_db().await;
-
-    let saved = BatchUpdateGuardUser {
-        id: 0,
-        name: "Alice".to_string(),
-    }
-    .save()
-    .await
-    .expect("seed save should succeed");
-
-    let cached_before = crate::test_support::cached_rows::<BatchUpdateGuardUser>().await;
-    assert_eq!(cached_before[0].name, "Alice");
-    assert_eq!(crate::test_support::cached_entries(), 1);
-
+    assert_eq!(cached_name().await, "Bob");
     let returned = BatchUpdateGuardUser::update_all()
-        .set("name", "Bob")
+        .set("name", "Carol")
         .where_eq("id", saved.id)
         .execute_returning()
         .await
         .expect("batch execute_returning should succeed");
-
     assert_eq!(returned.len(), 1);
-    assert_eq!(returned[0].name, "Bob");
-    assert_eq!(crate::test_support::cached_entries(), 0);
-
-    let fresh = crate::test_support::cached_rows::<BatchUpdateGuardUser>().await;
-    assert_eq!(fresh[0].name, "Bob");
+    assert_eq!(returned[0].name, "Carol");
+    assert_eq!(
+        crate::test_support::cached_entries(),
+        0,
+        "execute_returning should empty the cache"
+    );
+    assert_eq!(cached_name().await, "Carol");
 
     crate::test_support::reset_globals_and_cache();
 }

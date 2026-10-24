@@ -1,29 +1,6 @@
 use super::*;
 
 #[test]
-fn test_file_attachment_creation() {
-    let attachment = FileAttachment::new("uploads/2024/01/image.jpg");
-    assert_eq!(attachment.key, "uploads/2024/01/image.jpg");
-    assert_eq!(attachment.filename, "image.jpg");
-}
-
-#[test]
-fn test_file_attachment_with_metadata() {
-    let attachment = FileAttachment::with_metadata(
-        "uploads/doc.pdf",
-        Some("My Document.pdf"),
-        Some(1024),
-        Some("application/pdf"),
-    );
-    assert_eq!(
-        attachment.original_filename,
-        Some("My Document.pdf".to_string())
-    );
-    assert_eq!(attachment.size, Some(1024));
-    assert_eq!(attachment.mime_type, Some("application/pdf".to_string()));
-}
-
-#[test]
 fn test_files_data_has_one() {
     let mut files = FilesData::new();
     files.set_one("thumbnail", FileAttachment::new("thumb.jpg"));
@@ -40,25 +17,25 @@ fn test_files_data_has_one() {
 
 #[test]
 fn test_file_attachment_filename_uses_backslash_separators_too() {
-    let attachment = FileAttachment::new("uploads\\2024\\01\\image.jpg");
-    assert_eq!(attachment.filename, "image.jpg");
-
-    let mixed = FileAttachment::new("uploads/2024\\report.pdf");
-    assert_eq!(mixed.filename, "report.pdf");
-
-    let bare = FileAttachment::new("image.jpg");
-    assert_eq!(bare.filename, "image.jpg");
+    for (key, filename) in [
+        ("uploads/2024/01/image.jpg", "image.jpg"),
+        ("uploads\\2024\\01\\image.jpg", "image.jpg"),
+        ("uploads/2024\\report.pdf", "report.pdf"),
+        ("image.jpg", "image.jpg"),
+    ] {
+        assert_eq!(FileAttachment::new(key).filename, filename, "{key}");
+    }
 }
 
 #[test]
-fn test_is_safe_key_accepts_plain_relative_keys() {
-    assert!(FileAttachment::is_safe_key("image.jpg"));
-    assert!(FileAttachment::is_safe_key("uploads/2024/01/image.jpg"));
-    assert!(FileAttachment::is_safe_key("uploads/my file (1).jpg"));
-}
-
-#[test]
-fn test_is_safe_key_rejects_traversal_and_absolute_and_url_keys() {
+fn test_is_safe_key_accepts_only_plain_relative_keys() {
+    for key in [
+        "image.jpg",
+        "uploads/2024/01/image.jpg",
+        "uploads/my file (1).jpg",
+    ] {
+        assert!(FileAttachment::is_safe_key(key), "{key}");
+    }
     for key in [
         "",
         "   ",

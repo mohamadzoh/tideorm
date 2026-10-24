@@ -173,16 +173,28 @@ async fn stored_parent_name(id: i64) -> String {
         .name
 }
 
+async fn children_of(parent_id: i64) -> Vec<NestedTestChild> {
+    NestedTestChild::query()
+        .where_eq("parent_id", parent_id)
+        .order_by("id", crate::query::Order::Asc)
+        .get()
+        .await
+        .expect("should fetch nested children")
+}
+
+async fn parent_count() -> usize {
+    NestedTestParent::query()
+        .get()
+        .await
+        .expect("parent query should succeed")
+        .len()
+}
+
 #[tokio::test]
 async fn save_with_many_persists_children_with_parent_fk() {
     let _db = setup_nested_test_db().await;
 
-    let parent = NestedTestParent {
-        id: 0,
-        name: "parent".to_string(),
-    };
-
-    let (saved_parent, saved_children) = parent
+    let (saved_parent, saved_children) = nested_parent()
         .save_with_many(nested_children(&["alpha", "beta"]), "parent_id")
         .await
         .expect("save_with_many should succeed");
@@ -195,76 +207,21 @@ async fn save_with_many_persists_children_with_parent_fk() {
             .all(|child| child.parent_id == saved_parent.id)
     );
     assert!(saved_children.iter().all(|child| child.id > 0));
-
-    let fetched = NestedTestChild::query()
-        .where_eq("parent_id", saved_parent.id)
-        .order_by("id", crate::query::Order::Asc)
-        .get()
-        .await
-        .expect("should fetch nested children");
-    assert_eq!(fetched, saved_children);
+    assert_eq!(children_of(saved_parent.id).await, saved_children);
 }
 
+/// The builder saves each relation pointed at the parent and hands back what
+/// it stored, `with_one` before `with_many` whatever order they were added in.
+/// It runs in a spawned task, which needs the builder to be `Send`.
 #[tokio::test]
 async fn nested_save_builder_persists_related_models_with_parent_fk() {
     let _db = setup_nested_test_db().await;
 
-    let parent = NestedTestParent {
-        id: 0,
-        name: "parent".to_string(),
-    };
-
-    let (saved_parent, saved_related) = NestedSaveBuilder::new(parent)
+    let builder = NestedSaveBuilder::new(nested_parent())
         .with_many(nested_children(&["alpha", "beta"]), "parent_id")
-        .save()
-        .await
-        .expect("nested builder save should succeed");
+        .with_one(nested_profile(), "user_id");
 
-    assert!(saved_parent.id > 0);
-    assert_eq!(saved_related.len(), 1);
-
-    let returned_children = saved_related[0]
-        .clone()
-        .into_many::<NestedTestChild>()
-        .expect("saved relation should deserialize into typed child models");
-    assert_eq!(returned_children.len(), 2);
-    assert!(
-        returned_children
-            .iter()
-            .all(|child| child.parent_id == saved_parent.id)
-    );
-
-    let fetched = NestedTestChild::query()
-        .where_eq("parent_id", saved_parent.id)
-        .order_by("id", crate::query::Order::Asc)
-        .get()
-        .await
-        .expect("should fetch nested children saved by builder");
-
-    assert_eq!(fetched.len(), 2);
-    assert_eq!(fetched[0].name, "alpha");
-    assert_eq!(fetched[1].name, "beta");
-    assert!(
-        fetched
-            .iter()
-            .all(|child| child.parent_id == saved_parent.id)
-    );
-}
-
-#[tokio::test]
-async fn nested_save_builder_can_be_spawned() {
-    let _db = setup_nested_test_db().await;
-
-    let builder = NestedSaveBuilder::new(NestedTestParent {
-        id: 0,
-        name: "parent".to_string(),
-    })
-    .with_one(nested_profile(), "user_id")
-    .with_many(nested_children(&["alpha", "beta"]), "parent_id");
-
-    let join = tokio::spawn(async move { builder.save().await });
-
-    let (saved_parent, saved_related) = join
+    let (saved_parent, saved_related) = tokio::spawn(async move { builder.save().await })
         .await
         .expect("spawned nested save task should join successfully")
         .expect("spawned nested save should succeed");
@@ -294,22 +251,15 @@ async fn nested_save_builder_can_be_spawned() {
         .first()
         .await
         .expect("profile query should succeed")
-        .expect("spawned builder should persist the one relation");
+        .expect("the builder should persist the one relation");
     assert_eq!(profile.bio, "profile");
 
-    let fetched = NestedTestChild::query()
-        .where_eq("parent_id", saved_parent.id)
-        .order_by("id", crate::query::Order::Asc)
-        .get()
+    let names: Vec<String> = children_of(saved_parent.id)
         .await
-        .expect("should fetch nested children saved by spawned builder");
-
-    assert_eq!(fetched.len(), 2);
-    assert!(
-        fetched
-            .iter()
-            .all(|child| child.parent_id == saved_parent.id)
-    );
+        .into_iter()
+        .map(|child| child.name)
+        .collect();
+    assert_eq!(names, ["alpha", "beta"]);
 }
 
 #[test]
@@ -342,21 +292,18 @@ struct NestedTestQuietChild {
 async fn nested_save_builder_returns_the_saved_models_themselves() {
     let _db = setup_nested_test_db().await;
 
-    let (_, saved) = NestedSaveBuilder::new(NestedTestParent {
-        id: 0,
-        name: "parent".to_string(),
-    })
-    .with_one(
-        NestedTestQuietChild {
-            id: 0,
-            parent_id: 0,
-            name: "kept".to_string(),
-        },
-        "parent_id",
-    )
-    .save()
-    .await
-    .expect("nested builder save should succeed");
+    let (_, saved) = NestedSaveBuilder::new(nested_parent())
+        .with_one(
+            NestedTestQuietChild {
+                id: 0,
+                parent_id: 0,
+                name: "kept".to_string(),
+            },
+            "parent_id",
+        )
+        .save()
+        .await
+        .expect("nested builder save should succeed");
 
     let child = saved[0]
         .clone()
@@ -367,31 +314,16 @@ async fn nested_save_builder_returns_the_saved_models_themselves() {
 }
 
 #[test]
-fn apply_foreign_key_accepts_the_db_column_name_and_the_rust_field_name() {
-    let child = NestedTestAliasedChild {
-        id: 0,
-        owner_id: 0,
-        name: "alpha".to_string(),
-    };
-
-    let by_column = apply_foreign_key(child.clone(), "parent_id", &serde_json::json!(7))
+fn apply_foreign_key_resolves_the_db_column_or_rust_field_name_and_rejects_others() {
+    let by_column = apply_foreign_key(aliased_child("alpha"), "parent_id", &serde_json::json!(7))
         .expect("the DB column name should resolve");
     assert_eq!(by_column.owner_id, 7);
 
-    let by_field = apply_foreign_key(child, "owner_id", &serde_json::json!(9))
+    let by_field = apply_foreign_key(aliased_child("alpha"), "owner_id", &serde_json::json!(9))
         .expect("the Rust field name should resolve");
     assert_eq!(by_field.owner_id, 9);
-}
 
-#[test]
-fn apply_foreign_key_rejects_an_unknown_foreign_key_name() {
-    let child = NestedTestChild {
-        id: 0,
-        parent_id: 0,
-        name: "alpha".to_string(),
-    };
-
-    let error = apply_foreign_key(child, "parnt_id", &serde_json::json!(1))
+    let error = apply_foreign_key(aliased_child("alpha"), "parnt_id", &serde_json::json!(1))
         .expect_err("a typo must not be silently ignored");
     assert!(error.to_string().contains("parnt_id"), "{error}");
 }
@@ -410,91 +342,32 @@ fn apply_foreign_key_does_not_coerce_a_string_primary_key_to_an_integer() {
 }
 
 #[tokio::test]
-async fn save_with_many_accepts_the_db_column_name_for_a_renamed_field() {
-    let _db = setup_nested_test_db().await;
-
-    let parent = NestedTestParent {
-        id: 0,
-        name: "parent".to_string(),
-    };
-
-    let (saved_parent, saved_children) = parent
-        .save_with_many(
-            vec![NestedTestAliasedChild {
-                id: 0,
-                owner_id: 0,
-                name: "alpha".to_string(),
-            }],
-            "parent_id",
-        )
-        .await
-        .expect("save_with_many should accept the DB column name");
-
-    assert!(saved_parent.id > 0);
-    assert_eq!(saved_children.len(), 1);
-    assert_eq!(saved_children[0].owner_id, saved_parent.id);
-}
-
-#[tokio::test]
 async fn save_with_many_rejects_an_unknown_foreign_key_without_writing_the_parent() {
     let _db = setup_nested_test_db().await;
 
-    let parent = NestedTestParent {
-        id: 0,
-        name: "parent".to_string(),
-    };
-
-    let error = parent
+    let error = nested_parent()
         .save_with_many(nested_children(&["alpha"]), "parnt_id")
         .await
         .expect_err("an unresolvable foreign key must be an error");
     assert!(error.to_string().contains("parnt_id"), "{error}");
 
-    assert_eq!(
-        NestedTestParent::query()
-            .get()
-            .await
-            .expect("parent query should succeed")
-            .len(),
-        0
-    );
+    assert_eq!(parent_count().await, 0);
 }
 
 #[tokio::test]
 async fn save_with_many_rolls_back_the_parent_when_a_child_fails() {
     let _db = setup_nested_test_db().await;
 
-    let parent = NestedTestParent {
-        id: 0,
-        name: "parent".to_string(),
-    };
-
-    let children = vec![
-        NestedTestAliasedChild {
-            id: 0,
-            owner_id: 0,
-            name: "duplicate".to_string(),
-        },
-        NestedTestAliasedChild {
-            id: 0,
-            owner_id: 0,
-            name: "duplicate".to_string(),
-        },
-    ];
-
-    parent
-        .save_with_many(children, "parent_id")
+    // `name` is UNIQUE, so the second child fails.
+    nested_parent()
+        .save_with_many(
+            vec![aliased_child("duplicate"), aliased_child("duplicate")],
+            "parent_id",
+        )
         .await
         .expect_err("the duplicate child must fail the whole nested save");
 
-    assert_eq!(
-        NestedTestParent::query()
-            .get()
-            .await
-            .expect("parent query should succeed")
-            .len(),
-        0
-    );
+    assert_eq!(parent_count().await, 0);
     assert_eq!(
         NestedTestAliasedChild::query()
             .get()
@@ -597,28 +470,18 @@ async fn delete_with_many_rolls_back_every_delete_when_a_child_fails() {
         2,
         "the unlocked child's delete must be rolled back"
     );
-    assert_eq!(
-        NestedTestParent::query()
-            .get()
-            .await
-            .expect("parent query should succeed")
-            .len(),
-        1
-    );
+    assert_eq!(parent_count().await, 1);
 }
 
 #[tokio::test]
 async fn delete_with_many_deletes_each_child_then_the_parent() {
     let _db = setup_nested_test_db().await;
 
-    let parent = NestedTestParent {
-        id: 0,
-        name: "parent".to_string(),
-    };
-    let (saved_parent, saved_children) = parent
+    let (saved_parent, saved_children) = nested_parent()
         .save_with_many(nested_children(&["alpha", "beta", "gamma"]), "parent_id")
         .await
         .expect("save_with_many should seed nested children");
+    let parent_id = saved_parent.id;
 
     GlobalProfiler::reset();
     GlobalProfiler::enable();
@@ -632,33 +495,15 @@ async fn delete_with_many_deletes_each_child_then_the_parent() {
 
     assert_eq!(deleted, 4);
     assert_eq!(GlobalProfiler::stats().total_queries, 4);
-    assert_eq!(
-        NestedTestChild::query()
-            .get()
-            .await
-            .expect("child query should succeed")
-            .len(),
-        0
-    );
-    assert_eq!(
-        NestedTestParent::query()
-            .get()
-            .await
-            .expect("parent query should succeed")
-            .len(),
-        0
-    );
+    assert!(children_of(parent_id).await.is_empty());
+    assert_eq!(parent_count().await, 0);
 }
 
 #[tokio::test]
 async fn update_with_many_updates_each_related_model() {
     let _db = setup_nested_test_db().await;
 
-    let parent = NestedTestParent {
-        id: 0,
-        name: "parent".to_string(),
-    };
-    let (saved_parent, saved_children) = parent
+    let (saved_parent, saved_children) = nested_parent()
         .save_with_many(nested_children(&["alpha", "beta", "gamma"]), "parent_id")
         .await
         .expect("save_with_many should seed nested children");
@@ -687,15 +532,9 @@ async fn update_with_many_updates_each_related_model() {
     GlobalProfiler::disable();
 
     assert_eq!(parent_after_update.name, "parent-updated");
-    assert_eq!(children_after_update.len(), 3);
     // One UPDATE for the parent plus one per related model: nested updates run
     // through each model's own `Model::update` so lifecycle callbacks and
     // validation are dispatched at a concrete call site.
     assert_eq!(GlobalProfiler::stats().total_queries, 4);
-
-    for (expected, actual) in updated_children.iter().zip(children_after_update.iter()) {
-        assert_eq!(expected.id, actual.id);
-        assert_eq!(expected.parent_id, actual.parent_id);
-        assert_eq!(expected.name, actual.name);
-    }
+    assert_eq!(children_after_update, updated_children);
 }

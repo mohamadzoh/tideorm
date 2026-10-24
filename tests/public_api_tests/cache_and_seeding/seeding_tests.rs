@@ -1,34 +1,21 @@
 use tideorm::seeding::{SeedInfo, SeedResult};
 
-fn rolled_back(name: &str) -> SeedResult {
-    SeedResult {
-        executed: Vec::new(),
-        skipped: Vec::new(),
+#[test]
+fn test_seed_result_reports_rolled_back_seeds() {
+    let result = SeedResult {
         rolled_back: vec![SeedInfo {
-            name: name.to_string(),
+            name: "test_seeder".to_string(),
         }],
-    }
-}
+        ..SeedResult::default()
+    };
 
-#[test]
-fn test_seed_result_has_rolled_back() {
-    let result = rolled_back("test_seed");
-    assert!(!result.has_executed());
-}
-
-#[test]
-fn test_seed_result_display_rolled_back() {
-    let display = format!("{}", rolled_back("test_seeder"));
-    assert!(display.contains("test_seeder"));
-    assert!(display.contains("Rolled back seeds"));
+    assert!(!result.has_executed(), "a rollback executes no seed");
+    let display = result.to_string();
+    assert!(display.contains("Rolled back seeds"), "{display}");
+    assert!(display.contains("test_seeder"), "{display}");
 }
 
 #[test]
 fn test_seed_result_empty_display_is_empty() {
-    let result = SeedResult {
-        executed: Vec::new(),
-        skipped: Vec::new(),
-        rolled_back: Vec::new(),
-    };
-    assert_eq!(format!("{}", result), "");
+    assert_eq!(SeedResult::default().to_string(), "");
 }

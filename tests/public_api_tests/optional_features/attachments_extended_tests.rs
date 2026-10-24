@@ -40,17 +40,14 @@ impl TestProduct {
             files: None,
         }
     }
-}
 
-#[test]
-fn test_has_attachments_attach_single() {
-    let mut product = TestProduct::new(1, "Test Product");
-
-    product.attach("thumbnail", "uploads/thumb.jpg").unwrap();
-
-    let thumb = product.get_file("thumbnail").unwrap().unwrap();
-    assert_eq!(thumb.key, "uploads/thumb.jpg");
-    assert_eq!(thumb.filename, "thumb.jpg");
+    fn keys(&self, relation: &str) -> Vec<String> {
+        self.get_files(relation)
+            .unwrap()
+            .into_iter()
+            .map(|file| file.key)
+            .collect()
+    }
 }
 
 #[test]
@@ -66,31 +63,18 @@ fn test_has_attachments_attach_replaces_has_one() {
 }
 
 #[test]
-fn test_has_attachments_attach_many() {
-    let mut product = TestProduct::new(1, "Test Product");
-
-    product
-        .attach_many("images", vec!["img1.jpg", "img2.jpg", "img3.jpg"])
-        .unwrap();
-
-    let images = product.get_files("images").unwrap();
-    assert_eq!(images.len(), 3);
-    assert_eq!(images[0].key, "img1.jpg");
-    assert_eq!(images[1].key, "img2.jpg");
-    assert_eq!(images[2].key, "img3.jpg");
-}
-
-#[test]
-fn test_has_attachments_attach_many_accumulates() {
+fn test_has_attachments_attach_many_appends_in_order() {
     let mut product = TestProduct::new(1, "Test Product");
 
     product.attach("images", "img1.jpg").unwrap();
-    product.attach("images", "img2.jpg").unwrap();
     product
-        .attach_many("images", vec!["img3.jpg", "img4.jpg"])
+        .attach_many("images", vec!["img2.jpg", "img3.jpg", "img4.jpg"])
         .unwrap();
 
-    assert_eq!(product.count_files("images").unwrap(), 4);
+    assert_eq!(
+        product.keys("images"),
+        ["img1.jpg", "img2.jpg", "img3.jpg", "img4.jpg"]
+    );
 }
 
 #[test]
@@ -102,33 +86,23 @@ fn test_has_attachments_detach_specific() {
         .unwrap();
     product.detach("images", Some("img2.jpg")).unwrap();
 
-    let images = product.get_files("images").unwrap();
-    assert_eq!(images.len(), 2);
-    assert!(images.iter().all(|f| f.key != "img2.jpg"));
+    assert_eq!(product.keys("images"), ["img1.jpg", "img3.jpg"]);
 }
 
 #[test]
-fn test_has_attachments_detach_all() {
-    let mut product = TestProduct::new(1, "Test Product");
-
-    product
-        .attach_many("images", vec!["img1.jpg", "img2.jpg", "img3.jpg"])
-        .unwrap();
-    product.detach("images", None).unwrap();
-
-    assert!(!product.has_files("images").unwrap());
-    assert_eq!(product.count_files("images").unwrap(), 0);
-}
-
-#[test]
-fn test_has_attachments_detach_has_one() {
+fn test_has_attachments_detach_without_a_key_clears_the_relation() {
     let mut product = TestProduct::new(1, "Test Product");
 
     product.attach("thumbnail", "thumb.jpg").unwrap();
-    assert!(product.has_files("thumbnail").unwrap());
+    product
+        .attach_many("images", vec!["img1.jpg", "img2.jpg", "img3.jpg"])
+        .unwrap();
 
-    product.detach("thumbnail", None).unwrap();
-    assert!(!product.has_files("thumbnail").unwrap());
+    for relation in ["thumbnail", "images"] {
+        product.detach(relation, None).unwrap();
+        assert!(!product.has_files(relation).unwrap(), "{relation}");
+        assert_eq!(product.count_files(relation).unwrap(), 0, "{relation}");
+    }
 }
 
 #[test]
@@ -141,22 +115,9 @@ fn test_has_attachments_sync_replaces_all() {
     product
         .sync("images", vec!["new1.jpg", "new2.jpg"])
         .unwrap();
+    assert_eq!(product.keys("images"), ["new1.jpg", "new2.jpg"]);
 
-    let images = product.get_files("images").unwrap();
-    assert_eq!(images.len(), 2);
-    assert_eq!(images[0].key, "new1.jpg");
-    assert_eq!(images[1].key, "new2.jpg");
-}
-
-#[test]
-fn test_has_attachments_sync_empty_clears() {
-    let mut product = TestProduct::new(1, "Test Product");
-
-    product
-        .attach_many("images", vec!["img1.jpg", "img2.jpg"])
-        .unwrap();
     product.sync("images", vec![]).unwrap();
-
     assert!(!product.has_files("images").unwrap());
 }
 
@@ -197,22 +158,23 @@ fn test_has_attachments_with_metadata() {
 }
 
 #[test]
-fn test_has_attachments_invalid_relation() {
+fn test_has_attachments_refuses_an_unknown_relation_and_many_files_on_a_has_one() {
     let mut product = TestProduct::new(1, "Test Product");
 
-    let result = product.attach("unknown_relation", "file.jpg");
-    assert!(result.is_err());
+    let error = product
+        .attach("unknown_relation", "file.jpg")
+        .expect_err("an undeclared relation is refused");
+    assert!(
+        error.to_string().contains("Unknown file relation"),
+        "{error}"
+    );
 
-    let err = result.unwrap_err();
-    assert!(err.to_string().contains("Unknown file relation"));
-}
-
-#[test]
-fn test_has_attachments_attach_many_on_has_one() {
-    let mut product = TestProduct::new(1, "Test Product");
-
-    let result = product.attach_many("thumbnail", vec!["img1.jpg", "img2.jpg"]);
-    assert!(result.is_err());
+    assert!(
+        product
+            .attach_many("thumbnail", vec!["img1.jpg", "img2.jpg"])
+            .is_err()
+    );
+    assert!(!product.has_files("thumbnail").unwrap());
 }
 
 #[test]
@@ -254,13 +216,14 @@ fn test_has_attachments_json_persistence() {
 }
 
 #[test]
-fn test_file_attachment_unicode_filename() {
-    let attachment = FileAttachment::new("uploads/æ–‡æ¡£/å›¾ç‰‡.jpg");
-    assert_eq!(attachment.filename, "å›¾ç‰‡.jpg");
-}
-
-#[test]
-fn test_file_attachment_special_characters() {
-    let attachment = FileAttachment::new("uploads/file with spaces (1).pdf");
-    assert_eq!(attachment.filename, "file with spaces (1).pdf");
+fn test_file_attachment_filename_is_the_last_path_segment() {
+    for (key, filename) in [
+        ("uploads/文档/图片.jpg", "图片.jpg"),
+        (
+            "uploads/file with spaces (1).pdf",
+            "file with spaces (1).pdf",
+        ),
+    ] {
+        assert_eq!(FileAttachment::new(key).filename, filename, "{key}");
+    }
 }

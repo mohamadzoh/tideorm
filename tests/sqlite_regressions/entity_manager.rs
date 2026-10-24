@@ -1,4 +1,5 @@
-//! Entity-manager races and removals.
+//! The entity manager: flushes racing other work, removals, the identity map
+//! and relation syncs.
 
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;

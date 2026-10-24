@@ -160,86 +160,75 @@ async fn ranked_search_relations_keep_the_read_database() {
     assert_eq!(ranked[0].record.posts.load().await.unwrap()[0].id, 10);
 }
 
+/// Rows read or written through the global database keep it: once another
+/// database is the global one, their relations still load from the first,
+/// whether a read, an upsert or a batch insert returned them, in a transaction
+/// or not.
 #[tokio::test]
-async fn upsert_results_keep_the_write_database() {
-    let tenant = users_and_posts("tenant", 10).await;
-    let global = users_and_posts("global", 20).await;
-    let incoming = || User {
-        id: 1,
-        name: "updated".into(),
-        active: true,
-        posts: Default::default(),
-    };
-    Database::set_global(tenant.clone()).unwrap();
-    let updated = User::on_conflict(vec!["id"])
-        .insert(incoming())
-        .await
-        .unwrap();
-    let unchanged = User::on_conflict(vec!["id"])
-        .update_columns(vec![])
-        .insert(incoming())
-        .await
-        .unwrap();
-    let transaction_row = tenant
-        .transaction(move |_| {
-            Box::pin(async move { User::on_conflict(vec!["id"]).insert(incoming()).await })
-        })
-        .await
-        .unwrap();
-    Database::set_global(global).unwrap();
-    for row in [updated, unchanged, transaction_row] {
-        assert_eq!(row.posts.load().await.unwrap()[0].id, 10);
-    }
-}
-
-#[tokio::test]
-async fn bulk_insert_results_keep_the_write_database() {
-    let tenant = users_and_posts("tenant", 10).await;
-    let global = users_and_posts("global", 20).await;
-    tenant.exec_raw("DELETE FROM review_users").await.unwrap();
-    Database::set_global(tenant.clone()).unwrap();
-    let incoming = |id| User {
-        id,
-        name: "inserted".into(),
-        active: true,
-        posts: Default::default(),
-    };
-    // Multi-row RETURNING and the one-row fallback must both capture origin.
-    let batch = User::insert_all(vec![incoming(1), incoming(2)])
-        .await
-        .unwrap();
-    tenant.exec_raw("DELETE FROM review_users").await.unwrap();
-    let single = User::insert_all(vec![incoming(1)]).await.unwrap();
-    tenant.exec_raw("DELETE FROM review_users").await.unwrap();
-    let transaction_rows = tenant
-        .transaction(move |_| {
-            Box::pin(async move { User::insert_all(vec![incoming(1), incoming(2)]).await })
-        })
-        .await
-        .unwrap();
-    Database::set_global(global).unwrap();
-    for rows in [batch, single, transaction_rows] {
-        assert_eq!(rows[0].posts.load().await.unwrap()[0].id, 10);
-    }
-}
-
-#[tokio::test]
-async fn convenience_reads_retain_their_origin() {
+async fn read_and_written_rows_keep_their_database() {
     let tenant = users_and_posts("tenant", 10).await;
     let other = users_and_posts("other", 20).await;
     Database::set_global(tenant.clone()).unwrap();
-    let mut rows = User::all().await.unwrap();
-    rows.push(User::first().await.unwrap().unwrap());
-    rows.push(User::last().await.unwrap().unwrap());
-    rows.extend(User::paginate(1, 10).await.unwrap());
-    let transactional = tenant
-        .transaction(|_| Box::pin(async { User::paginate(1, 10).await }))
+    let user = |id| User {
+        id,
+        name: "written".into(),
+        active: true,
+        posts: Default::default(),
+    };
+    let mut rows = vec![
+        ("all", User::all().await.unwrap().remove(0)),
+        ("first", User::first().await.unwrap().unwrap()),
+        ("last", User::last().await.unwrap().unwrap()),
+        ("paginate", User::paginate(1, 10).await.unwrap().remove(0)),
+        (
+            "paginate in a transaction",
+            tenant
+                .transaction(|_| Box::pin(async { User::paginate(1, 10).await }))
+                .await
+                .unwrap()
+                .remove(0),
+        ),
+        (
+            "upsert",
+            User::on_conflict(vec!["id"]).insert(user(1)).await.unwrap(),
+        ),
+        (
+            "upsert updating nothing",
+            User::on_conflict(vec!["id"])
+                .update_columns(vec![])
+                .insert(user(1))
+                .await
+                .unwrap(),
+        ),
+        (
+            "upsert in a transaction",
+            tenant
+                .transaction(move |_| {
+                    Box::pin(async move { User::on_conflict(vec!["id"]).insert(user(1)).await })
+                })
+                .await
+                .unwrap(),
+        ),
+    ];
+    // Multi-row RETURNING and the one-row path alike.
+    for (case, users) in [
+        ("batch insert", vec![user(1), user(2)]),
+        ("one-row batch insert", vec![user(1)]),
+    ] {
+        tenant.exec_raw("DELETE FROM review_users").await.unwrap();
+        rows.push((case, User::insert_all(users).await.unwrap().remove(0)));
+    }
+    tenant.exec_raw("DELETE FROM review_users").await.unwrap();
+    let mut inserted = tenant
+        .transaction(move |_| {
+            Box::pin(async move { User::insert_all(vec![user(1), user(2)]).await })
+        })
         .await
         .unwrap();
-    rows.extend(transactional);
+    rows.push(("batch insert in a transaction", inserted.remove(0)));
     Database::set_global(other).unwrap();
-    for row in rows {
-        assert_eq!(row.posts.load().await.unwrap()[0].id, 10);
+    for (case, row) in rows {
+        assert_eq!(row.posts.load().await.unwrap()[0].id, 10, "{case}");
     }
     Database::reset_global();
 }

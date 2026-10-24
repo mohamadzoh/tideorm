@@ -150,32 +150,61 @@ async fn bulk_rollback_restores_dirty_tracking_baselines() {
 #[tokio::test]
 async fn sqlite_aborted_transactions_block_writes_and_recover_the_pool() {
     let db = chunk_projection_database().await;
-    // A normal insert can abort the transaction through a trigger; callers
+    // A plain update can abort the transaction through a trigger; callers
     // need not use any raw transaction-control statements themselves.
-    db.exec_raw("CREATE TRIGGER abort_nine BEFORE UPDATE ON review_chunk_projection WHEN NEW.stored_id=9 BEGIN SELECT RAISE(ROLLBACK, 'abort fixture'); END").await.unwrap();
+    db.exec_raw(
+        "CREATE TRIGGER abort_nine BEFORE UPDATE ON review_chunk_projection \
+         WHEN NEW.stored_id=9 BEGIN SELECT RAISE(ROLLBACK, 'abort fixture'); END",
+    )
+    .await
+    .unwrap();
+    let set_rank = |rank: i64, id: i64| {
+        format!("UPDATE review_chunk_projection SET rank={rank} WHERE stored_id={id}")
+    };
     for nested in [false, true] {
         let handle = db.clone();
-        let result = db.transaction(|_| Box::pin(async move {
-            handle.exec_raw("UPDATE review_chunk_projection SET rank=1 WHERE stored_id=7").await?;
-            if nested {
-                let inner = handle.clone();
-                let failure = handle.transaction(|_| Box::pin(async move {
-                    assert!(inner.exec_raw("UPDATE review_chunk_projection SET rank=2 WHERE stored_id=9").await.is_err());
-                    assert!(inner.exec_raw("UPDATE review_chunk_projection SET rank=3 WHERE stored_id=7").await.is_err());
+        let result = db
+            .transaction(|_| {
+                Box::pin(async move {
+                    handle.exec_raw(&set_rank(1, 7)).await?;
+                    if nested {
+                        let inner = handle.clone();
+                        let failure = handle
+                            .transaction(|_| {
+                                Box::pin(async move {
+                                    assert!(inner.exec_raw(&set_rank(2, 9)).await.is_err());
+                                    assert!(inner.exec_raw(&set_rank(3, 7)).await.is_err());
+                                    Ok(())
+                                })
+                            })
+                            .await;
+                        assert!(failure.is_err());
+                    } else {
+                        assert!(handle.exec_raw(&set_rank(2, 9)).await.is_err());
+                    }
+                    // A transaction error saying why, as the refused commit is; it
+                    // used to be an internal one.
+                    let refused = handle.exec_raw(&set_rank(4, 7)).await.unwrap_err();
+                    assert!(
+                        matches!(refused, tideorm::Error::Transaction { .. }),
+                        "{refused:?}"
+                    );
+                    assert!(
+                        refused
+                            .to_string()
+                            .contains("SQLite roll the whole transaction back"),
+                        "{refused}"
+                    );
+                    assert!(
+                        handle
+                            .transaction(|_| Box::pin(async { Ok(()) }))
+                            .await
+                            .is_err()
+                    );
                     Ok(())
-                })).await;
-                assert!(failure.is_err());
-            } else {
-                assert!(handle.exec_raw("UPDATE review_chunk_projection SET rank=2 WHERE stored_id=9").await.is_err());
-            }
-            // A transaction error saying why, as the refused commit is; it
-            // used to be an internal one.
-            let refused = handle.exec_raw("UPDATE review_chunk_projection SET rank=4 WHERE stored_id=7").await.unwrap_err();
-            assert!(matches!(refused, tideorm::Error::Transaction { .. }), "{refused:?}");
-            assert!(refused.to_string().contains("SQLite roll the whole transaction back"), "{refused}");
-            assert!(handle.transaction(|_| Box::pin(async { Ok(()) })).await.is_err());
-            Ok(())
-        })).await;
+                })
+            })
+            .await;
         assert!(result.is_err());
         assert_eq!(
             ChunkProjection::find_with(7, &db)
@@ -195,9 +224,7 @@ async fn sqlite_aborted_transactions_block_writes_and_recover_the_pool() {
                         .await
                         .is_err()
                 );
-                fresh
-                    .exec_raw("UPDATE review_chunk_projection SET rank=81 WHERE stored_id=7")
-                    .await?;
+                fresh.exec_raw(&set_rank(81, 7)).await?;
                 Ok(())
             })
         })
@@ -211,9 +238,7 @@ async fn sqlite_aborted_transactions_block_writes_and_recover_the_pool() {
                 .rank,
             81
         );
-        db.exec_raw("UPDATE review_chunk_projection SET rank=80 WHERE stored_id=7")
-            .await
-            .unwrap();
+        db.exec_raw(&set_rank(80, 7)).await.unwrap();
     }
 }
 
@@ -493,7 +518,8 @@ async fn side_by_side_savepoints_in_one_transaction_take_turns() {
     };
 
     let db = memory_database(
-        "CREATE TABLE side_by_side_rows(id INTEGER PRIMARY KEY AUTOINCREMENT,          email TEXT NOT NULL UNIQUE)",
+        "CREATE TABLE side_by_side_rows(id INTEGER PRIMARY KEY AUTOINCREMENT, \
+         email TEXT NOT NULL UNIQUE)",
     )
     .await;
     let handle = db.clone();
@@ -614,12 +640,14 @@ async fn batch_snapshots_are_undone_before_the_enclosing_transaction_commits() {
     let checked = first.clone();
     db.transaction(move |_| {
         Box::pin(async move {
-            // Explicit auto-increment keys use per-row inserts. The first load
-            // must be undone by this failed batch, even if its parent commits.
+            // A batch mixing a held auto-increment key with an unset one
+            // inserts row by row, so the first row is written, and its
+            // baseline recorded, before the second fails. The failed batch
+            // must undo that baseline, though its parent commits.
             let error = Row::insert_all(vec![
                 first,
                 Row {
-                    id: 11,
+                    id: 0,
                     name: "taken".into(),
                 },
             ])
@@ -642,4 +670,28 @@ async fn batch_snapshots_are_undone_before_the_enclosing_transaction_commits() {
         .unwrap(),
         None
     );
+}
+
+/// A transaction handle that leaks out of a closure that fails is reported as
+/// the leak, not hidden behind the closure's own error.
+#[tokio::test]
+async fn a_leaked_handle_is_reported_even_when_the_closure_fails() {
+    let db = memory_database("").await;
+    let stray = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let keep = stray.clone();
+    let error = db
+        .transaction(move |_| {
+            Box::pin(async move {
+                *keep.lock().unwrap() = Some(tideorm::database::__current_db()?);
+                Err::<(), _>(tideorm::Error::query("rollback with a leaked handle"))
+            })
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("transaction handle leaked outside the transaction scope"),
+        "{error}"
+    );
+    drop(stray.lock().unwrap().take());
 }

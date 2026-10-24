@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::json;
 
 mod user_cols {
     use tideorm::columns::Column;
@@ -10,175 +11,163 @@ mod user_cols {
     pub const ACTIVE: Column<bool> = Column::new("active");
 }
 
+/// Each typed-column operator builds the condition it names on that column,
+/// for plain, text, nullable, boolean and float columns alike.
 #[test]
-fn test_integer_column_eq() {
-    let cond = user_cols::ID.eq(42i64);
-    assert_eq!(cond.column, "id");
-    assert_eq!(cond.operator, Operator::Eq);
-    assert_eq!(cond.value, ConditionValue::Single(serde_json::json!(42)));
-}
+fn typed_column_operators_build_their_conditions() {
+    use user_cols::{ACTIVE, AGE, ID, NAME, SCORE};
 
-#[test]
-fn test_integer_column_ne() {
-    let cond = user_cols::ID.ne(99i64);
-    assert_eq!(cond.column, "id");
-    assert_eq!(cond.operator, Operator::NotEq);
-    assert_eq!(cond.value, ConditionValue::Single(serde_json::json!(99)));
-}
+    let single = ConditionValue::Single;
+    let range = ConditionValue::Range;
+    let cases = [
+        ("id eq", ID.eq(42i64), "id", Operator::Eq, single(json!(42))),
+        (
+            "id ne",
+            ID.ne(99i64),
+            "id",
+            Operator::NotEq,
+            single(json!(99)),
+        ),
+        ("id gt", ID.gt(10i64), "id", Operator::Gt, single(json!(10))),
+        (
+            "id gte",
+            ID.gte(10i64),
+            "id",
+            Operator::Gte,
+            single(json!(10)),
+        ),
+        (
+            "id lt",
+            ID.lt(100i64),
+            "id",
+            Operator::Lt,
+            single(json!(100)),
+        ),
+        (
+            "id lte",
+            ID.lte(100i64),
+            "id",
+            Operator::Lte,
+            single(json!(100)),
+        ),
+        (
+            "id between",
+            ID.between(10i64, 100i64),
+            "id",
+            Operator::Between,
+            range(json!(10), json!(100)),
+        ),
+        (
+            "id in",
+            ID.is_in(vec![1i64, 2, 3, 4, 5]),
+            "id",
+            Operator::In,
+            ConditionValue::List((1..=5).map(|id| json!(id)).collect()),
+        ),
+        (
+            "id not in",
+            ID.not_in(vec![1i64, 2]),
+            "id",
+            Operator::NotIn,
+            ConditionValue::List(vec![json!(1), json!(2)]),
+        ),
+        (
+            "name eq",
+            NAME.eq("Alice"),
+            "name",
+            Operator::Eq,
+            single(json!("Alice")),
+        ),
+        (
+            "name like",
+            NAME.like("%test%"),
+            "name",
+            Operator::Like,
+            single(json!("%test%")),
+        ),
+        (
+            "name not like",
+            NAME.not_like("%spam%"),
+            "name",
+            Operator::NotLike,
+            single(json!("%spam%")),
+        ),
+        (
+            "name contains",
+            NAME.contains("test"),
+            "name",
+            Operator::LikeEscaped,
+            single(json!("%test%")),
+        ),
+        (
+            "name starts with",
+            NAME.starts_with("Mr."),
+            "name",
+            Operator::LikeEscaped,
+            single(json!("Mr.%")),
+        ),
+        (
+            "name ends with",
+            NAME.ends_with("son"),
+            "name",
+            Operator::LikeEscaped,
+            single(json!("%son")),
+        ),
+        (
+            "name in",
+            NAME.is_in(vec!["Alice", "Bob", "Charlie"]),
+            "name",
+            Operator::In,
+            ConditionValue::List(vec![json!("Alice"), json!("Bob"), json!("Charlie")]),
+        ),
+        ("age gt", AGE.gt(18), "age", Operator::Gt, single(json!(18))),
+        (
+            "age between",
+            AGE.between(18, 65),
+            "age",
+            Operator::Between,
+            range(json!(18), json!(65)),
+        ),
+        (
+            "age is null",
+            AGE.is_null(),
+            "age",
+            Operator::IsNull,
+            ConditionValue::None,
+        ),
+        (
+            "age is not null",
+            AGE.is_not_null(),
+            "age",
+            Operator::IsNotNull,
+            ConditionValue::None,
+        ),
+        (
+            "active eq",
+            ACTIVE.eq(true),
+            "active",
+            Operator::Eq,
+            single(json!(true)),
+        ),
+        (
+            "score gt",
+            SCORE.gt(90.5),
+            "score",
+            Operator::Gt,
+            single(json!(90.5)),
+        ),
+        (
+            "score between",
+            SCORE.between(0.0, 100.0),
+            "score",
+            Operator::Between,
+            range(json!(0.0), json!(100.0)),
+        ),
+    ];
 
-#[test]
-fn test_integer_column_comparisons() {
-    let gt = user_cols::ID.gt(10i64);
-    assert_eq!(gt.operator, Operator::Gt);
-
-    let gte = user_cols::ID.gte(10i64);
-    assert_eq!(gte.operator, Operator::Gte);
-
-    let lt = user_cols::ID.lt(100i64);
-    assert_eq!(lt.operator, Operator::Lt);
-
-    let lte = user_cols::ID.lte(100i64);
-    assert_eq!(lte.operator, Operator::Lte);
-}
-
-#[test]
-fn test_integer_column_between() {
-    let cond = user_cols::ID.between(10i64, 100i64);
-    assert_eq!(cond.column, "id");
-    assert_eq!(cond.operator, Operator::Between);
-    assert_eq!(
-        cond.value,
-        ConditionValue::Range(serde_json::json!(10), serde_json::json!(100))
-    );
-}
-
-#[test]
-fn test_integer_column_in() {
-    let cond = user_cols::ID.is_in(vec![1i64, 2, 3, 4, 5]);
-    assert_eq!(cond.column, "id");
-    assert_eq!(cond.operator, Operator::In);
-    assert_eq!(
-        cond.value,
-        ConditionValue::List((1..=5).map(|id| serde_json::json!(id)).collect())
-    );
-}
-
-#[test]
-fn test_integer_column_not_in() {
-    let cond = user_cols::ID.not_in(vec![1i64, 2]);
-    assert_eq!(cond.operator, Operator::NotIn);
-}
-
-#[test]
-fn test_string_column_eq() {
-    let cond = user_cols::NAME.eq("Alice");
-    assert_eq!(cond.column, "name");
-    assert_eq!(cond.operator, Operator::Eq);
-    assert_eq!(
-        cond.value,
-        ConditionValue::Single(serde_json::json!("Alice"))
-    );
-}
-
-#[test]
-fn test_string_column_like() {
-    let cond = user_cols::NAME.like("%test%");
-    assert_eq!(cond.column, "name");
-    assert_eq!(cond.operator, Operator::Like);
-    assert_eq!(
-        cond.value,
-        ConditionValue::Single(serde_json::json!("%test%"))
-    );
-}
-
-#[test]
-fn test_string_column_not_like() {
-    let cond = user_cols::NAME.not_like("%spam%");
-    assert_eq!(cond.operator, Operator::NotLike);
-}
-
-#[test]
-fn test_string_column_contains() {
-    let cond = user_cols::NAME.contains("test");
-    assert_eq!(cond.operator, Operator::LikeEscaped);
-    assert_eq!(
-        cond.value,
-        ConditionValue::Single(serde_json::json!("%test%"))
-    );
-}
-
-#[test]
-fn test_string_column_starts_with() {
-    let cond = user_cols::NAME.starts_with("Mr.");
-    assert_eq!(cond.operator, Operator::LikeEscaped);
-    assert_eq!(
-        cond.value,
-        ConditionValue::Single(serde_json::json!("Mr.%"))
-    );
-}
-
-#[test]
-fn test_string_column_ends_with() {
-    let cond = user_cols::NAME.ends_with("son");
-    assert_eq!(cond.operator, Operator::LikeEscaped);
-    assert_eq!(
-        cond.value,
-        ConditionValue::Single(serde_json::json!("%son"))
-    );
-}
-
-#[test]
-fn test_string_column_in() {
-    let cond = user_cols::NAME.is_in(vec!["Alice", "Bob", "Charlie"]);
-    assert_eq!(cond.operator, Operator::In);
-    assert_eq!(
-        cond.value,
-        ConditionValue::List(vec![
-            serde_json::json!("Alice"),
-            serde_json::json!("Bob"),
-            serde_json::json!("Charlie")
-        ])
-    );
-}
-
-#[test]
-fn test_nullable_column_comparisons() {
-    let gt = user_cols::AGE.gt(18);
-    assert_eq!(gt.column, "age");
-    assert_eq!(gt.operator, Operator::Gt);
-
-    let between = user_cols::AGE.between(18, 65);
-    assert_eq!(between.operator, Operator::Between);
-}
-
-#[test]
-fn test_nullable_column_is_null() {
-    let cond = user_cols::AGE.is_null();
-    assert_eq!(cond.column, "age");
-    assert_eq!(cond.operator, Operator::IsNull);
-}
-
-#[test]
-fn test_nullable_column_is_not_null() {
-    let cond = user_cols::AGE.is_not_null();
-    assert_eq!(cond.column, "age");
-    assert_eq!(cond.operator, Operator::IsNotNull);
-}
-
-#[test]
-fn test_bool_column_eq() {
-    let cond = user_cols::ACTIVE.eq(true);
-    assert_eq!(cond.column, "active");
-    assert_eq!(cond.operator, Operator::Eq);
-    assert_eq!(cond.value, ConditionValue::Single(serde_json::json!(true)));
-}
-
-#[test]
-fn test_float_column_comparisons() {
-    let gt = user_cols::SCORE.gt(90.5);
-    assert_eq!(gt.column, "score");
-    assert_eq!(gt.operator, Operator::Gt);
-
-    let between = user_cols::SCORE.between(0.0, 100.0);
-    assert_eq!(between.operator, Operator::Between);
+    for (case, condition, column, operator, value) in cases {
+        assert_eq!(condition.column, column, "{case}");
+        assert_eq!(condition.operator, operator, "{case}");
+        assert_eq!(condition.value, value, "{case}");
+    }
 }

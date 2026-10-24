@@ -216,7 +216,3 @@ impl std::fmt::Debug for Database {
             .finish()
     }
 }
-
-#[cfg(test)]
-#[path = "../../tests/unit/database_core_tests.rs"]
-mod tests;

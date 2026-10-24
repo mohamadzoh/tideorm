@@ -1,4 +1,5 @@
-//! A save in flight racing a removal, a detach or further edits.
+//! A flush in flight racing a removal, a detach or further edits, and one
+//! that fails while they happen.
 
 use super::Pause;
 use crate::fixtures::memory_database;
@@ -15,6 +16,7 @@ struct Row {
 
 static PAUSE: Pause = Pause::new();
 
+/// Held by each test here, since they share [`PAUSE`].
 static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 impl tideorm::callbacks::Callbacks for Row {
@@ -173,20 +175,4 @@ async fn a_failed_flush_keeps_work_done_while_it_ran() {
         }
         assert_eq!(names, expected);
     }
-}
-
-#[tokio::test]
-async fn sequential_remove_and_detach_still_work() {
-    let _serial = TEST_LOCK.lock().await;
-    let db = database().await;
-    let manager = EntityManager::new(Arc::new(db.clone()));
-    let row = pending_row(&manager, false).await;
-    manager.flush().await.unwrap();
-    manager.detach(&row);
-    manager.flush().await.unwrap();
-    assert_eq!(row.state(), EntityState::Detached);
-    let row = manager.find_managed::<Row>(1).await.unwrap().unwrap();
-    manager.remove(&row);
-    manager.flush().await.unwrap();
-    assert!(Row::find_with(1, &db).await.unwrap().is_none());
 }

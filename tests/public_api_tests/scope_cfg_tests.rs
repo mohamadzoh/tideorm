@@ -1,3 +1,9 @@
+//! `#[tideorm::scopes]` carries each `cfg` and `cfg_attr(.., cfg(..))` of a
+//! scope method, parameter or impl block onto the code it generates for it.
+//! Dropped, the generated code would call a method or forward an argument
+//! that is configured out, or name a type that does not exist, so this file
+//! compiles only if every one is carried.
+
 use tideorm::prelude::*;
 
 #[tideorm::model(table = "conditional_scope_models")]

@@ -1,5 +1,5 @@
 //! Helpers the `#[path]`-included unit tests share, each gated on the
-//! backend it needs.
+//! features it needs.
 
 /// One lock for every unit test that installs a global database, so none
 /// swaps the connection or the query cache under another.

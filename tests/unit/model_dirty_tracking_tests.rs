@@ -285,3 +285,142 @@ fn a_change_to_or_from_a_non_finite_float_shows() {
     assert_eq!(changed_fields(&back).unwrap(), Some(vec!["ratio"]));
     forget_model(&edited).unwrap();
 }
+
+/// Baselines recorded by real reads and writes.
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+mod stored {
+    use crate::model::Model;
+
+    #[tideorm::model(table = "dirty_tracking_stored_users")]
+    struct StoredUser {
+        #[tideorm(primary_key, auto_increment)]
+        id: i64,
+        name: String,
+    }
+
+    /// Install a database with the query cache on, holding Alice.
+    async fn saved_alice() -> (crate::Database, StoredUser) {
+        let db = crate::test_support::install_sqlite_global(&[
+            "CREATE TABLE dirty_tracking_stored_users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
+        ])
+        .await;
+        crate::test_support::set_query_cache(true);
+        let alice = StoredUser {
+            id: 0,
+            name: "Alice".to_string(),
+        }
+        .save()
+        .await
+        .expect("seed save should succeed");
+        (db, alice)
+    }
+
+    async fn find(id: i64) -> StoredUser {
+        StoredUser::find(id)
+            .await
+            .expect("find should succeed")
+            .expect("saved model should exist")
+    }
+
+    fn changed(model: &StoredUser) -> Option<Vec<&'static str>> {
+        model.changed_fields().expect("dirty check should succeed")
+    }
+
+    fn original_name(model: &StoredUser) -> Option<Option<serde_json::Value>> {
+        model
+            .original_value("name")
+            .expect("original value lookup should succeed")
+    }
+
+    /// A loaded model compares against the row it was read as, and after an
+    /// update against what the update wrote, as does any stale copy of it.
+    #[tokio::test]
+    async fn loaded_models_track_changes_against_the_latest_stored_baseline() {
+        let _guard = crate::test_support::global_db_lock().lock().await;
+        let (_db, alice) = saved_alice().await;
+        let alice_json = Some(Some(serde_json::json!("Alice")));
+        let bob_json = Some(Some(serde_json::json!("Bob")));
+
+        let mut first = find(alice.id).await;
+        let mut second = find(alice.id).await;
+        assert_eq!(changed(&first), Some(Vec::new()));
+        assert_eq!(original_name(&first), alice_json);
+
+        first.name = "Bob".to_string();
+        assert_eq!(changed(&first), Some(vec!["name"]));
+        assert_eq!(original_name(&first), alice_json);
+
+        let mut first = first.update().await.expect("update should succeed");
+        assert_eq!(changed(&first), Some(Vec::new()));
+        assert_eq!(original_name(&first), bob_json);
+
+        first.name = "Carol".to_string();
+        assert_eq!(changed(&first), Some(vec!["name"]));
+        assert_eq!(original_name(&first), bob_json);
+
+        second.name = "Dana".to_string();
+        assert_eq!(
+            changed(&second),
+            Some(vec!["name"]),
+            "a stale copy compares against the latest baseline"
+        );
+        assert_eq!(original_name(&second), bob_json);
+
+        crate::test_support::reset_globals_and_cache();
+    }
+
+    #[tokio::test]
+    async fn cache_hits_restore_dirty_tracking_snapshots() {
+        let _guard = crate::test_support::global_db_lock().lock().await;
+        let _db = saved_alice().await;
+
+        let first = crate::test_support::cached_rows::<StoredUser>().await;
+        assert_eq!(first.len(), 1);
+
+        crate::model::__clear_dirty_snapshots();
+
+        let mut cached = crate::test_support::cached_rows::<StoredUser>().await;
+        cached[0].name = "Cached Bob".to_string();
+
+        assert_eq!(changed(&cached[0]), Some(vec!["name"]));
+        assert_eq!(
+            original_name(&cached[0]),
+            Some(Some(serde_json::json!("Alice")))
+        );
+
+        crate::test_support::reset_globals_and_cache();
+    }
+
+    /// A baseline recorded inside a transaction that rolls back is withdrawn:
+    /// the row is what it was, so the baseline from before comes back. The
+    /// update's "Bob" stayed, and an unchanged model read before it reported a
+    /// change.
+    #[tokio::test]
+    async fn a_rolled_back_update_restores_the_baseline() {
+        let _guard = crate::test_support::global_db_lock().lock().await;
+        let (db, alice) = saved_alice().await;
+        let loaded = find(alice.id).await;
+
+        let edited = StoredUser {
+            name: "Bob".to_string(),
+            ..loaded.clone()
+        };
+        let result: crate::error::Result<()> = db
+            .transaction(|_| {
+                Box::pin(async move {
+                    edited.update().await?;
+                    Err(crate::error::Error::query("roll it back"))
+                })
+            })
+            .await;
+        assert!(result.is_err(), "the transaction should roll back");
+
+        assert_eq!(changed(&loaded), Some(Vec::new()));
+        assert_eq!(
+            original_name(&loaded),
+            Some(Some(serde_json::json!("Alice")))
+        );
+
+        crate::test_support::reset_globals_and_cache();
+    }
+}

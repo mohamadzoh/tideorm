@@ -1,57 +1,8 @@
 use super::*;
 
-#[test]
-fn test_union_type_sql() {
-    assert_eq!(UnionType::Union.as_sql(), "UNION");
-    assert_eq!(UnionType::UnionAll.as_sql(), "UNION ALL");
-}
-
-#[test]
-fn test_union_clause_creation() {
-    let clause = UnionClause::new(
-        UnionType::Union,
-        "SELECT * FROM users WHERE active = true".to_string(),
-    );
-    assert_eq!(clause.union_type, UnionType::Union);
-    assert!(clause.query_sql.contains("active = true"));
-    assert!(clause.params.is_empty());
-}
-
-#[test]
-fn test_union_operand_binds_values_instead_of_inlining_them() {
-    let (sql, params) = QueryBuilder::<QueryTestUser>::new()
-        .where_eq("name", "alice")
-        .union_all(QueryBuilder::<QueryTestUser>::new().where_eq("name", "bob"))
-        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
-
-    assert!(sql.contains("WHERE \"name\" = $1"), "sql: {sql}");
-    assert!(sql.contains("UNION ALL (SELECT"), "sql: {sql}");
-    assert!(sql.contains("WHERE \"name\" = $2)"), "sql: {sql}");
-    assert!(!sql.contains("'bob'"), "sql: {sql}");
-    assert_eq!(params.len(), 2);
-    assert!(matches!(params.first(), Some(Value::String(Some(value))) if value == "alice"));
-    assert!(matches!(params.get(1), Some(Value::String(Some(value))) if value == "bob"));
-}
-
-#[test]
-fn test_cte_body_binds_values_instead_of_inlining_them() {
-    let (sql, params) = QueryBuilder::<QueryTestUser>::new()
-        .with_query(
-            "recent_users",
-            QueryBuilder::<QueryTestUser>::new().where_eq("name", "carol"),
-        )
-        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
-
-    assert!(
-        sql.starts_with("WITH \"recent_users\" AS (SELECT"),
-        "sql: {sql}"
-    );
-    assert!(sql.contains("WHERE \"name\" = $1)"), "sql: {sql}");
-    assert!(!sql.contains("'carol'"), "sql: {sql}");
-    assert_eq!(params.len(), 1);
-    assert!(matches!(params.first(), Some(Value::String(Some(value))) if value == "carol"));
-}
-
+/// The WITH prefix precedes the base select, which precedes every union
+/// operand, so PostgreSQL's numbered placeholders have to ascend in that same
+/// order, each operand's values bound rather than inlined.
 #[test]
 fn test_postgres_compound_select_renumbers_placeholders_left_to_right() {
     let (sql, params) = QueryBuilder::<QueryTestUser>::new()
@@ -63,30 +14,23 @@ fn test_postgres_compound_select_renumbers_placeholders_left_to_right() {
         .union_all(QueryBuilder::<QueryTestUser>::new().where_eq("name", "union-value"))
         .build_select_sql_with_params_for_db(DatabaseType::Postgres);
 
-    let cte_placeholder = sql
-        .find("$1")
-        .expect("CTE body should bind the first value");
-    let base_placeholder = sql
-        .find("$2")
-        .expect("base select should bind the second value");
-    let union_placeholder = sql
-        .find("$3")
-        .expect("union operand should bind the third value");
-
-    // The WITH prefix precedes the base select, which precedes every union
-    // operand, so the placeholder numbers have to ascend in that same order.
-    assert!(
-        sql.starts_with("WITH \"recent_users\" AS (SELECT"),
-        "sql: {sql}"
+    let columns = "\"query_test_users\".\"id\", \"query_test_users\".\"name\"";
+    assert_eq!(
+        sql,
+        format!(
+            "WITH \"recent_users\" AS (SELECT {columns} FROM \"query_test_users\" WHERE \"name\" = $1) \
+             SELECT {columns} FROM \"query_test_users\" WHERE \"name\" = $2 \
+             UNION ALL (SELECT {columns} FROM \"query_test_users\" WHERE \"name\" = $3)"
+        )
     );
-    assert!(cte_placeholder < base_placeholder, "sql: {sql}");
-    assert!(base_placeholder < union_placeholder, "sql: {sql}");
-    assert!(!sql.contains("$4"), "sql: {sql}");
-
-    assert_eq!(params.len(), 3);
-    assert!(matches!(params.first(), Some(Value::String(Some(value))) if value == "cte-value"));
-    assert!(matches!(params.get(1), Some(Value::String(Some(value))) if value == "base-value"));
-    assert!(matches!(params.get(2), Some(Value::String(Some(value))) if value == "union-value"));
+    assert_eq!(
+        params,
+        vec![
+            Value::String(Some("cte-value".to_string())),
+            Value::String(Some("base-value".to_string())),
+            Value::String(Some("union-value".to_string())),
+        ]
+    );
 }
 
 #[test]
@@ -171,207 +115,170 @@ fn test_union_operand_keeps_comment_like_values_out_of_the_sql() {
 }
 
 #[test]
-fn test_frame_bound_sql() {
+fn test_frame_clauses_render_their_keywords() {
+    for (bound, expected) in [
+        (FrameBound::UnboundedPreceding, "UNBOUNDED PRECEDING"),
+        (FrameBound::UnboundedFollowing, "UNBOUNDED FOLLOWING"),
+        (FrameBound::CurrentRow, "CURRENT ROW"),
+        (FrameBound::Preceding(5), "5 PRECEDING"),
+        (FrameBound::Following(3), "3 FOLLOWING"),
+    ] {
+        assert_eq!(bound.as_sql(), expected);
+    }
+    for (frame, expected) in [
+        (FrameType::Rows, "ROWS"),
+        (FrameType::Range, "RANGE"),
+        (FrameType::Groups, "GROUPS"),
+    ] {
+        assert_eq!(frame.as_sql(), expected);
+    }
+}
+
+#[test]
+fn test_window_function_types_render_their_calls() {
+    for (function, expected) in [
+        (WindowFunctionType::RowNumber, "ROW_NUMBER()"),
+        (WindowFunctionType::Rank, "RANK()"),
+        (WindowFunctionType::DenseRank, "DENSE_RANK()"),
+        (WindowFunctionType::Ntile(4), "NTILE(4)"),
+        (
+            WindowFunctionType::Lag("price".to_string(), Some(1), Some("0".to_string())),
+            "LAG(\"price\", 1, 0)",
+        ),
+        // SQL cannot pass a default without an offset, so it is dropped.
+        (
+            WindowFunctionType::Lag("price".to_string(), None, Some("0".to_string())),
+            "LAG(\"price\")",
+        ),
+        (
+            WindowFunctionType::Lead("date".to_string(), Some(1), None),
+            "LEAD(\"date\", 1)",
+        ),
+        (
+            WindowFunctionType::FirstValue("amount".to_string()),
+            "FIRST_VALUE(\"amount\")",
+        ),
+        (
+            WindowFunctionType::LastValue("total".to_string()),
+            "LAST_VALUE(\"total\")",
+        ),
+        (
+            WindowFunctionType::NthValue("total".to_string(), 2),
+            "NTH_VALUE(\"total\", 2)",
+        ),
+        (
+            WindowFunctionType::Sum("amount".to_string()),
+            "SUM(\"amount\")",
+        ),
+        (
+            WindowFunctionType::Avg("amount".to_string()),
+            "AVG(\"amount\")",
+        ),
+        (WindowFunctionType::Count(None), "COUNT(*)"),
+        (
+            WindowFunctionType::Count(Some("id".to_string())),
+            "COUNT(\"id\")",
+        ),
+        (
+            WindowFunctionType::Min("amount".to_string()),
+            "MIN(\"amount\")",
+        ),
+        (
+            WindowFunctionType::Max("amount".to_string()),
+            "MAX(\"amount\")",
+        ),
+    ] {
+        assert_eq!(function.as_sql_for_db(DatabaseType::Postgres), expected);
+    }
+}
+
+#[test]
+fn test_window_function_renders_its_over_clause() {
+    for (window, expected) in [
+        (
+            WindowFunction::new(WindowFunctionType::RowNumber, "row_num"),
+            "ROW_NUMBER() OVER () AS \"row_num\"",
+        ),
+        (
+            WindowFunction::new(
+                WindowFunctionType::Sum("amount".to_string()),
+                "running_total",
+            )
+            .order_by("date", Order::Asc)
+            .frame(
+                FrameType::Rows,
+                FrameBound::UnboundedPreceding,
+                FrameBound::CurrentRow,
+            ),
+            "SUM(\"amount\") OVER (ORDER BY \"date\" ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS \"running_total\"",
+        ),
+        (
+            WindowFunction::new(WindowFunctionType::Sum("sales".to_string()), "total_sales")
+                .partition_by("region")
+                .order_by("month", Order::Asc)
+                .frame(
+                    FrameType::Range,
+                    FrameBound::UnboundedPreceding,
+                    FrameBound::CurrentRow,
+                ),
+            "SUM(\"sales\") OVER (PARTITION BY \"region\" ORDER BY \"month\" ASC RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS \"total_sales\"",
+        ),
+    ] {
+        assert_eq!(window.to_sql_for_db(DatabaseType::Postgres), expected);
+    }
+}
+
+#[test]
+fn test_cte_sql_uses_backend_identifier_quoting() {
+    let body = "SELECT id, name FROM query_test_users";
+
+    for (db_type, expected) in [
+        (
+            DatabaseType::Postgres,
+            "\"recent\" (\"id\", \"name\") AS (SELECT id, name FROM query_test_users)",
+        ),
+        (
+            DatabaseType::MySQL,
+            "`recent` (`id`, `name`) AS (SELECT id, name FROM query_test_users)",
+        ),
+    ] {
+        let cte = CTE::with_columns("recent", vec!["id", "name"], body.to_string());
+        assert_eq!(cte.to_sql_for_db(db_type), expected);
+    }
     assert_eq!(
-        FrameBound::UnboundedPreceding.as_sql(),
-        "UNBOUNDED PRECEDING"
-    );
-    assert_eq!(
-        FrameBound::UnboundedFollowing.as_sql(),
-        "UNBOUNDED FOLLOWING"
-    );
-    assert_eq!(FrameBound::CurrentRow.as_sql(), "CURRENT ROW");
-    assert_eq!(FrameBound::Preceding(5).as_sql(), "5 PRECEDING");
-    assert_eq!(FrameBound::Following(3).as_sql(), "3 FOLLOWING");
-}
-
-#[test]
-fn test_frame_type_sql() {
-    assert_eq!(FrameType::Rows.as_sql(), "ROWS");
-    assert_eq!(FrameType::Range.as_sql(), "RANGE");
-    assert_eq!(FrameType::Groups.as_sql(), "GROUPS");
-}
-
-#[test]
-fn test_window_function_type_row_number() {
-    assert_eq!(
-        WindowFunctionType::RowNumber.as_sql_for_db(DatabaseType::Postgres),
-        "ROW_NUMBER()"
+        CTE::new("recent", body.to_string()).to_sql_for_db(DatabaseType::Postgres),
+        "\"recent\" AS (SELECT id, name FROM query_test_users)"
     );
 }
 
+/// One recursive CTE makes the statement's whole prefix `WITH RECURSIVE`.
 #[test]
-fn test_window_function_type_rank() {
-    assert_eq!(
-        WindowFunctionType::Rank.as_sql_for_db(DatabaseType::Postgres),
-        "RANK()"
+fn a_recursive_cte_promotes_the_with_keyword() {
+    let query = QueryTestUser::query().with_recursive_cte(
+        "numbers",
+        vec!["n"],
+        "SELECT 1",
+        "SELECT n + 1 FROM numbers WHERE n < 3",
     );
-}
+    query
+        .validate()
+        .expect("a recursive body is a top-level UNION ALL");
 
-#[test]
-fn test_window_function_type_dense_rank() {
-    assert_eq!(
-        WindowFunctionType::DenseRank.as_sql_for_db(DatabaseType::Postgres),
-        "DENSE_RANK()"
+    let sql = query.build_select_sql_for_db(DatabaseType::Postgres);
+    assert!(
+        sql.starts_with(
+            "WITH RECURSIVE \"numbers\" (\"n\") AS (SELECT 1 UNION ALL SELECT n + 1 FROM numbers WHERE n < 3) SELECT"
+        ),
+        "{sql}"
     );
-}
 
-#[test]
-fn test_window_function_type_ntile() {
-    assert_eq!(
-        WindowFunctionType::Ntile(4).as_sql_for_db(DatabaseType::Postgres),
-        "NTILE(4)"
+    let plain = QueryTestUser::query()
+        .with_cte(CTE::new("one", "SELECT 1".to_string()))
+        .build_select_sql_for_db(DatabaseType::Postgres);
+    assert!(
+        plain.starts_with("WITH \"one\" AS (SELECT 1) SELECT"),
+        "{plain}"
     );
-}
-
-#[test]
-fn test_window_function_type_lag() {
-    let sql = WindowFunctionType::Lag("price".to_string(), Some(1), Some("0".to_string()))
-        .as_sql_for_db(DatabaseType::Postgres);
-    assert!(sql.contains("LAG"));
-    assert!(sql.contains("\"price\""));
-    assert!(sql.contains("1"));
-}
-
-#[test]
-fn test_window_function_type_lead() {
-    let sql = WindowFunctionType::Lead("date".to_string(), Some(1), None)
-        .as_sql_for_db(DatabaseType::Postgres);
-    assert!(sql.contains("LEAD"));
-    assert!(sql.contains("\"date\""));
-}
-
-#[test]
-fn test_window_function_type_first_value() {
-    assert_eq!(
-        WindowFunctionType::FirstValue("amount".to_string()).as_sql_for_db(DatabaseType::Postgres),
-        "FIRST_VALUE(\"amount\")"
-    );
-}
-
-#[test]
-fn test_window_function_type_last_value() {
-    assert_eq!(
-        WindowFunctionType::LastValue("total".to_string()).as_sql_for_db(DatabaseType::Postgres),
-        "LAST_VALUE(\"total\")"
-    );
-}
-
-#[test]
-fn test_window_function_type_sum() {
-    assert_eq!(
-        WindowFunctionType::Sum("amount".to_string()).as_sql_for_db(DatabaseType::Postgres),
-        "SUM(\"amount\")"
-    );
-}
-
-#[test]
-fn test_window_function_type_count() {
-    assert_eq!(
-        WindowFunctionType::Count(None).as_sql_for_db(DatabaseType::Postgres),
-        "COUNT(*)"
-    );
-    assert_eq!(
-        WindowFunctionType::Count(Some("id".to_string())).as_sql_for_db(DatabaseType::Postgres),
-        "COUNT(\"id\")"
-    );
-}
-
-#[test]
-fn test_window_function_basic() {
-    let sql = WindowFunction::new(WindowFunctionType::RowNumber, "row_num")
-        .to_sql_for_db(DatabaseType::Postgres);
-    assert!(sql.contains("ROW_NUMBER()"));
-    assert!(sql.contains("OVER"));
-    assert!(sql.contains("AS \"row_num\""));
-}
-
-#[test]
-fn test_window_function_with_partition() {
-    let sql = WindowFunction::new(WindowFunctionType::RowNumber, "row_num")
-        .partition_by("category")
-        .to_sql_for_db(DatabaseType::Postgres);
-    assert!(sql.contains("PARTITION BY \"category\""));
-}
-
-#[test]
-fn test_window_function_with_order() {
-    let sql = WindowFunction::new(WindowFunctionType::Rank, "rank")
-        .order_by("score", Order::Desc)
-        .to_sql_for_db(DatabaseType::Postgres);
-    assert!(sql.contains("ORDER BY \"score\" DESC"));
-}
-
-#[test]
-fn test_window_function_with_frame() {
-    let sql = WindowFunction::new(
-        WindowFunctionType::Sum("amount".to_string()),
-        "running_total",
-    )
-    .order_by("date", Order::Asc)
-    .frame(
-        FrameType::Rows,
-        FrameBound::UnboundedPreceding,
-        FrameBound::CurrentRow,
-    )
-    .to_sql_for_db(DatabaseType::Postgres);
-    assert!(sql.contains("ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"));
-}
-
-#[test]
-fn test_window_function_full() {
-    let sql = WindowFunction::new(WindowFunctionType::Sum("sales".to_string()), "total_sales")
-        .partition_by("region")
-        .order_by("month", Order::Asc)
-        .frame(
-            FrameType::Range,
-            FrameBound::UnboundedPreceding,
-            FrameBound::CurrentRow,
-        )
-        .to_sql_for_db(DatabaseType::Postgres);
-    assert!(sql.contains("SUM(\"sales\")"));
-    assert!(sql.contains("PARTITION BY \"region\""));
-    assert!(sql.contains("ORDER BY \"month\" ASC"));
-    assert!(sql.contains("RANGE BETWEEN"));
-    assert!(sql.contains("AS \"total_sales\""));
-}
-
-#[test]
-fn test_cte_basic() {
-    let cte = CTE::new(
-        "active_users",
-        "SELECT * FROM users WHERE active = true".to_string(),
-    );
-    let sql = cte.to_sql_for_db(DatabaseType::Postgres);
-    assert!(sql.contains("\"active_users\""));
-    assert!(sql.contains("AS ("));
-    assert!(sql.contains("active = true"));
-}
-
-#[test]
-fn test_cte_with_columns() {
-    let cte = CTE::with_columns(
-        "user_stats",
-        vec!["user_id", "total", "count"],
-        "SELECT user_id, SUM(amount), COUNT(*) FROM orders GROUP BY user_id".to_string(),
-    );
-    let sql = cte.to_sql_for_db(DatabaseType::Postgres);
-    assert!(sql.contains("\"user_stats\""));
-    assert!(sql.contains("(\"user_id\", \"total\", \"count\")"));
-    assert!(sql.contains("GROUP BY"));
-}
-
-#[test]
-fn test_cte_recursive() {
-    let cte = CTE::new("tree", "SELECT 1 UNION ALL SELECT 2".to_string()).recursive();
-    assert!(cte.recursive);
-}
-
-#[test]
-fn test_cte_name_quoting() {
-    let cte = CTE::new("my_cte", "SELECT 1".to_string());
-    let sql = cte.to_sql_for_db(DatabaseType::Postgres);
-    assert!(sql.starts_with("\"my_cte\""));
 }
 
 #[test]

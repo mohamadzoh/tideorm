@@ -250,27 +250,19 @@ struct ScopedPlain {
     secret: String,
 }
 
+/// A joined table's schema picks the model whose encryption applies, to a
+/// named column and to a wildcard alike.
 #[tokio::test]
 async fn joined_encryption_metadata_keeps_schema_boundaries() {
     let db = database().await;
-    let secure = Host::query_with(&db)
-        .inner_join_as(
-            "secure.projection_shared",
-            "s",
-            "projection_hosts.secret_id",
-            "s.id",
-        )
-        .select(vec!["s.secret"])
-        .distinct();
-    encrypted_error(secure.validate());
-    let plain = Host::query_with(&db)
-        .inner_join_as(
-            "ordinary.projection_shared",
-            "s",
-            "projection_hosts.secret_id",
-            "s.id",
-        )
-        .select(vec!["s.secret"])
-        .distinct();
-    plain.validate().unwrap();
+    for selection in ["s.secret", "s.*"] {
+        let distinct = |table: &str| {
+            Host::query_with(&db)
+                .inner_join_as(table, "s", "projection_hosts.secret_id", "s.id")
+                .select(vec![selection])
+                .distinct()
+        };
+        encrypted_error(distinct("secure.projection_shared").validate());
+        distinct("ordinary.projection_shared").validate().unwrap();
+    }
 }

@@ -1,5 +1,6 @@
-//! MySQL integration tests: the shared scenarios in
-//! `support/integration_parity.rs` plus the MySQL-family ones in
+//! MySQL integration tests: the scenarios every backend runs, in
+//! `support/integration_parity.rs`; those of the server backends, in
+//! `support/review_backend.rs`; and the MySQL-family ones, in
 //! `support/mysql_family.rs`.
 //!
 //! Opt-in: set `RUN_MYSQL_TESTS` or `MYSQL_DATABASE_URL`; `SKIP_MYSQL_TESTS`

@@ -5,8 +5,6 @@ use super::{
 };
 use crate::columns::ColumnLike;
 use crate::config::DatabaseType;
-#[cfg(feature = "fulltext")]
-use crate::fulltext::{FullTextSearchBuilder, SearchMode};
 use crate::internal::Value;
 use crate::model::Model as ModelTrait;
 use std::time::Duration;

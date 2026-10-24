@@ -16,34 +16,6 @@ struct BatchSqlSoftDeleteUser {
     deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[test]
-fn empty_negative_list_does_not_count_as_an_explicit_filter() {
-    // Same hazard as the QueryBuilder mutation terminals: an empty candidate
-    // set for a negative membership test renders constant-true, so counting
-    // conditions would let a caller whose filter list came back empty rewrite
-    // every row in the table.
-    let err = BatchUpdateBuilder::<BatchSqlUser>::new()
-        .set("name", "updated")
-        .where_not_in("id", Vec::<i64>::new())
-        .ensure_explicit_filters("update")
-        .unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("unfiltered bulk mutations are blocked"),
-        "vacuous filter was accepted: {err}"
-    );
-
-    // One real predicate alongside it is still enough.
-    assert!(
-        BatchUpdateBuilder::<BatchSqlUser>::new()
-            .set("name", "updated")
-            .where_eq("name", "alice")
-            .where_not_in("id", Vec::<i64>::new())
-            .ensure_explicit_filters("update")
-            .is_ok()
-    );
-}
-
 #[tideorm::model(table = "batch_sql_invoices", schema = "billing")]
 struct BatchSqlInvoice {
     #[tideorm(primary_key, auto_increment)]
@@ -138,33 +110,30 @@ fn filtered_soft_delete_builder() -> BatchUpdateBuilder<BatchSqlSoftDeleteUser> 
 }
 
 #[test]
-fn batch_update_leaves_trashed_rows_out_by_default() {
-    let (sql, _) = filtered_soft_delete_builder()
-        .build_update_statement(crate::config::DatabaseType::SQLite)
-        .expect("statement should build");
+fn batch_update_scopes_trashed_rows_as_a_query_does() {
+    let sql = |update: BatchUpdateBuilder<BatchSqlSoftDeleteUser>| {
+        update
+            .build_update_statement(crate::config::DatabaseType::SQLite)
+            .expect("statement should build")
+            .0
+    };
 
+    let default = sql(filtered_soft_delete_builder());
     assert!(
-        sql.contains(r#""deleted_at" IS NULL"#),
-        "the default scope leaves soft-deleted rows out, as a query does: {sql}"
+        default.contains(r#""deleted_at" IS NULL"#),
+        "the default scope leaves soft-deleted rows out, as a query does: {default}"
     );
-    let (explicit_sql, _) = filtered_soft_delete_builder()
-        .with_trashed()
-        .without_trashed()
-        .build_update_statement(crate::config::DatabaseType::SQLite)
-        .expect("statement should build");
-    assert_eq!(sql, explicit_sql);
-}
+    assert_eq!(
+        sql(filtered_soft_delete_builder()
+            .with_trashed()
+            .without_trashed()),
+        default
+    );
 
-#[test]
-fn batch_update_with_trashed_reaches_the_trash_too() {
-    let (sql, _) = filtered_soft_delete_builder()
-        .with_trashed()
-        .build_update_statement(crate::config::DatabaseType::SQLite)
-        .expect("statement should build");
-
+    let with_trashed = sql(filtered_soft_delete_builder().with_trashed());
     assert!(
-        !sql.contains("deleted_at"),
-        "with_trashed() must not filter soft-deleted rows: {sql}"
+        !with_trashed.contains("deleted_at"),
+        "with_trashed() must not filter soft-deleted rows: {with_trashed}"
     );
 }
 
@@ -211,58 +180,37 @@ fn batch_update_set_clause_order_is_deterministic() {
     }
 }
 
+/// PostgreSQL and SQLite refuse `UPDATE .. LIMIT`, so a limit there caps the
+/// update through a primary-key subquery; MySQL takes the clause itself.
 #[test]
-fn batch_update_limit_is_scoped_by_primary_key_subquery_on_postgres() {
-    let (sql, params) = filtered_builder()
-        .limit(5)
-        .build_update_statement(crate::config::DatabaseType::Postgres)
-        .expect("statement should build");
+fn batch_update_limit_renders_per_backend() {
+    use crate::config::DatabaseType;
 
-    assert!(
-        sql.contains(
-            r#"WHERE "id" IN (SELECT "id" FROM "batch_sql_execution_users" WHERE "id" = $3 LIMIT 5)"#
+    for (db_type, limit, where_clause) in [
+        (
+            DatabaseType::Postgres,
+            Some(5),
+            r#" WHERE "id" IN (SELECT "id" FROM "batch_sql_execution_users" WHERE "id" = $3 LIMIT 5)"#,
         ),
-        "unexpected sql: {sql}"
-    );
-    assert_eq!(params.len(), 3);
-}
-
-#[test]
-fn batch_update_limit_is_scoped_by_primary_key_subquery_on_sqlite() {
-    let (sql, _) = filtered_builder()
-        .limit(5)
-        .build_update_statement(crate::config::DatabaseType::SQLite)
-        .expect("statement should build");
-
-    assert!(
-        sql.contains(
-            r#"WHERE "id" IN (SELECT "id" FROM "batch_sql_execution_users" WHERE "id" = ? LIMIT 5)"#
+        (
+            DatabaseType::SQLite,
+            Some(5),
+            r#" WHERE "id" IN (SELECT "id" FROM "batch_sql_execution_users" WHERE "id" = ? LIMIT 5)"#,
         ),
-        "unexpected sql: {sql}"
-    );
-}
+        (DatabaseType::MySQL, Some(5), " WHERE `id` = ? LIMIT 5"),
+        (DatabaseType::Postgres, None, r#" WHERE "id" = $3"#),
+    ] {
+        let mut update = filtered_builder();
+        if let Some(limit) = limit {
+            update = update.limit(limit);
+        }
+        let (sql, params) = update
+            .build_update_statement(db_type)
+            .expect("statement should build");
 
-#[test]
-fn batch_update_limit_uses_the_native_clause_on_mysql() {
-    let (sql, _) = filtered_builder()
-        .limit(5)
-        .build_update_statement(crate::config::DatabaseType::MySQL)
-        .expect("statement should build");
-
-    assert!(sql.ends_with(" LIMIT 5"), "unexpected sql: {sql}");
-    assert!(!sql.contains("SELECT"), "unexpected sql: {sql}");
-}
-
-#[test]
-fn batch_update_without_limit_keeps_a_plain_where_clause() {
-    let (sql, _) = filtered_builder()
-        .build_update_statement(crate::config::DatabaseType::Postgres)
-        .expect("statement should build");
-
-    assert!(
-        sql.ends_with(r#" WHERE "id" = $3"#),
-        "unexpected sql: {sql}"
-    );
+        assert!(sql.ends_with(where_clause), "{db_type} {limit:?}: {sql}");
+        assert_eq!(params.len(), 3, "{db_type} {limit:?}: {sql}");
+    }
 }
 
 #[test]

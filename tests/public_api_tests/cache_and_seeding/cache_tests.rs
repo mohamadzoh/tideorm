@@ -15,18 +15,6 @@ fn enabled_cache(max_entries: usize, strategy: CacheStrategy) -> QueryCache {
 }
 
 #[test]
-fn test_query_cache_miss() {
-    let cache = QueryCache::new();
-    cache.enable();
-
-    let result: Option<String> = cache.get("nonexistent_key");
-    assert!(result.is_none());
-
-    let stats = cache.stats();
-    assert_eq!(stats.misses, 1);
-}
-
-#[test]
 fn test_query_cache_enabled_disabled() {
     let cache = QueryCache::new();
 
@@ -91,48 +79,6 @@ fn test_query_cache_replacing_existing_key_at_capacity_does_not_evict_other_entr
     assert_eq!(cache.len(), 2);
     assert_eq!(cache.get::<i32>("key1"), Some(10));
     assert_eq!(cache.get::<i32>("key2"), Some(2));
-}
-
-#[test]
-fn test_query_cache_stats_count_hits_misses_and_evictions() {
-    let cache = enabled_cache(2, CacheStrategy::LRU);
-
-    let _: Option<i32> = cache.get("nope");
-    cache.set::<i32>("a", &1, None, "t").unwrap();
-    let _: Option<i32> = cache.get("a");
-    cache.set::<i32>("b", &2, None, "t").unwrap();
-    cache.set::<i32>("c", &3, None, "t").unwrap();
-
-    let stats = cache.stats();
-    assert_eq!(stats.misses, 1);
-    assert_eq!(stats.hits, 1);
-    assert_eq!(stats.evictions, 1);
-    assert_eq!(stats.entries, 2);
-}
-
-#[test]
-fn test_query_cache_evict_expired() {
-    let cache = QueryCache::new();
-    cache.enable();
-    cache.set_default_ttl(Duration::from_millis(10));
-    cache.set_strategy(CacheStrategy::TTL);
-
-    cache
-        .set("key1", &1, Some(Duration::from_millis(5)), "model")
-        .unwrap();
-    cache
-        .set("key2", &2, Some(Duration::from_millis(5)), "model")
-        .unwrap();
-    cache
-        .set("key3", &3, Some(Duration::from_secs(60)), "model")
-        .unwrap();
-
-    assert_eq!(cache.len(), 3);
-
-    std::thread::sleep(Duration::from_millis(10));
-
-    cache.evict_expired();
-    assert_eq!(cache.len(), 1);
 }
 
 #[test]
@@ -258,35 +204,4 @@ fn test_cache_key_builder_hash() {
         .build_hash();
 
     assert_ne!(hash1, hash3);
-}
-
-#[test]
-fn test_global_query_cache() {
-    let cache1 = QueryCache::global();
-    let cache2 = QueryCache::global();
-
-    cache1.enable();
-    cache1.set("global_test", &42, None, "test").unwrap();
-
-    let result: Option<i32> = cache2.get("global_test");
-    assert_eq!(result, Some(42));
-
-    cache1.clear();
-}
-
-#[test]
-fn test_global_prepared_statement_cache() {
-    let cache1 = PreparedStatementCache::global();
-    let cache2 = PreparedStatementCache::global();
-
-    cache1.enable();
-    cache1.clear();
-
-    let (sql1, _) = cache1.get_or_prepare("SELECT * FROM global_test");
-    let (sql2, cached) = cache2.get_or_prepare("SELECT * FROM global_test");
-
-    assert_eq!(sql1, sql2);
-    assert!(cached);
-
-    cache1.clear();
 }

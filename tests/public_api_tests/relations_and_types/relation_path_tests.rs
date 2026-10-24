@@ -1,15 +1,6 @@
 use tideorm::relations::{RelationPath, RelationTree};
 
 #[test]
-fn test_relation_path_single_segment_has_no_nested_path() {
-    let path = RelationPath::parse("posts");
-
-    assert_eq!(path.segments, ["posts"]);
-    assert_eq!(path.root(), "posts");
-    assert!(path.nested().is_none());
-}
-
-#[test]
 fn test_relation_path_nested_strips_one_hop_at_a_time() {
     let path = RelationPath::parse("posts.comments.author");
     assert_eq!(path.segments, ["posts", "comments", "author"]);
@@ -21,6 +12,7 @@ fn test_relation_path_nested_strips_one_hop_at_a_time() {
 
     let author = comments.nested().expect("one hop should remain");
     assert_eq!(author.segments, ["author"]);
+    assert_eq!(author.root(), "author");
     assert!(author.nested().is_none());
 }
 
@@ -48,29 +40,10 @@ fn test_relation_tree_ignores_empty_paths() {
 }
 
 #[test]
-fn test_relation_tree_starts_empty() {
-    let tree = RelationTree::new();
-
-    assert!(tree.is_empty());
-    assert!(tree.roots().is_empty());
-}
-
-#[test]
-fn test_relation_tree_single_path_is_a_leaf() {
-    let mut tree = RelationTree::new();
-    tree.add_path(&RelationPath::parse("posts"));
-
-    assert_eq!(tree.roots(), ["posts"]);
-    assert!(
-        tree.get_nested("posts")
-            .expect("posts is a root")
-            .is_empty()
-    );
-}
-
-#[test]
 fn test_relation_tree_merges_shared_prefixes() {
     let mut tree = RelationTree::new();
+    assert!(tree.is_empty());
+
     tree.add_path(&RelationPath::parse("posts"));
     tree.add_path(&RelationPath::parse("profile"));
     tree.add_path(&RelationPath::parse("posts.comments"));

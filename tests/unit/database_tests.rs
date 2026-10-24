@@ -39,31 +39,20 @@ impl std::future::Future for OverrideVisibleAcrossPolls {
 }
 
 #[test]
-fn hidden_accessors_return_errors_for_disconnected_database() {
+fn a_disconnected_database_fails_its_accessors_and_reports_safe_defaults() {
     let db = Database::disconnected();
 
     assert!(db.__internal_connection().is_err());
     assert!(db.__internal_backend().is_err());
     assert!(db.__get_connection().is_err());
-}
-
-#[test]
-fn backend_defaults_safely_for_disconnected_database() {
-    let db = Database::disconnected();
-
     assert_eq!(db.backend(), crate::config::DatabaseType::Postgres);
-}
-
-#[test]
-fn debug_reports_disconnected_database_state() {
-    let db = Database::disconnected();
-
     assert_eq!(format!("{:?}", db), "Database { connected: false }");
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn global_database_round_trips_through_set_and_reset() {
+    let _guard = crate::test_support::global_db_lock().lock().await;
     Database::reset_global();
     assert!(!crate::database::has_global_db());
     assert!(super::require_db().is_err());
@@ -82,6 +71,42 @@ async fn global_database_round_trips_through_set_and_reset() {
 
     assert!(!crate::database::has_global_db());
     assert!(super::require_db().is_err());
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn metadata_answers_for_the_handle_it_was_called_on() {
+    let db = Database::connect("sqlite::memory:")
+        .await
+        .expect("sqlite in-memory connection should succeed");
+    // Stands in for a second handle whose connection is not the ambient
+    // one: whatever it reports has to come from itself, not from the
+    // transaction running around it.
+    let other = Database::disconnected();
+
+    db.transaction(move |_| {
+        Box::pin(async move {
+            assert!(
+                other.__internal_backend().is_err(),
+                "a handle must report its own backend, not the ambient transaction's"
+            );
+            assert!(
+                other.ping().await.is_err(),
+                "a handle must be pinged through its own connection"
+            );
+
+            // Execution still joins the ambient transaction: that is what
+            // makes a nested `transaction` a SAVEPOINT instead of a second,
+            // independent top-level one.
+            let nested: crate::error::Result<()> =
+                other.transaction(|_| Box::pin(async { Ok(()) })).await;
+            nested.expect("a nested transaction should join the ambient one");
+
+            Ok(())
+        })
+    })
+    .await
+    .expect("the outer transaction should commit");
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
@@ -137,172 +162,70 @@ async fn transaction_override_remains_visible_when_scoped_future_moves_threads()
     assert_ne!(polled_threads[0], polled_threads[1]);
 }
 
+/// Raw JSON rows decode a column by the type it declares, and by what SQLite
+/// stores where nothing declares one.
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
-async fn raw_json_preserves_boolean_and_json_column_types() {
-    let db = Database::connect("sqlite::memory:")
-        .await
-        .expect("sqlite in-memory connection should succeed");
+async fn raw_json_reads_sqlite_values_by_declared_type_or_storage_class() {
+    use serde_json::json;
 
-    db.__execute_with_params(
-        "CREATE TABLE raw_json_probe (enabled BOOLEAN NOT NULL, payload JSON NOT NULL)",
-        vec![],
-    )
-    .await
-    .expect("creating probe table should succeed");
-
-    db.__execute_with_params(
-        "INSERT INTO raw_json_probe (enabled, payload) VALUES (?, ?)",
-        vec![
-            crate::internal::Value::Bool(Some(true)),
-            crate::internal::Value::Json(Some(Box::new(serde_json::json!({
-                "kind": "probe",
-                "count": 2
-            })))),
-        ],
-    )
-    .await
-    .expect("inserting probe row should succeed");
-
-    let rows = db
-        .__raw_json_with_params("SELECT enabled, payload FROM raw_json_probe", vec![])
-        .await
-        .expect("querying raw JSON rows should succeed");
-
-    assert_eq!(
-        rows,
-        vec![serde_json::json!({
-            "enabled": true,
-            "payload": {
-                "kind": "probe",
-                "count": 2
-            }
-        })]
-    );
-}
-
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-#[tokio::test]
-async fn raw_json_reads_decimal_and_datetime_columns_by_what_sqlite_stores() {
-    let db = Database::connect("sqlite::memory:")
-        .await
-        .expect("sqlite in-memory connection should succeed");
-
-    db.__execute_with_params(
-        "CREATE TABLE raw_json_typed_probe (amount DECIMAL NOT NULL, created_at DATETIME NOT NULL)",
-        vec![],
-    )
-    .await
-    .expect("creating typed probe table should succeed");
-
-    db.__execute_with_params(
-        "INSERT INTO raw_json_typed_probe (amount, created_at) VALUES (?, ?)",
-        vec![
-            crate::internal::Value::String(Some("12.34".to_string())),
-            crate::internal::Value::String(Some("2026-03-21 10:11:12".to_string())),
-        ],
-    )
-    .await
-    .expect("inserting typed probe row should succeed");
-
-    let rows = db
-        .__raw_json_with_params(
-            "SELECT amount, created_at FROM raw_json_typed_probe",
-            vec![],
-        )
-        .await
-        .expect("querying typed raw JSON rows should succeed");
-
-    // SQLite stores a `DECIMAL` as a REAL, and raw SQL has no model to say
-    // the column is meant as a decimal.
-    let expected_amount = serde_json::json!(12.34);
-    let expected_created_at = serde_json::to_value(
-        chrono::NaiveDateTime::parse_from_str("2026-03-21 10:11:12", "%Y-%m-%d %H:%M:%S")
-            .expect("datetime literal should parse for comparison"),
-    )
-    .expect("datetime should serialize to JSON");
-
-    assert_eq!(
-        rows,
-        vec![serde_json::json!({
-            "amount": expected_amount,
-            "created_at": expected_created_at,
-        })]
-    );
-}
-
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-#[tokio::test]
-async fn raw_json_preserves_count_aggregates_as_numbers() {
-    let db = Database::connect("sqlite::memory:")
-        .await
-        .expect("sqlite in-memory connection should succeed");
-
-    db.__execute_with_params(
-        "CREATE TABLE raw_json_count_probe (enabled BOOLEAN NOT NULL)",
-        vec![],
-    )
-    .await
-    .expect("creating count probe table should succeed");
-
-    for enabled in [true, true, false] {
-        db.__execute_with_params(
-            "INSERT INTO raw_json_count_probe (enabled) VALUES (?)",
-            vec![crate::internal::Value::Bool(Some(enabled))],
-        )
-        .await
-        .expect("inserting count probe row should succeed");
-    }
-
-    let rows = db
-        .__raw_json_with_params(
-            "SELECT COUNT(*) AS count, SUM(enabled) AS enabled_total FROM raw_json_count_probe",
-            vec![],
-        )
-        .await
-        .expect("querying count aggregate JSON rows should succeed");
-
-    assert_eq!(
-        rows,
-        vec![serde_json::json!({
-            "count": 3,
-            "enabled_total": 2,
-        })]
-    );
-}
-
-/// A float sum, a running total and an average are numbers: they used to come
-/// back as decimal strings, which `as_f64()` reads as nothing.
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-#[tokio::test]
-async fn raw_json_reads_real_expressions_as_numbers() {
-    let db = Database::connect("sqlite::memory:")
-        .await
-        .expect("sqlite in-memory connection should succeed");
-    for statement in [
-        "CREATE TABLE raw_json_real_probe (id INTEGER PRIMARY KEY, amount REAL NOT NULL)",
-        "INSERT INTO raw_json_real_probe (amount) VALUES (1.5), (2.25)",
+    for (setup, query, expected) in [
+        (
+            [
+                "CREATE TABLE probe (enabled BOOLEAN NOT NULL, payload JSON NOT NULL)",
+                r#"INSERT INTO probe VALUES (TRUE, '{"kind": "probe", "count": 2}')"#,
+            ],
+            "SELECT enabled, payload FROM probe",
+            json!([{"enabled": true, "payload": {"kind": "probe", "count": 2}}]),
+        ),
+        // SQLite stores a `DECIMAL` as a REAL, and raw SQL has no model to say
+        // the column is meant as a decimal.
+        (
+            [
+                "CREATE TABLE probe (amount DECIMAL NOT NULL, created_at DATETIME NOT NULL)",
+                "INSERT INTO probe VALUES ('12.34', '2026-03-21 10:11:12')",
+            ],
+            "SELECT amount, created_at FROM probe",
+            json!([{"amount": 12.34, "created_at": "2026-03-21T10:11:12"}]),
+        ),
+        (
+            [
+                "CREATE TABLE probe (enabled BOOLEAN NOT NULL)",
+                "INSERT INTO probe VALUES (TRUE), (TRUE), (FALSE)",
+            ],
+            "SELECT COUNT(*) AS count, SUM(enabled) AS enabled_total FROM probe",
+            json!([{"count": 3, "enabled_total": 2}]),
+        ),
+        // A float sum, a running total and an average are numbers: they used
+        // to come back as decimal strings, which `as_f64()` reads as nothing.
+        (
+            [
+                "CREATE TABLE probe (id INTEGER PRIMARY KEY, amount REAL NOT NULL)",
+                "INSERT INTO probe (amount) VALUES (1.5), (2.25)",
+            ],
+            "SELECT SUM(amount) OVER (ORDER BY id) AS running, AVG(id) OVER () AS average \
+             FROM probe ORDER BY id",
+            json!([
+                {"running": 1.5, "average": 1.5},
+                {"running": 3.75, "average": 1.5},
+            ]),
+        ),
     ] {
-        db.__execute_with_params(statement, vec![])
+        let db = Database::connect("sqlite::memory:")
             .await
-            .expect("setting up the probe table should succeed");
+            .expect("sqlite in-memory connection should succeed");
+        for statement in setup {
+            db.__execute_with_params(statement, vec![])
+                .await
+                .unwrap_or_else(|error| panic!("{statement}: {error}"));
+        }
+
+        let rows = db
+            .__raw_json_with_params(query, vec![])
+            .await
+            .unwrap_or_else(|error| panic!("{query}: {error}"));
+        assert_eq!(serde_json::Value::Array(rows), expected, "{query}");
     }
-
-    let rows = db
-        .__raw_json_with_params(
-            "SELECT SUM(amount) OVER (ORDER BY id) AS running, AVG(id) OVER () AS average              FROM raw_json_real_probe ORDER BY id",
-            vec![],
-        )
-        .await
-        .expect("querying real expressions should succeed");
-
-    assert_eq!(
-        rows,
-        vec![
-            serde_json::json!({"running": 1.5, "average": 1.5}),
-            serde_json::json!({"running": 3.75, "average": 1.5}),
-        ]
-    );
 }
 
 #[test]

@@ -1,88 +1,50 @@
 use super::*;
 
+/// Every relation wrapper reads a payload as its cached rows.
 #[test]
-fn direct_relations_deserialize_cached_payloads() {
-    let has_one: super::HasOne<RelationTestNode> = serde_json::from_value(json!({
-        "id": 1,
-        "slug": "root",
-        "parent_slug": null
-    }))
-    .expect("has_one should deserialize cached payload");
-    assert_eq!(has_one.get_cached().map(|node| node.id), Some(1));
-
-    let has_many: HasMany<RelationTestNode> = serde_json::from_value(json!([
-        { "id": 2, "slug": "child-a", "parent_slug": "root" },
-        { "id": 3, "slug": "child-b", "parent_slug": "root" }
-    ]))
-    .expect("has_many should deserialize cached payload");
-    assert_eq!(has_many.get_cached().map(|nodes| nodes.len()), Some(2));
-
-    let belongs_to: BelongsTo<RelationTestNode> = serde_json::from_value(json!({
-        "id": 4,
-        "slug": "parent",
-        "parent_slug": null
-    }))
-    .expect("belongs_to should deserialize cached payload");
-    assert_eq!(
-        belongs_to.get_cached().map(|node| node.slug.as_str()),
-        Some("parent")
-    );
-}
-
-#[test]
-fn advanced_relations_deserialize_cached_payloads() {
-    let self_ref: SelfRef<RelationTestEmployee> = serde_json::from_value(json!({
-        "id": 1,
-        "manager_id": null,
-        "manager": null,
-        "reports": [],
-        "avatar": null
-    }))
-    .expect("self_ref should deserialize cached payload");
-    assert_eq!(self_ref.get_cached().map(|employee| employee.id), Some(1));
-
-    let self_ref_many: SelfRefMany<RelationTestEmployee> = serde_json::from_value(json!([
-        {
-            "id": 2,
-            "manager_id": 1,
+fn relation_wrappers_deserialize_cached_payloads() {
+    fn read<T: serde::de::DeserializeOwned>(payload: serde_json::Value) -> T {
+        serde_json::from_value(payload).expect("the cached payload should deserialize")
+    }
+    let node = |id: i64| json!({ "id": id, "slug": format!("node-{id}"), "parent_slug": null });
+    let employee = |id: i64| {
+        json!({
+            "id": id,
+            "manager_id": null,
             "manager": null,
             "reports": [],
             "avatar": null
-        }
-    ]))
-    .expect("self_ref_many should deserialize cached payload");
-    assert_eq!(
-        self_ref_many.get_cached().map(|employees| employees.len()),
-        Some(1)
-    );
-
-    let morph_one: MorphOne<RelationTestImage> = serde_json::from_value(json!({
-        "id": 9,
-        "imageable_type": "relation_test_nodes",
-        "imageable_id": 4,
-        "owner": null
-    }))
-    .expect("morph_one should deserialize cached payload");
-    assert_eq!(morph_one.get_cached().map(|image| image.id), Some(9));
-
-    let morph_many: super::MorphMany<RelationTestImage> = serde_json::from_value(json!([
-        {
-            "id": 10,
+        })
+    };
+    let image = |id: i64| {
+        json!({
+            "id": id,
             "imageable_type": "relation_test_nodes",
             "imageable_id": 4,
             "owner": null
-        }
-    ]))
-    .expect("morph_many should deserialize cached payload");
-    assert_eq!(morph_many.get_cached().map(|images| images.len()), Some(1));
+        })
+    };
 
-    let has_many_through: HasManyThrough<RelationTestNode, RelationTestPivot> =
-        serde_json::from_value(json!([
-            { "id": 5, "slug": "related", "parent_slug": null }
-        ]))
-        .expect("has_many_through should deserialize cached payload");
+    let has_one: HasOne<RelationTestNode> = read(node(1));
+    assert_eq!(has_one.get_cached().map(|node| node.id), Some(1));
+    let belongs_to: BelongsTo<RelationTestNode> = read(node(4));
     assert_eq!(
-        has_many_through.get_cached().map(|nodes| nodes.len()),
-        Some(1)
+        belongs_to.get_cached().map(|node| node.slug.as_str()),
+        Some("node-4")
     );
+    let has_many: HasMany<RelationTestNode> = read(json!([node(2), node(3)]));
+    assert_eq!(has_many.get_cached().map(<[_]>::len), Some(2));
+    let has_many_through: HasManyThrough<RelationTestNode, RelationTestPivot> =
+        read(json!([node(5)]));
+    assert_eq!(has_many_through.get_cached().map(<[_]>::len), Some(1));
+
+    let self_ref: SelfRef<RelationTestEmployee> = read(employee(1));
+    assert_eq!(self_ref.get_cached().map(|employee| employee.id), Some(1));
+    let self_ref_many: SelfRefMany<RelationTestEmployee> = read(json!([employee(2)]));
+    assert_eq!(self_ref_many.get_cached().map(<[_]>::len), Some(1));
+
+    let morph_one: MorphOne<RelationTestImage> = read(image(9));
+    assert_eq!(morph_one.get_cached().map(|image| image.id), Some(9));
+    let morph_many: MorphMany<RelationTestImage> = read(json!([image(10)]));
+    assert_eq!(morph_many.get_cached().map(<[_]>::len), Some(1));
 }

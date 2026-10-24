@@ -462,7 +462,7 @@ impl WindowFunctionType {
 /// named helpers ([`row_number()`](super::QueryBuilder::row_number),
 /// [`running_sum()`](super::QueryBuilder::running_sum), ...) assemble the common
 /// shapes. Window functions are appended to the projection *after* every other
-/// select source and never suppress the `table.*` fallback, so a query that
+/// select source and never replace the default projection, so a query that
 /// selects nothing else still returns the model's own columns alongside them.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WindowFunction {
@@ -652,9 +652,7 @@ pub struct CTE {
     ///
     /// The keyword is per-statement, not per-CTE: one recursive CTE promotes the
     /// entire `WITH` prefix to `WITH RECURSIVE`, which is exactly what the SQL
-    /// standard requires. It also switches validation of
-    /// [`query_sql`](Self::query_sql) to the compound-subquery validator, since
-    /// a recursive body is a `UNION ALL` of two selects.
+    /// standard requires.
     pub recursive: bool,
     pub(crate) params: Vec<Value>,
 }

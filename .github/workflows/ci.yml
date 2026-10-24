@@ -239,7 +239,6 @@ jobs:
             --test edge_case_tests \
             --test typed_columns_and_join_tests \
             --test tokenization_tests \
-            --test tokenization_missing_key_test \
             --test relation_serde_tests
 
       # or_clause_tests pulls in a Postgres-backed module behind
@@ -286,7 +285,7 @@ jobs:
 
       - name: Run PostgreSQL suites
         run: |
-          cargo test --package tideorm --test postgres_integration_tests
+          cargo test --package tideorm --test postgres_integration_tests --features dirty-tracking
           cargo test --package tideorm --test or_clause_tests
           cargo test --package tideorm --test postgres_entity_manager_tests --features entity-manager
 

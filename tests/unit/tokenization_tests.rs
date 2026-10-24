@@ -29,20 +29,11 @@ fn init_test_key() {
 }
 
 #[test]
-fn test_base64_url_encode_decode() {
-    let data = b"Hello, World!";
-    let encoded = base64_url_encode(data);
-    let decoded = base64_url_decode(&encoded).unwrap();
-    assert_eq!(data.to_vec(), decoded);
-}
-
-#[test]
 fn test_base64_url_various_lengths() {
-    for len in 1..=32 {
-        let data: Vec<u8> = (0..len).map(|i| i as u8).collect();
+    for len in 0..=32u8 {
+        let data: Vec<u8> = (0..len).collect();
         let encoded = base64_url_encode(&data);
-        let decoded = base64_url_decode(&encoded).unwrap();
-        assert_eq!(data, decoded, "Failed for length {}", len);
+        assert_eq!(base64_url_decode(&encoded), Some(data), "length {len}");
     }
 }
 
@@ -94,17 +85,6 @@ fn test_tokenizable_decode_token_uses_global_decoder_override() {
     TokenConfig::set_decoder(decoder);
 
     assert_eq!(TokenizableProbe::decode_token("global-42").unwrap(), 42);
-}
-
-#[test]
-fn test_token_config_reset_clears_global_state() {
-    TokenConfig::set_encryption_key("transient-key");
-    assert!(TokenConfig::has_encryption_key());
-
-    TokenConfig::reset();
-
-    assert!(!TokenConfig::has_encryption_key());
-    assert!(TokenConfig::get_encryption_key().is_err());
 }
 
 #[test]
@@ -160,52 +140,53 @@ fn test_token_config_reset_clears_state_set_on_another_thread() {
     assert!(encode_result.is_err());
 }
 
+/// Tokens sealed by earlier releases, with argon2 0.5 and chacha20poly1305
+/// 0.10, still open, and only under the key they were sealed with: a
+/// dependency upgrade that changed the key derivation or the cipher would
+/// invalidate every token already issued.
 #[test]
-fn test_derive_encryption_key_is_deterministic_for_same_secret() {
-    let first = derive_encryption_key("same-secret");
-    let second = derive_encryption_key("same-secret");
+fn tokens_issued_by_earlier_releases_still_open() {
+    let by_name = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHVHWDkLrobLrgKs0g40xp6eSe";
+    let by_table = "v2.CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJobdpcfwh5XWPTzj88HZ2np_9";
 
-    assert_eq!(first, second);
-}
-
-#[test]
-fn test_derive_encryption_key_changes_with_secret() {
-    let first = derive_encryption_key("first-secret");
-    let second = derive_encryption_key("second-secret");
-
-    assert_ne!(first, second);
-}
-
-#[test]
-fn test_base64_url_decode_rejects_orphan_trailing_character() {
-    // Six leftover bits encode no byte, so the encoder never emits a 4k+1 length.
-    assert!(base64_url_decode("A").is_none());
-    assert!(base64_url_decode("AAAAA").is_none());
-}
-
-#[test]
-fn test_base64_url_decode_rejects_non_canonical_trailing_bits() {
-    // "QQ" is the canonical spelling of the single byte 0x41. "QR" carries the
-    // same leading eight bits with a leftover bit set, so it is a re-spelling.
-    assert_eq!(base64_url_decode("QQ"), Some(vec![0x41]));
-    assert!(base64_url_decode("QR").is_none());
-}
-
-#[test]
-fn test_token_has_exactly_one_valid_spelling() {
-    init_test_key();
-
-    let token = default_encode("42", "User").unwrap();
+    TokenConfig::reset();
+    TokenConfig::set_encryption_key("known-answer-key");
     assert_eq!(
-        default_decode(&token, "User").unwrap(),
-        Some("42".to_string())
+        default_decode(by_name, "User").unwrap().as_deref(),
+        Some("42")
+    );
+    assert_eq!(
+        decode_for_table(by_table, (None, "users"), "User")
+            .unwrap()
+            .as_deref(),
+        Some("42")
     );
 
-    // Appending a character used to decode to the same bytes and authenticate,
-    // so a token was not a stable identity for cache keys or revocation lists.
+    TokenConfig::set_encryption_key("another-key");
+    assert_eq!(default_decode(by_name, "User").unwrap(), None);
+    TokenConfig::reset();
+}
+
+/// Only the canonical unpadded base64url spelling of a token opens. Appending
+/// a character used to decode to the same bytes and authenticate, so a token
+/// was not a stable identity for cache keys or revocation lists.
+#[test]
+fn test_token_has_exactly_one_valid_spelling() {
+    // A 4k+1 length leaves six bits that encode no byte, and "QR" is "QQ"
+    // (the byte 0x41) with a leftover bit set.
+    assert_eq!(base64_url_decode("A"), None);
+    assert_eq!(base64_url_decode("AAAAA"), None);
+    assert_eq!(base64_url_decode("QQ"), Some(vec![0x41]));
+    assert_eq!(base64_url_decode("QR"), None);
+
+    init_test_key();
+    let token = default_encode("42", "User").unwrap();
+    assert_eq!(
+        default_decode(&token, "User").unwrap().as_deref(),
+        Some("42")
+    );
     for suffix in ['A', 'B', '-', '_'] {
         let respelled = format!("{token}{suffix}");
-        assert_ne!(respelled, token);
         assert_eq!(
             default_decode(&respelled, "User").unwrap(),
             None,
@@ -279,6 +260,32 @@ fn an_empty_encryption_key_leaves_encryption_unconfigured() {
     TokenConfig::reset();
 }
 
+/// Without a key, encoding and decoding with the default codec is a
+/// configuration error, never `Ok(None)`: a misconfigured process must not
+/// pass for one handed an invalid token.
+#[test]
+fn a_missing_key_is_a_configuration_error() {
+    fn assert_missing_key<T: std::fmt::Debug>(result: Result<T>) {
+        match result.unwrap_err() {
+            Error::Tokenization { message } => {
+                assert!(
+                    message.contains("No encryption key configured"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected a tokenization error, got {other:?}"),
+        }
+    }
+
+    TokenConfig::reset();
+    assert_missing_key(default_encode("42", "TokenizableProbe"));
+    assert_missing_key(TokenizableProbe { id: 7 }.to_token());
+    assert_missing_key(default_decode("not-a-real-token", "TokenizableProbe"));
+    assert_missing_key(TokenizableProbe::decode_token("not-a-real-token"));
+}
+
+/// A model's codec hooks run before the token state is locked, so a hook may
+/// configure the global codecs without deadlocking.
 #[test]
 fn custom_codec_selectors_can_update_global_configuration() {
     struct ConfiguringModel;

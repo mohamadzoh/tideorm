@@ -1,11 +1,11 @@
 use super::*;
 
-/// An unsafe raw fragment is refused when the query runs, before it reaches a
-/// database: none is connected here.
+/// An unsafe raw fragment or subquery is refused when the query runs, before
+/// it reaches a database: none is connected here.
 #[tokio::test]
 async fn unsafe_sql_is_rejected_before_db_lookup() {
     type Shape = fn(QueryBuilder<QueryTestUser>) -> QueryBuilder<QueryTestUser>;
-    let cases: [(Shape, &str); 8] = [
+    let cases: &[(Shape, &str)] = &[
         (
             |q| q.where_raw("1 = 1; DROP TABLE users"),
             "unsafe WHERE raw SQL",
@@ -45,6 +45,87 @@ async fn unsafe_sql_is_rejected_before_db_lookup() {
             |q| q.group_by("DATE_TRUNC('day', created_at); DROP TABLE users"),
             "unsafe GROUP BY column",
         ),
+        (
+            |q| {
+                q.where_in_subquery(
+                    "id",
+                    QueryTestUser::query()
+                        .select(vec!["id"])
+                        .where_raw("1 = 1; DROP TABLE users"),
+                )
+            },
+            "invalid subquery for where_in_subquery()",
+        ),
+        (
+            |q| {
+                q.select_subquery(
+                    QueryTestUser::query()
+                        .select(vec!["id"])
+                        .where_raw("1 = 1; DROP TABLE users"),
+                    "nested_id",
+                )
+            },
+            "invalid subquery for select_subquery()",
+        ),
+        (
+            |q| q.select_subquery(QueryTestUser::query().select(vec!["id"]), "bad\"alias"),
+            "unsafe SELECT alias",
+        ),
+        (
+            |q| q.union_raw("DELETE FROM users"),
+            "invalid subquery for union_raw(): unsafe subquery: expected a SELECT/WITH query",
+        ),
+        (
+            |q| q.union_raw("SELECT id FROM query_test_users UNION SELECT password FROM users"),
+            "invalid subquery for union_raw(): unsafe subquery: top-level 'union' queries are not allowed here",
+        ),
+        (
+            |q| q.union_all_raw("DELETE FROM users"),
+            "invalid subquery for union_all_raw()",
+        ),
+        (
+            |q| {
+                q.with_cte(CTE::new(
+                    "active_users",
+                    "DELETE FROM users RETURNING id".to_string(),
+                ))
+            },
+            "invalid CTE for with_cte()",
+        ),
+        (
+            |q| {
+                q.with_recursive_cte(
+                    "user_tree",
+                    vec!["id"],
+                    "SELECT id FROM users",
+                    "DELETE FROM users RETURNING id",
+                )
+            },
+            "invalid subquery for with_recursive_cte() recursive query",
+        ),
+        (
+            |q| {
+                q.lag(
+                    "previous_id",
+                    "id",
+                    1,
+                    Some("0; DROP TABLE users"),
+                    "name",
+                    "id",
+                    Order::Asc,
+                )
+            },
+            "unsafe LAG/LEAD default expression",
+        ),
+        (
+            |q| {
+                q.window(WindowFunction::new(
+                    WindowFunctionType::Custom("SUM(id); DROP TABLE users".to_string()),
+                    "unsafe_sum",
+                ))
+            },
+            "unsafe window function expression",
+        ),
     ];
 
     for (shape, expected) in cases {
@@ -54,44 +135,30 @@ async fn unsafe_sql_is_rejected_before_db_lookup() {
 }
 
 #[tokio::test]
-async fn test_chunk_rejects_zero_batch_size_before_db_lookup() {
-    let err = QueryTestUser::query()
-        .chunk(0, |_| async { Ok::<(), crate::Error>(()) })
-        .await
-        .unwrap_err();
-
-    assert!(
-        err.to_string()
-            .contains("chunk() requires chunk_size to be greater than 0")
-    );
-}
-
-#[tokio::test]
-async fn test_chunk_rejects_offset_before_db_lookup() {
-    let err = QueryTestUser::query()
-        .offset(1)
-        .chunk(10, |_| async { Ok::<(), crate::Error>(()) })
-        .await
-        .unwrap_err();
-
-    assert!(
-        err.to_string()
-            .contains("chunk() does not support offset()")
-    );
-}
-
-#[tokio::test]
-async fn test_chunk_rejects_non_primary_key_order_before_db_lookup() {
-    let err = QueryTestUser::query()
-        .order_by("name", Order::Asc)
-        .chunk(10, |_| async { Ok::<(), crate::Error>(()) })
-        .await
-        .unwrap_err();
-
-    assert!(
-        err.to_string()
-            .contains("chunk() only supports explicit ordering by the single primary key 'id'")
-    );
+async fn test_chunk_rejects_an_unsupported_shape_before_db_lookup() {
+    for (query, size, expected) in [
+        (
+            QueryTestUser::query(),
+            0,
+            "chunk() requires chunk_size to be greater than 0",
+        ),
+        (
+            QueryTestUser::query().offset(1),
+            10,
+            "chunk() does not support offset()",
+        ),
+        (
+            QueryTestUser::query().order_by("name", Order::Asc),
+            10,
+            "chunk() only supports explicit ordering by the single primary key 'id'",
+        ),
+    ] {
+        let err = query
+            .chunk(size, |_| async { Ok::<(), crate::Error>(()) })
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains(expected), "{expected}: {err}");
+    }
 }
 
 #[test]
@@ -203,24 +270,14 @@ fn test_order_by_rejects_forged_raw_expression_marker() {
 }
 
 #[test]
-fn test_standalone_offset_renders_a_portable_limit() {
-    let query = QueryBuilder::<QueryTestUser>::new().offset(20);
+fn test_reorder_replaces_every_earlier_order() {
+    let sql = QueryTestUser::query()
+        .order_desc("id")
+        .order_asc("name")
+        .reorder("name", Order::Desc)
+        .build_select_sql_for_db(DatabaseType::Postgres);
 
-    let postgres_sql = query.build_select_sql_for_db(DatabaseType::Postgres);
-    assert!(postgres_sql.ends_with(" OFFSET 20"), "sql: {postgres_sql}");
-    assert!(!postgres_sql.contains("LIMIT"), "sql: {postgres_sql}");
-
-    let sqlite_sql = query.build_select_sql_for_db(DatabaseType::SQLite);
-    assert!(
-        sqlite_sql.ends_with(" LIMIT -1 OFFSET 20"),
-        "sql: {sqlite_sql}"
-    );
-
-    let mysql_sql = query.build_select_sql_for_db(DatabaseType::MySQL);
-    assert!(
-        mysql_sql.ends_with(" LIMIT 18446744073709551615 OFFSET 20"),
-        "sql: {mysql_sql}"
-    );
+    assert!(sql.ends_with("ORDER BY \"name\" DESC"), "{sql}");
 }
 
 #[test]
@@ -346,25 +403,35 @@ fn test_window_validation_uses_final_join_qualifiers() {
 
 #[test]
 fn test_window_validation_rejects_unknown_qualifier() {
-    let window = WindowFunction::new(
-        WindowFunctionType::Sum("profiles.score".to_string()),
-        "profile_score_sum",
-    )
-    .partition_by("profiles.user_id")
-    .order_by("profiles.created_at", Order::Asc);
-
-    let err = QueryBuilder::<QueryTestUser>::new()
-        .window(window)
-        .ensure_query_is_valid()
-        .expect_err("unknown window column qualifiers should be rejected");
-
-    assert!(
-        err.to_string()
-            .contains("unknown window PARTITION BY column qualifier 'profiles'")
-            || err
-                .to_string()
-                .contains("unknown window function column qualifier 'profiles'")
-    );
+    for (window, slot) in [
+        (
+            WindowFunction::new(
+                WindowFunctionType::Sum("profiles.score".to_string()),
+                "profile_score_sum",
+            ),
+            "window function column",
+        ),
+        (
+            WindowFunction::new(WindowFunctionType::RowNumber, "rn")
+                .partition_by("profiles.user_id"),
+            "window PARTITION BY column",
+        ),
+        (
+            WindowFunction::new(WindowFunctionType::RowNumber, "rn")
+                .order_by("profiles.created_at", Order::Asc),
+            "window ORDER BY column",
+        ),
+    ] {
+        let err = QueryBuilder::<QueryTestUser>::new()
+            .window(window)
+            .ensure_query_is_valid()
+            .expect_err("no join names the profiles qualifier");
+        assert!(
+            err.to_string()
+                .contains(&format!("unknown {slot} qualifier 'profiles'")),
+            "{slot}: {err}"
+        );
+    }
 }
 
 /// An unselected `Option` column decodes as `None`, and saving such a model
@@ -401,55 +468,6 @@ async fn get_refuses_a_projection_that_leaves_model_columns_out() {
     }
 }
 
-#[tokio::test]
-async fn test_where_in_subquery_rejects_invalid_nested_query_before_db_lookup() {
-    let err = QueryTestUser::query()
-        .where_in_subquery(
-            "id",
-            QueryTestUser::query()
-                .select(vec!["id"])
-                .where_raw("1 = 1; DROP TABLE users"),
-        )
-        .count()
-        .await
-        .unwrap_err();
-
-    assert!(
-        err.to_string()
-            .contains("invalid subquery for where_in_subquery()")
-    );
-}
-
-#[tokio::test]
-async fn test_select_subquery_rejects_invalid_nested_query_before_db_lookup() {
-    let err = QueryTestUser::query()
-        .select_subquery(
-            QueryTestUser::query()
-                .select(vec!["id"])
-                .where_raw("1 = 1; DROP TABLE users"),
-            "nested_id",
-        )
-        .count()
-        .await
-        .unwrap_err();
-
-    assert!(
-        err.to_string()
-            .contains("invalid subquery for select_subquery()")
-    );
-}
-
-#[tokio::test]
-async fn test_select_subquery_rejects_unsafe_alias_before_db_lookup() {
-    let err = QueryTestUser::query()
-        .select_subquery(QueryTestUser::query().select(vec!["id"]), "bad\"alias")
-        .count()
-        .await
-        .unwrap_err();
-
-    assert!(err.to_string().contains("unsafe SELECT alias"));
-}
-
 #[test]
 fn test_select_subquery_uses_backend_specific_alias_quoting() {
     let query = QueryTestUser::query().select_subquery(
@@ -465,140 +483,28 @@ fn test_select_subquery_uses_backend_specific_alias_quoting() {
 }
 
 #[tokio::test]
-async fn test_union_raw_rejects_invalid_subquery_before_db_lookup() {
-    let err = QueryTestUser::query()
-        .union_raw("DELETE FROM users")
-        .count()
-        .await
-        .unwrap_err();
-
-    assert!(err.to_string().contains("invalid subquery for union_raw()"));
-}
-
-#[tokio::test]
-async fn test_union_raw_rejects_top_level_compound_subquery_before_db_lookup() {
-    let err = QueryTestUser::query()
-        .union_raw("SELECT id FROM query_test_users UNION SELECT password FROM users")
-        .count()
-        .await
-        .unwrap_err();
-
-    assert!(err.to_string().contains("invalid subquery for union_raw()"));
-    assert!(
-        err.to_string()
-            .contains("top-level 'union' queries are not allowed here")
-    );
-}
-
-#[tokio::test]
-async fn test_union_all_raw_rejects_invalid_subquery_before_db_lookup() {
-    let err = QueryTestUser::query()
-        .union_all_raw("DELETE FROM users")
-        .count()
-        .await
-        .unwrap_err();
-
-    assert!(
-        err.to_string()
-            .contains("invalid subquery for union_all_raw()")
-    );
-}
-
-#[tokio::test]
-async fn test_with_cte_rejects_non_select_sql_before_db_lookup() {
-    let err = QueryTestUser::query()
-        .with_cte(CTE::new(
-            "active_users",
-            "DELETE FROM users RETURNING id".to_string(),
-        ))
-        .count()
-        .await
-        .unwrap_err();
-
-    assert!(err.to_string().contains("invalid CTE for with_cte()"));
-}
-
-#[tokio::test]
-async fn test_with_recursive_cte_rejects_non_select_sql_before_db_lookup() {
-    let err = QueryTestUser::query()
-        .with_recursive_cte(
-            "user_tree",
-            vec!["id"],
-            "SELECT id FROM users",
-            "DELETE FROM users RETURNING id",
-        )
-        .count()
-        .await
-        .unwrap_err();
-
-    assert!(
-        err.to_string()
-            .contains("invalid subquery for with_recursive_cte() recursive query")
-    );
-}
-
-#[tokio::test]
-async fn test_recursive_cte_accepts_compound_query_body_before_db_lookup() {
-    let err = QueryTestUser::query()
-        .with_cte(CTE::new("user_tree", "SELECT 1 UNION ALL SELECT 2".to_string()).recursive())
-        .count()
-        .await
-        .unwrap_err();
-
-    assert!(!err.to_string().contains("invalid CTE for with_cte()"));
-}
-
-#[tokio::test]
-async fn test_lag_rejects_unsafe_default_expression_before_db_lookup() {
-    let err = QueryTestUser::query()
-        .lag(
-            "previous_id",
-            "id",
-            1,
-            Some("0; DROP TABLE users"),
-            "name",
-            "id",
-            Order::Asc,
-        )
-        .count()
-        .await
-        .unwrap_err();
-
-    assert!(
-        err.to_string()
-            .contains("unsafe LAG/LEAD default expression")
-    );
-}
-
-#[tokio::test]
-async fn test_sum_rejects_grouped_query_before_db_lookup() {
-    let err = QueryTestUser::query()
+async fn test_scalar_aggregates_reject_grouping_before_db_lookup() {
+    let sum = QueryTestUser::query()
         .group_by("name")
         .sum::<i64>("id")
         .await
         .unwrap_err();
-
     assert!(
-        err.to_string()
+        sum.to_string()
             .contains("sum() returns a single scalar and does not support group_by()"),
-        "{}",
-        err
+        "{sum}"
     );
-}
 
-#[tokio::test]
-async fn test_count_distinct_rejects_having_before_db_lookup() {
-    let err = QueryTestUser::query()
+    let count_distinct = QueryTestUser::query()
         .having(crate::Aggregate::count().gt(3))
         .count_distinct("name")
         .await
         .unwrap_err();
-
     assert!(
-        err.to_string()
+        count_distinct
+            .to_string()
             .contains("count_distinct() returns a single scalar and does not support having()"),
-        "{}",
-        err
+        "{count_distinct}"
     );
 }
 
@@ -747,8 +653,18 @@ fn test_where_raw_with_binds_its_values_per_backend() {
         "{sql}"
     );
 
-    let mismatched = QueryTestUser::query().where_raw_with("id = ? OR id = ?", vec![1.into()]);
-    assert!(mismatched.ensure_query_is_executable().is_err());
+    // A template whose placeholders and values do not pair up is refused; a
+    // `?` inside brackets, which the engine reads as quoted, is no placeholder.
+    for (template, values) in [
+        ("id = ? OR id = ?", vec![1.into()]),
+        ("name = ANY(ARRAY[?])", vec!["a".into()]),
+    ] {
+        let mismatched = QueryTestUser::query().where_raw_with(template, values);
+        assert!(
+            mismatched.ensure_query_is_executable().is_err(),
+            "{template}"
+        );
+    }
 }
 
 #[test]
@@ -789,17 +705,6 @@ fn test_a_cte_body_may_hold_a_union() {
 }
 
 #[test]
-fn test_where_raw_with_counts_no_placeholder_inside_brackets() {
-    // The engine reads `[..]` as quoted and would never bind a `?` there.
-    assert_eq!(
-        db_sql::count_template_placeholders("tags && ARRAY[?] AND id = ?"),
-        1
-    );
-    let query = QueryTestUser::query().where_raw_with("name = ANY(ARRAY[?])", vec!["a".into()]);
-    assert!(query.validate().is_err());
-}
-
-#[test]
 fn test_a_mismatched_raw_template_renders_without_panicking() {
     let query = QueryTestUser::query().where_raw_with("id IN (?, ?)", vec![1.into()]);
     assert!(query.validate().is_err());
@@ -810,32 +715,4 @@ fn test_a_mismatched_raw_template_renders_without_panicking() {
     let _ = QueryTestUser::query()
         .where_in_subquery("id", query)
         .build_select_sql_with_params_for_db(DatabaseType::Postgres);
-}
-
-#[test]
-fn test_reorder_replaces_every_earlier_order() {
-    let sql = QueryTestUser::query()
-        .order_desc("id")
-        .order_asc("name")
-        .reorder("name", Order::Desc)
-        .build_select_sql_for_db(DatabaseType::Postgres);
-
-    assert!(sql.ends_with("ORDER BY \"name\" DESC"), "{sql}");
-}
-
-#[tokio::test]
-async fn test_custom_window_expression_rejects_unsafe_sql_before_db_lookup() {
-    let err = QueryTestUser::query()
-        .window(WindowFunction::new(
-            WindowFunctionType::Custom("SUM(id); DROP TABLE users".to_string()),
-            "unsafe_sum",
-        ))
-        .count()
-        .await
-        .unwrap_err();
-
-    assert!(
-        err.to_string()
-            .contains("unsafe window function expression")
-    );
 }

@@ -228,12 +228,15 @@ struct ExactJson {
 }
 
 async fn exact_json_database() -> Database {
-    let db = Database::connect("sqlite::memory:").await.unwrap();
-    db.exec_raw("CREATE TABLE review_exact_json(id INTEGER PRIMARY KEY, items JSON)")
-        .await
-        .unwrap();
-    db.exec_raw("INSERT INTO review_exact_json VALUES(1,'[18446744073709551615,1]'),(2,'[18446744073709551614,1]')").await.unwrap();
-    db
+    memory_database(
+        "CREATE TABLE review_exact_json(id INTEGER PRIMARY KEY, items JSON); \
+         INSERT INTO review_exact_json VALUES(1,'[18446744073709551615,1]'),(2,'[18446744073709551614,1]')",
+    )
+    .await
+}
+
+async fn items(db: &Database, id: i64) -> serde_json::Value {
+    ExactJson::find_with(id, db).await.unwrap().unwrap().items
 }
 
 #[tokio::test]
@@ -278,14 +281,8 @@ async fn sqlite_array_removal_keeps_original_json_numbers() {
         .execute()
         .await
         .unwrap();
-    assert_eq!(
-        ExactJson::find_with(1, &db).await.unwrap().unwrap().items,
-        serde_json::json!([u64::MAX])
-    );
-    assert_eq!(
-        ExactJson::find_with(2, &db).await.unwrap().unwrap().items,
-        serde_json::json!([u64::MAX - 1])
-    );
+    assert_eq!(items(&db, 1).await, serde_json::json!([u64::MAX]));
+    assert_eq!(items(&db, 2).await, serde_json::json!([u64::MAX - 1]));
     ExactJson::query_with(&db)
         .where_gte("id", 1)
         .update_all()
@@ -293,100 +290,50 @@ async fn sqlite_array_removal_keeps_original_json_numbers() {
         .execute()
         .await
         .unwrap();
-    assert_eq!(
-        ExactJson::find_with(1, &db).await.unwrap().unwrap().items,
-        serde_json::json!([])
-    );
-    assert_eq!(
-        ExactJson::find_with(2, &db).await.unwrap().unwrap().items,
-        serde_json::json!([u64::MAX - 1])
-    );
+    assert_eq!(items(&db, 1).await, serde_json::json!([]));
+    assert_eq!(items(&db, 2).await, serde_json::json!([u64::MAX - 1]));
 }
 
+/// JSON writes a NaN or an infinite float as `null`, so the JSON setters
+/// refuse one rather than store a `null` nobody asked for, and still store a
+/// `null` passed as one.
 #[tokio::test]
-async fn nonfinite_array_values_never_become_json_null() {
+async fn json_setters_refuse_nonfinite_values_but_keep_an_intentional_null() {
     let db = exact_json_database().await;
-    db.exec_raw("UPDATE review_exact_json SET items='[null,1]' WHERE id=1")
-        .await
-        .unwrap();
+    db.exec_raw(
+        "UPDATE review_exact_json SET items='[null,1]' WHERE id=1; \
+         UPDATE review_exact_json SET items='{\"a\":123}' WHERE id=2",
+    )
+    .await
+    .unwrap();
+    let update = |id: i64| ExactJson::query_with(&db).where_eq("id", id).update_all();
     for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-        assert!(
-            ExactJson::query_with(&db)
-                .where_eq("id", 1)
-                .update_all()
-                .array_remove("items", value)
-                .execute()
-                .await
-                .is_err()
-        );
-        assert!(
-            ExactJson::query_with(&db)
-                .where_eq("id", 1)
-                .update_all()
-                .array_append("items", vec![value])
-                .execute()
-                .await
-                .is_err()
-        );
-        assert_eq!(
-            ExactJson::find_with(1, &db).await.unwrap().unwrap().items,
-            serde_json::json!([null, 1])
-        );
+        for (setter, update) in [
+            ("array_remove", update(1).array_remove("items", value)),
+            ("array_append", update(1).array_append("items", vec![value])),
+            ("json_set", update(2).json_set("items", "$.a", value)),
+            (
+                "json_set of an array",
+                update(2).json_set("items", "$.a", vec![Some(value)]),
+            ),
+        ] {
+            assert!(update.execute().await.is_err(), "{setter} of {value}");
+        }
+        assert_eq!(items(&db, 1).await, json!([null, 1]));
+        assert_eq!(items(&db, 2).await, json!({"a": 123}));
     }
-    ExactJson::query_with(&db)
-        .where_eq("id", 1)
-        .update_all()
+    update(1)
         .array_remove("items", serde_json::Value::Null)
         .execute()
         .await
         .unwrap();
-    assert_eq!(
-        ExactJson::find_with(1, &db).await.unwrap().unwrap().items,
-        serde_json::json!([1])
-    );
-}
-
-#[tokio::test]
-async fn json_set_rejects_nonfinite_values_and_keeps_intentional_null() {
-    let db = exact_json_database().await;
-    db.exec_raw("UPDATE review_exact_json SET items='{\"a\":123}' WHERE id=1")
-        .await
-        .unwrap();
-    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-        assert!(
-            ExactJson::query_with(&db)
-                .where_eq("id", 1)
-                .update_all()
-                .json_set("items", "$.a", value)
-                .execute()
-                .await
-                .is_err()
-        );
-        assert!(
-            ExactJson::query_with(&db)
-                .where_eq("id", 1)
-                .update_all()
-                .json_set("items", "$.a", vec![Some(value)])
-                .execute()
-                .await
-                .is_err()
-        );
-        assert_eq!(
-            ExactJson::find_with(1, &db).await.unwrap().unwrap().items,
-            serde_json::json!({"a":123})
-        );
-    }
-    ExactJson::query_with(&db)
-        .where_eq("id", 1)
-        .update_all()
+    update(2)
         .json_set("items", "$.a", serde_json::Value::Null)
         .execute()
         .await
         .unwrap();
-    assert_eq!(
-        ExactJson::find_with(1, &db).await.unwrap().unwrap().items,
-        serde_json::json!({"a":null})
-    );
+    assert_eq!(items(&db, 1).await, json!([1]));
+    assert_eq!(items(&db, 2).await, json!({"a": null}));
 }
 
 #[tokio::test]

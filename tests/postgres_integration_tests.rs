@@ -1,5 +1,7 @@
-//! PostgreSQL integration tests: the shared scenarios in
-//! `support/integration_parity.rs` plus PostgreSQL-only type decoding.
+//! PostgreSQL integration tests: the scenarios every backend runs, in
+//! `support/integration_parity.rs`; those of the server backends, in
+//! `support/review_backend.rs`; and below, raw JSON decoding of PostgreSQL's
+//! own types, native array columns and a `NULLS NOT DISTINCT` upsert.
 //!
 //! Opt-in: set `RUN_POSTGRES_TESTS`, `TEST_DATABASE_URL` or
 //! `POSTGRESQL_DATABASE_URL`; `SKIP_POSTGRES_TESTS` turns them off again. Once

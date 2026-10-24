@@ -28,96 +28,26 @@ struct SoftDeleteMutationGuardUser {
     deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[tideorm::model(table = "query_column_alias_users")]
-struct ColumnAliasUser {
-    #[tideorm(primary_key, auto_increment)]
-    id: i64,
-    #[tideorm(column = "user_name")]
-    display_name: String,
-}
-
-#[test]
-fn table_qualified_rust_field_name_renders_the_canonical_column() {
-    let (sql, params) = ColumnAliasUser::query()
-        .where_eq("query_column_alias_users.display_name", "alice")
-        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
-
-    assert!(
-        sql.contains(r#""query_column_alias_users"."user_name" = $1"#),
-        "sql: {sql}"
-    );
-    assert!(!sql.contains("display_name"), "sql: {sql}");
-    assert_eq!(params.len(), 1);
-}
-
-#[test]
-fn unqualified_rust_field_name_still_renders_the_canonical_column() {
-    let (sql, _params) = ColumnAliasUser::query()
-        .where_eq("display_name", "alice")
-        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
-
-    assert!(sql.contains(r#""user_name" = $1"#), "sql: {sql}");
-    assert!(!sql.contains("display_name"), "sql: {sql}");
-}
-
-#[test]
-fn query_soft_delete_stamp_uses_a_utc_literal_not_the_database_clock() {
-    let timestamp = chrono::DateTime::parse_from_rfc3339("2026-07-25T12:34:56.123456Z")
-        .expect("fixture is valid rfc3339")
-        .with_timezone(&chrono::Utc);
-
-    for db_type in [DatabaseType::Postgres, DatabaseType::SQLite] {
-        assert_eq!(
-            crate::query::QueryBuilder::<MutationGuardUser>::utc_timestamp_literal(
-                db_type, timestamp
-            ),
-            "'2026-07-25T12:34:56.123456+00:00'"
-        );
-    }
-
-    for db_type in [DatabaseType::MySQL, DatabaseType::MariaDB] {
-        assert_eq!(
-            crate::query::QueryBuilder::<MutationGuardUser>::utc_timestamp_literal(
-                db_type, timestamp
-            ),
-            "'2026-07-25 12:34:56.123456'"
-        );
-    }
-
-    // The stamp is rendered for the backend the statement carrying it is
-    // rendered for, not for the ambient one: MySQL rejects both the `T`
-    // separator and the UTC offset that the PostgreSQL rendering carries.
-    let stamp =
-        crate::query::QueryBuilder::<MutationGuardUser>::current_timestamp_sql(DatabaseType::MySQL);
-    assert!(!stamp.contains("CURRENT_TIMESTAMP"), "stamp: {stamp}");
-    assert!(
-        stamp.starts_with('\'') && stamp.ends_with('\''),
-        "stamp: {stamp}"
-    );
-    assert!(!stamp.contains('T'), "stamp: {stamp}");
-    assert!(!stamp.contains('+'), "stamp: {stamp}");
-}
-
 #[test]
 fn equality_against_json_null_renders_a_null_check() {
-    let (sql, params) = SoftDeleteMutationGuardUser::query()
-        .with_trashed()
-        .where_eq("deleted_at", serde_json::Value::Null)
-        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
-
-    assert!(sql.contains(r#""deleted_at" IS NULL"#), "sql: {sql}");
-    assert!(params.is_empty(), "params: {params:?}");
-}
-
-#[test]
-fn inequality_against_json_null_renders_a_not_null_check() {
-    let (sql, params) = SoftDeleteMutationGuardUser::query()
-        .with_trashed()
-        .where_not("deleted_at", serde_json::Value::Null)
-        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
-
-    assert!(sql.contains(r#""deleted_at" IS NOT NULL"#), "sql: {sql}");
-    assert!(params.is_empty(), "params: {params:?}");
+    for (query, expected) in [
+        (
+            SoftDeleteMutationGuardUser::query()
+                .with_trashed()
+                .where_eq("deleted_at", serde_json::Value::Null),
+            r#""deleted_at" IS NULL"#,
+        ),
+        (
+            SoftDeleteMutationGuardUser::query()
+                .with_trashed()
+                .where_not("deleted_at", serde_json::Value::Null),
+            r#""deleted_at" IS NOT NULL"#,
+        ),
+    ] {
+        let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::Postgres);
+        assert!(sql.ends_with(&format!("WHERE {expected}")), "sql: {sql}");
+        assert!(params.is_empty(), "params: {params:?}");
+    }
 }
 
 #[test]
@@ -211,123 +141,155 @@ async fn chunk_processes_rows_without_skipping_when_callback_changes_query_scope
 }
 
 #[test]
-fn query_fragment_preserves_soft_delete_scope_semantics() {
+fn query_fragment_carries_the_soft_delete_scope() {
+    // A fragment's trash scope replaces the builder's.
     let with_trashed = SoftDeleteMutationGuardUser::query().with_trashed();
-    let fragment = with_trashed.consolidate();
-
-    assert!(!fragment.is_empty());
-
     let rebuilt = SoftDeleteMutationGuardUser::query()
         .only_trashed()
-        .apply(&fragment)
+        .apply(&with_trashed.consolidate())
         .build_sql_preview();
-
     assert_eq!(rebuilt, with_trashed.build_sql_preview());
+    assert!(!rebuilt.contains("WHERE"), "sql: {rebuilt}");
+
+    let only_trashed = SoftDeleteMutationGuardUser::query()
+        .apply(
+            &SoftDeleteMutationGuardUser::query()
+                .only_trashed()
+                .consolidate(),
+        )
+        .build_sql_preview();
     assert!(
-        !rebuilt.contains("deleted_at\" IS NOT NULL"),
-        "sql: {rebuilt}"
-    );
-    assert!(!rebuilt.contains("deleted_at\" IS NULL"), "sql: {rebuilt}");
-}
-
-#[test]
-fn query_fragment_only_trashed_scope_is_not_empty() {
-    let fragment = SoftDeleteMutationGuardUser::query()
-        .only_trashed()
-        .consolidate();
-
-    assert!(!fragment.is_empty());
-}
-
-#[test]
-fn mutation_guard_rejects_unfiltered_delete() {
-    let err = MutationGuardUser::query()
-        .ensure_mutation_has_explicit_filters("delete")
-        .unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("requires at least one explicit filter")
+        only_trashed.ends_with("WHERE \"deleted_at\" IS NOT NULL"),
+        "sql: {only_trashed}"
     );
 }
 
 #[test]
-fn mutation_guard_accepts_basic_where_clause() {
-    assert!(
-        MutationGuardUser::query()
-            .where_eq("id", 1)
-            .ensure_mutation_has_explicit_filters("delete")
-            .is_ok()
-    );
-}
-
-#[test]
-fn mutation_guard_accepts_non_empty_or_group() {
-    assert!(
-        MutationGuardUser::query()
-            .begin_or()
-            .or_where_eq("name", "alice")
-            .end_or()
-            .ensure_mutation_has_explicit_filters("delete")
-            .is_ok()
-    );
-}
-
-#[test]
-fn mutation_guard_rejects_only_trashed_without_user_filters() {
-    let err = SoftDeleteMutationGuardUser::query()
-        .only_trashed()
-        .ensure_mutation_has_explicit_filters("restore")
-        .unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("requires at least one explicit filter")
-    );
-}
-
-#[test]
-fn mutation_guard_rejects_empty_nested_or_groups() {
-    let mut query = MutationGuardUser::query();
-    query
+fn mutation_guard_rejects_a_query_with_no_restrictive_filter() {
+    let mut empty_nested_group = MutationGuardUser::query();
+    empty_nested_group
         .clauses
         .or_groups
         .push(OrGroup::new().nested_or(|group| group));
 
-    let err = query
-        .ensure_mutation_has_explicit_filters("delete")
-        .unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("requires at least one explicit filter")
-    );
+    for (case, result) in [
+        (
+            "no filter",
+            MutationGuardUser::query().ensure_mutation_has_explicit_filters("delete"),
+        ),
+        (
+            "only_trashed() alone",
+            SoftDeleteMutationGuardUser::query()
+                .only_trashed()
+                .ensure_mutation_has_explicit_filters("restore"),
+        ),
+        (
+            "an empty nested OR group",
+            empty_nested_group.ensure_mutation_has_explicit_filters("delete"),
+        ),
+        // An empty candidate set for a negative membership test renders
+        // constant-true. Reaching it by accident is easy -- a filter list that
+        // came back empty from a form -- and the rendered-SQL check cannot
+        // catch it: sea-query emits an empty `NOT IN` as the bound pair
+        // `? = ?`, and a soft-delete model appends `deleted_at IS NULL` to
+        // whatever the caller declared.
+        (
+            "an empty NOT IN list",
+            MutationGuardUser::query()
+                .where_not_in("id", Vec::<i64>::new())
+                .ensure_mutation_has_explicit_filters("delete"),
+        ),
+        (
+            "two empty NOT IN lists",
+            MutationGuardUser::query()
+                .where_not_in("name", Vec::<&str>::new())
+                .where_not_in("id", Vec::<i64>::new())
+                .ensure_mutation_has_explicit_filters("delete"),
+        ),
+        // A NOT IN list of NULLs and `where_not(col, None)` both render
+        // `IS NOT NULL`, which keeps every row of a `NOT NULL` column.
+        (
+            "a NOT IN list of NULLs",
+            MutationGuardUser::query()
+                .where_not_in("id", vec![None::<i64>, None])
+                .ensure_mutation_has_explicit_filters("delete"),
+        ),
+        (
+            "where_not(None)",
+            MutationGuardUser::query()
+                .where_not("name", None::<String>)
+                .ensure_mutation_has_explicit_filters("delete"),
+        ),
+    ] {
+        let err = result.expect_err(case);
+        assert!(
+            err.to_string()
+                .contains("requires at least one explicit filter"),
+            "{case}: {err}"
+        );
+    }
 }
 
-/// An empty group renders nothing, so it cannot stop an `Or` group beside a
-/// filter from restricting: `when(false, ..)` inside one used to make a
-/// filtered delete look unfiltered.
 #[test]
-fn mutation_guard_skips_empty_nested_groups() {
-    let mut query = MutationGuardUser::query();
-    query
+fn mutation_guard_accepts_any_restrictive_filter() {
+    // An empty group renders nothing, so it cannot stop an `Or` group beside
+    // a filter from restricting: `when(false, ..)` inside one used to make a
+    // filtered delete look unfiltered.
+    let mut filter_beside_empty_group = MutationGuardUser::query();
+    filter_beside_empty_group
         .clauses
         .or_groups
         .push(OrGroup::new().where_eq("id", 1).nested_and(|group| group));
 
-    query
-        .ensure_mutation_has_explicit_filters("delete")
-        .unwrap();
+    for (case, query) in [
+        (
+            "a WHERE clause",
+            MutationGuardUser::query().where_eq("id", 1),
+        ),
+        (
+            "an OR group",
+            MutationGuardUser::query()
+                .begin_or()
+                .or_where_eq("name", "alice")
+                .end_or(),
+        ),
+        ("a filter beside an empty group", filter_beside_empty_group),
+        // Only queries whose every filter is vacuous are refused.
+        (
+            "a real filter beside a vacuous one",
+            MutationGuardUser::query()
+                .where_eq("name", "alice")
+                .where_not_in("id", Vec::<i64>::new()),
+        ),
+        (
+            "a non-empty NOT IN list",
+            MutationGuardUser::query().where_not_in("id", vec![1i64]),
+        ),
+        (
+            "a NOT IN list holding a value beside a NULL",
+            MutationGuardUser::query().where_not_in("id", vec![None, Some(1i64)]),
+        ),
+        // An empty IN list renders constant-false, which matches nothing and
+        // is safe for a mutation.
+        (
+            "an empty IN list",
+            MutationGuardUser::query().where_in("id", Vec::<i64>::new()),
+        ),
+    ] {
+        query
+            .ensure_mutation_has_explicit_filters("delete")
+            .unwrap_or_else(|err| panic!("{case}: {err}"));
+    }
 }
 
 #[test]
-fn delete_all_accepts_unfiltered_queries() {
+fn delete_all_refuses_where_filters() {
     assert!(
         MutationGuardUser::query()
             .ensure_mutation_has_no_explicit_filters("delete_all")
             .is_ok()
     );
-}
 
-#[test]
-fn delete_all_rejects_filtered_queries() {
     let err = MutationGuardUser::query()
         .where_eq("id", 1)
         .ensure_mutation_has_no_explicit_filters("delete_all")
@@ -342,121 +304,124 @@ struct QueryCountGuardUser {
     name: String,
 }
 
+/// A query is counted directly, keeping its joins and filters and dropping
+/// its ordering and page; one whose rows are groups, or whose raw projection
+/// may aggregate, is counted through a derived table.
 #[test]
-fn count_sql_preserves_joins() {
-    let (sql, params) = QueryCountGuardUser::query()
-        .inner_join("profiles", "query_count_guard_users.id", "profiles.user_id")
-        .where_eq("profiles.active", true)
-        .build_count_sql_with_params_for_db(DatabaseType::Postgres);
+fn count_sql_counts_the_rows_the_query_returns() {
+    let users = "\"query_count_guard_users\"";
+    let alice = || Value::String(Some("alice".to_string()));
 
-    assert_eq!(params.len(), 1);
-    assert!(sql.starts_with("SELECT COUNT(*) AS count FROM \"query_count_guard_users\" "));
-    assert!(sql.contains(" FROM \"query_count_guard_users\" "));
-    assert!(sql.contains(
-        "INNER JOIN \"profiles\" ON \"query_count_guard_users\".\"id\" = \"profiles\".\"user_id\""
-    ));
-    assert!(sql.contains("WHERE \"profiles\".\"active\" = $1"));
-    assert!(!sql.contains("tideorm_count_subquery"));
+    for (query, expected, params) in [
+        (
+            QueryCountGuardUser::query()
+                .inner_join("profiles", "query_count_guard_users.id", "profiles.user_id")
+                .where_eq("profiles.active", true),
+            format!(
+                "SELECT COUNT(*) AS count FROM {users} INNER JOIN \"profiles\" ON {users}.\"id\" = \"profiles\".\"user_id\" WHERE \"profiles\".\"active\" = $1"
+            ),
+            vec![Value::Bool(Some(true))],
+        ),
+        (
+            QueryCountGuardUser::query()
+                .where_eq("name", "alice")
+                .order_by("name", crate::query::Order::Asc)
+                .limit(10)
+                .offset(20),
+            format!("SELECT COUNT(*) AS count FROM {users} WHERE \"name\" = $1"),
+            vec![alice()],
+        ),
+        // One constant row per group: two grouping columns of one name
+        // (`orders.status`, `customers.status`) would collide in the derived
+        // table, which MySQL refuses.
+        (
+            QueryCountGuardUser::query().group_by("name"),
+            format!(
+                "SELECT COUNT(*) AS count FROM (SELECT 1 FROM {users} GROUP BY \"name\") AS \"tideorm_count_subquery\""
+            ),
+            vec![],
+        ),
+        (
+            QueryCountGuardUser::query()
+                .select(vec!["name"])
+                .group_by("name")
+                .having("COUNT(*) > 1"),
+            format!(
+                "SELECT COUNT(*) AS count FROM (SELECT {users}.\"name\" FROM {users} GROUP BY \"name\" HAVING COUNT(*) > 1) AS \"tideorm_count_subquery\""
+            ),
+            vec![],
+        ),
+        (
+            QueryCountGuardUser::query()
+                .select(vec!["name"])
+                .group_by("name")
+                .having(crate::Aggregate::count().gt(1)),
+            format!(
+                "SELECT COUNT(*) AS count FROM (SELECT {users}.\"name\" FROM {users} GROUP BY \"name\" HAVING COUNT(*) > $1) AS \"tideorm_count_subquery\""
+            ),
+            vec![Value::BigInt(Some(1))],
+        ),
+        (
+            QueryCountGuardUser::query().select_raw("COUNT(*) AS total_count"),
+            format!(
+                "SELECT COUNT(*) AS count FROM (SELECT COUNT(*) AS total_count FROM {users}) AS \"tideorm_count_subquery\""
+            ),
+            vec![],
+        ),
+    ] {
+        let (sql, bound) = query.build_count_sql_with_params_for_db(DatabaseType::Postgres);
+        assert_eq!(sql, expected);
+        assert_eq!(bound, params, "{sql}");
+    }
 }
 
+/// `exists()` asks for one row of the query, ordering and page dropped, and
+/// selects a constant unless the projection matters: HAVING may name an
+/// explicit projection's alias.
 #[test]
-fn count_sql_preserves_group_by_and_having() {
-    let (sql, params) = QueryCountGuardUser::query()
-        .select(vec!["name"])
-        .group_by("name")
-        .having("COUNT(*) > 1")
-        .build_count_sql_with_params_for_db(DatabaseType::Postgres);
+fn exists_sql_selects_a_constant_unless_having_reads_the_projection() {
+    let users = "\"query_count_guard_users\"";
 
-    assert!(params.is_empty());
-    assert!(sql.starts_with("SELECT COUNT(*) AS count FROM (SELECT "));
-    assert!(sql.contains("\"name\" FROM \"query_count_guard_users\""));
-    assert!(sql.contains("GROUP BY \"name\""));
-    assert!(sql.contains("HAVING COUNT(*) > 1"));
-    assert!(sql.ends_with(") AS \"tideorm_count_subquery\""));
-}
-
-#[test]
-fn count_sql_parameterizes_builtin_having_helpers() {
-    let (sql, params) = QueryCountGuardUser::query()
-        .select(vec!["name"])
-        .group_by("name")
-        .having(crate::Aggregate::count().gt(1))
-        .build_count_sql_with_params_for_db(DatabaseType::Postgres);
-
-    assert_eq!(params, vec![Value::BigInt(Some(1))]);
-    assert!(sql.starts_with("SELECT COUNT(*) AS count FROM (SELECT "));
-    assert!(sql.contains("GROUP BY \"name\""));
-    assert!(sql.contains("HAVING COUNT(*) > $1"));
-    assert!(sql.ends_with(") AS \"tideorm_count_subquery\""));
-}
-
-#[test]
-fn count_sql_preserves_subquery_wrapper_for_raw_aggregate_projection() {
-    let (sql, params) = QueryCountGuardUser::query()
-        .select_raw("COUNT(*) AS total_count")
-        .build_count_sql_with_params_for_db(DatabaseType::Postgres);
-
-    assert!(params.is_empty());
-    assert!(sql.starts_with("SELECT COUNT(*) AS count FROM (SELECT "));
-    assert!(sql.contains("COUNT(*) AS total_count FROM \"query_count_guard_users\""));
-    assert!(sql.ends_with(") AS \"tideorm_count_subquery\""));
-}
-
-#[test]
-fn count_sql_ignores_order_limit_and_offset() {
-    let (sql, params) = QueryCountGuardUser::query()
-        .where_eq("name", "alice")
-        .order_by("name", crate::query::Order::Asc)
-        .limit(10)
-        .offset(20)
-        .build_count_sql_with_params_for_db(DatabaseType::Postgres);
-
-    assert_eq!(params.len(), 1);
-    assert!(!sql.contains("ORDER BY"));
-    assert!(!sql.contains("LIMIT 10"));
-    assert!(!sql.contains("OFFSET 20"));
-    assert!(sql.contains("WHERE \"name\" = $1"));
-}
-
-#[test]
-fn exists_sql_uses_select_one_with_limit() {
-    let (sql, params) = QueryCountGuardUser::query()
-        .where_eq("name", "alice")
-        .build_exists_sql_with_params_for_db(DatabaseType::Postgres);
-
-    assert_eq!(params.len(), 1);
-    assert!(sql.starts_with("SELECT EXISTS(SELECT 1 FROM "));
-    assert!(sql.contains("FROM \"query_count_guard_users\""));
-    assert!(sql.contains("WHERE \"name\" = $1"));
-    assert!(sql.ends_with("LIMIT 1) AS \"exists_result\""));
-}
-
-#[test]
-fn exists_sql_discards_original_projection_for_non_union_queries() {
-    let (sql, params) = QueryCountGuardUser::query()
-        .select(vec!["name"])
-        .build_exists_sql_with_params_for_db(DatabaseType::Postgres);
-
-    assert!(params.is_empty());
-    assert!(sql.starts_with("SELECT EXISTS(SELECT 1 FROM "));
-    assert!(!sql.contains("SELECT \"query_count_guard_users\".\"name\""));
-}
-
-#[test]
-fn exists_sql_ignores_order_limit_and_offset() {
-    let (sql, params) = QueryCountGuardUser::query()
-        .where_eq("name", "alice")
-        .order_by("name", crate::query::Order::Asc)
-        .limit(10)
-        .offset(20)
-        .build_exists_sql_with_params_for_db(DatabaseType::Postgres);
-
-    assert_eq!(params.len(), 1);
-    assert!(!sql.contains("ORDER BY"));
-    assert!(!sql.contains("LIMIT 10"));
-    assert!(!sql.contains("OFFSET 20"));
-    assert!(sql.ends_with("LIMIT 1) AS \"exists_result\""));
-    assert!(sql.contains("WHERE \"name\" = $1"));
+    for (query, inner, params) in [
+        (
+            QueryCountGuardUser::query()
+                .where_eq("name", "alice")
+                .order_by("name", crate::query::Order::Asc)
+                .limit(10)
+                .offset(20),
+            format!("SELECT 1 FROM {users} WHERE \"name\" = $1"),
+            vec![Value::String(Some("alice".to_string()))],
+        ),
+        (
+            QueryCountGuardUser::query().select(vec!["name"]),
+            format!("SELECT 1 FROM {users}"),
+            vec![],
+        ),
+        (
+            QueryCountGuardUser::query()
+                .group_by("name")
+                .having("COUNT(*) > 1"),
+            format!("SELECT 1 FROM {users} GROUP BY \"name\" HAVING COUNT(*) > 1"),
+            vec![],
+        ),
+        (
+            QueryCountGuardUser::query()
+                .select(vec!["name AS label"])
+                .group_by("name")
+                .having("COUNT(*) > 1"),
+            format!(
+                "SELECT {users}.\"name\" AS \"label\" FROM {users} GROUP BY \"name\" HAVING COUNT(*) > 1"
+            ),
+            vec![],
+        ),
+    ] {
+        let (sql, bound) = query.build_exists_sql_with_params_for_db(DatabaseType::Postgres);
+        assert_eq!(
+            sql,
+            format!("SELECT EXISTS({inner} LIMIT 1) AS \"exists_result\"")
+        );
+        assert_eq!(bound, params, "{sql}");
+    }
 }
 
 #[test]
@@ -497,53 +462,24 @@ fn exists_sql_preserves_subquery_wrapper_for_union_queries() {
 }
 
 #[test]
-fn sql_preview_is_labeled_as_non_executable() {
-    let preview = QueryCountGuardUser::query()
-        .where_eq("name", "alice")
-        .build_sql_preview();
-
-    assert!(preview.starts_with("-- DEBUG PREVIEW (not executable, values are approximate)\n"));
-    assert!(preview.contains("query_count_guard_users"));
-    assert!(
-        preview.ends_with("WHERE \"name\" = 'alice'"),
-        "the preview is the executed statement with its values inlined: {preview}"
-    );
-}
-
-#[test]
-fn sql_preview_inlines_escaped_like_patterns() {
+fn sql_preview_escapes_values_the_way_the_backend_reads_them() {
     let name = crate::columns::Column::<String>::new("name");
-    let preview = QueryCountGuardUser::query()
+    let postgres = QueryCountGuardUser::query()
         .where_col(name.starts_with(r"100%_\done"))
         .build_sql_preview_for_db(DatabaseType::Postgres);
-
     assert!(
-        preview.ends_with(r#"WHERE "name" LIKE E'100!%!_\\done%' ESCAPE '!'"#),
-        "{preview}"
+        postgres.ends_with(r#"WHERE "name" LIKE E'100!%!_\\done%' ESCAPE '!'"#),
+        "{postgres}"
     );
-}
 
-#[test]
-fn mysql_sql_preview_escapes_backslash_quote_pairs() {
-    let preview = QueryCountGuardUser::query()
+    // MySQL reads `\'` as an escaped quote, so the backslash is doubled.
+    let mysql = QueryCountGuardUser::query()
         .where_eq("name", r#"\' OR 1=1 --"#)
         .build_sql_preview_for_db(DatabaseType::MySQL);
-
     assert!(
-        preview.ends_with(r#"WHERE `name` = '\\\' OR 1=1 --'"#),
-        "{preview}"
+        mysql.ends_with(r#"WHERE `name` = '\\\' OR 1=1 --'"#),
+        "{mysql}"
     );
-}
-
-#[test]
-fn postgres_parameterized_sql_uses_single_character_like_escape() {
-    let name = crate::columns::Column::<String>::new("name");
-    let (sql, params) = QueryCountGuardUser::query()
-        .where_col(name.starts_with(r"100%_\done"))
-        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
-
-    assert!(sql.contains("WHERE \"name\" LIKE $1 ESCAPE '!'"));
-    assert_eq!(params.len(), 1);
 }
 
 #[test]
@@ -564,58 +500,48 @@ fn debug_output_includes_preview_banner_and_parameterized_sql() {
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
-async fn query_delete_invalidates_cached_queries() {
+async fn query_delete_and_delete_all_invalidate_cached_queries() {
     let _guard = crate::test_support::global_db_lock().lock().await;
     let _db = setup_query_mutation_cache_test_db().await;
+    let seed = || async {
+        MutationGuardUser {
+            id: 0,
+            name: "Alice".to_string(),
+        }
+        .save()
+        .await
+        .expect("seed save should succeed")
+    };
 
-    let saved = MutationGuardUser {
-        id: 0,
-        name: "Alice".to_string(),
-    }
-    .save()
-    .await
-    .expect("seed save should succeed");
-
-    let cached_before = crate::test_support::cached_rows::<MutationGuardUser>().await;
-    assert_eq!(cached_before.len(), 1);
+    let saved = seed().await;
+    assert_eq!(
+        crate::test_support::cached_rows::<MutationGuardUser>()
+            .await
+            .len(),
+        1
+    );
     assert_eq!(crate::test_support::cached_entries(), 1);
-
-    let rows_affected = MutationGuardUser::query()
+    let deleted = MutationGuardUser::query()
         .where_eq("id", saved.id)
         .delete()
         .await
         .expect("query delete should succeed");
-
-    assert_eq!(rows_affected, 1);
+    assert_eq!(deleted, 1);
     assert_eq!(crate::test_support::cached_entries(), 0);
 
-    crate::test_support::reset_globals_and_cache();
-}
-
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-#[tokio::test]
-async fn query_delete_all_invalidates_cached_queries() {
-    let _guard = crate::test_support::global_db_lock().lock().await;
-    let _db = setup_query_mutation_cache_test_db().await;
-
-    MutationGuardUser {
-        id: 0,
-        name: "Alice".to_string(),
-    }
-    .save()
-    .await
-    .expect("seed save should succeed");
-
-    let cached_before = crate::test_support::cached_rows::<MutationGuardUser>().await;
-    assert_eq!(cached_before.len(), 1);
+    seed().await;
+    assert_eq!(
+        crate::test_support::cached_rows::<MutationGuardUser>()
+            .await
+            .len(),
+        1
+    );
     assert_eq!(crate::test_support::cached_entries(), 1);
-
-    let rows_affected = MutationGuardUser::query()
+    let deleted = MutationGuardUser::query()
         .delete_all()
         .await
         .expect("query delete_all should succeed");
-
-    assert_eq!(rows_affected, 1);
+    assert_eq!(deleted, 1);
     assert_eq!(crate::test_support::cached_entries(), 0);
 
     crate::test_support::reset_globals_and_cache();
@@ -623,9 +549,20 @@ async fn query_delete_all_invalidates_cached_queries() {
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
-async fn soft_delete_and_restore_invalidate_cached_queries() {
+async fn soft_delete_restore_and_force_delete_invalidate_cached_queries() {
     let _guard = crate::test_support::global_db_lock().lock().await;
     let _db = setup_query_mutation_cache_test_db().await;
+    let cache_with_trashed = || async {
+        let rows = SoftDeleteMutationGuardUser::query()
+            .with_trashed()
+            .order_by("id", crate::query::Order::Asc)
+            .cache(Duration::from_secs(60))
+            .get()
+            .await
+            .expect("a cached read with trashed rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(crate::test_support::cached_entries(), 1);
+    };
 
     let saved = SoftDeleteMutationGuardUser {
         id: 0,
@@ -635,135 +572,76 @@ async fn soft_delete_and_restore_invalidate_cached_queries() {
     .save()
     .await
     .expect("seed save should succeed");
+    let by_id = || {
+        SoftDeleteMutationGuardUser::query()
+            .with_trashed()
+            .where_eq("id", saved.id)
+    };
 
-    let cached_before_soft_delete =
-        crate::test_support::cached_rows::<SoftDeleteMutationGuardUser>().await;
-    assert_eq!(cached_before_soft_delete.len(), 1);
+    assert_eq!(
+        crate::test_support::cached_rows::<SoftDeleteMutationGuardUser>()
+            .await
+            .len(),
+        1
+    );
     assert_eq!(crate::test_support::cached_entries(), 1);
-
     let soft_deleted = SoftDeleteMutationGuardUser::query()
         .where_eq("id", saved.id)
         .soft_delete()
         .await
-        .expect("soft_delete should succeed");
-
+        .expect("soft_delete");
     assert_eq!(soft_deleted, 1);
     assert_eq!(crate::test_support::cached_entries(), 0);
 
-    let cached_before_restore = SoftDeleteMutationGuardUser::query()
-        .with_trashed()
-        .order_by("id", crate::query::Order::Asc)
-        .cache(Duration::from_secs(60))
-        .get()
-        .await
-        .expect("cached query before restore should succeed");
-    assert_eq!(cached_before_restore.len(), 1);
-    assert_eq!(crate::test_support::cached_entries(), 1);
-
-    let restored = SoftDeleteMutationGuardUser::query()
-        .where_eq("id", saved.id)
-        .with_trashed()
-        .restore()
-        .await
-        .expect("restore should succeed");
-
+    cache_with_trashed().await;
+    let restored = by_id().restore().await.expect("restore");
     assert_eq!(restored, 1);
     assert_eq!(crate::test_support::cached_entries(), 0);
 
-    crate::test_support::reset_globals_and_cache();
-}
-
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-#[tokio::test]
-async fn force_delete_invalidates_cached_queries() {
-    let _guard = crate::test_support::global_db_lock().lock().await;
-    let _db = setup_query_mutation_cache_test_db().await;
-
-    let saved = SoftDeleteMutationGuardUser {
-        id: 0,
-        name: "Alice".to_string(),
-        deleted_at: None,
-    }
-    .save()
-    .await
-    .expect("seed save should succeed");
-
-    SoftDeleteMutationGuardUser::query()
-        .where_eq("id", saved.id)
-        .soft_delete()
-        .await
-        .expect("soft_delete should succeed");
-
-    let cached_before = SoftDeleteMutationGuardUser::query()
-        .with_trashed()
-        .order_by("id", crate::query::Order::Asc)
-        .cache(Duration::from_secs(60))
-        .get()
-        .await
-        .expect("cached query before force_delete should succeed");
-    assert_eq!(cached_before.len(), 1);
-    assert_eq!(crate::test_support::cached_entries(), 1);
-
-    let rows_affected = SoftDeleteMutationGuardUser::query()
-        .with_trashed()
-        .where_eq("id", saved.id)
-        .force_delete()
-        .await
-        .expect("force_delete should succeed");
-
-    assert_eq!(rows_affected, 1);
+    cache_with_trashed().await;
+    let force_deleted = by_id().force_delete().await.expect("force_delete");
+    assert_eq!(force_deleted, 1);
     assert_eq!(crate::test_support::cached_entries(), 0);
 
     crate::test_support::reset_globals_and_cache();
 }
 
-/// A query carrying a condition whose operator and value do not pair up, so it
-/// has no SQL rendering.
-fn unrenderable_query() -> crate::query::QueryBuilder<MutationGuardUser> {
-    let mut query = MutationGuardUser::query();
-    query.clauses.conditions.push(crate::query::WhereCondition {
-        column: "id".to_string(),
-        operator: crate::query::Operator::Between,
-        value: crate::query::ConditionValue::Single(serde_json::json!(1)),
-    });
-    query
-}
-
+/// A condition whose operator and value do not pair up has no SQL rendering,
+/// and every path refuses it: the aggregates' SeaORM path used to drop it from
+/// its WHERE clause, so the aggregate silently covered every row.
 #[tokio::test]
-async fn aggregates_reject_a_condition_that_cannot_be_rendered() {
-    // The aggregates' SeaORM path used to drop such a condition from its WHERE
-    // clause, so the aggregate silently covered every row.
-    let sum = unrenderable_query().sum::<i64>("id").await.unwrap_err();
+async fn a_condition_that_cannot_be_rendered_is_refused() {
+    let unrenderable = || {
+        let mut query = MutationGuardUser::query();
+        query.clauses.conditions.push(crate::query::WhereCondition {
+            column: "id".to_string(),
+            operator: crate::query::Operator::Between,
+            value: crate::query::ConditionValue::Single(serde_json::json!(1)),
+        });
+        query
+    };
+
+    let sum = unrenderable().sum::<i64>("id").await.unwrap_err();
     assert!(
         sum.to_string().contains("cannot be rendered as SQL"),
         "{sum}"
     );
 
-    let distinct = unrenderable_query()
-        .count_distinct("name")
-        .await
-        .unwrap_err();
+    let distinct = unrenderable().count_distinct("name").await.unwrap_err();
     assert!(
         distinct.to_string().contains("cannot be rendered as SQL"),
         "{distinct}"
     );
-}
 
-#[test]
-fn subquery_operands_reject_a_condition_that_cannot_be_rendered() {
-    let err = MutationGuardUser::query()
-        .where_exists(unrenderable_query())
+    let operand = MutationGuardUser::query()
+        .where_exists(unrenderable())
         .ensure_query_is_valid()
-        .unwrap_err();
-
+        .unwrap_err()
+        .to_string();
     assert!(
-        err.to_string()
-            .contains("invalid subquery for where_exists()"),
-        "{err}"
-    );
-    assert!(
-        err.to_string().contains("cannot be rendered as SQL"),
-        "{err}"
+        operand.contains("invalid subquery for where_exists()")
+            && operand.contains("cannot be rendered as SQL"),
+        "{operand}"
     );
 }
 

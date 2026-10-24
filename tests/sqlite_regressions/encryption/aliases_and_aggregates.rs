@@ -1,6 +1,6 @@
 //! Aliases and aggregates over encrypted columns.
 
-use crate::fixtures::{Number, encrypted_error, global_memory_database};
+use crate::fixtures::{Number, encrypted_error, global_memory_database, memory_database};
 use tideorm::prelude::*;
 
 #[tideorm::model(table = "audit_secrets", encrypted = "value")]
@@ -82,7 +82,6 @@ async fn encrypted_arithmetic_rejects_scalar_multi_having_and_window_operations(
     );
 }
 
-#[cfg(feature = "encrypted-fields")]
 #[tokio::test]
 async fn distinct_rejects_randomized_encrypted_values() {
     #[tideorm::model(table = "review_distinct_secret", encrypted = "secret")]
@@ -191,7 +190,6 @@ async fn distinct_rejects_randomized_encrypted_values() {
     TideConfig::reset();
 }
 
-#[cfg(feature = "encrypted-fields")]
 #[tokio::test]
 async fn expression_alias_is_not_decrypted() {
     #[tideorm::model(table = "review_secrets", encrypted = "secret")]
@@ -200,13 +198,12 @@ async fn expression_alias_is_not_decrypted() {
         id: i64,
         secret: String,
     }
-    let db = Database::connect("sqlite::memory:").await.unwrap();
-    db.exec_raw("CREATE TABLE review_secrets(id INTEGER PRIMARY KEY, secret TEXT)")
-        .await
-        .unwrap();
-    db.exec_raw("INSERT INTO review_secrets VALUES(1, 'not a ciphertext')")
-        .await
-        .unwrap();
+    tideorm::tokenization::TokenConfig::set_encryption_key("audit-next-key");
+    let db = memory_database(
+        "CREATE TABLE review_secrets(id INTEGER PRIMARY KEY, secret TEXT); \
+         INSERT INTO review_secrets VALUES(1, 'not a ciphertext')",
+    )
+    .await;
     let rows = Secret::query_with(&db)
         .select_raw("COUNT(*) AS secret")
         .get_json()
@@ -214,16 +211,15 @@ async fn expression_alias_is_not_decrypted() {
         .unwrap();
     assert_eq!(rows[0]["secret"], 1);
     // Direct encrypted-column projections must still reject plaintext.
-    assert!(
-        Secret::query_with(&db)
-            .select(vec!["secret"])
-            .get_json()
-            .await
-            .is_err()
-    );
+    let error = Secret::query_with(&db)
+        .select(vec!["secret"])
+        .get_json()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("plaintext"), "{error}");
 }
 
-#[cfg(feature = "encrypted-fields")]
 #[tokio::test]
 async fn aggregate_projection_alias_keeps_encryption_source() {
     #[tideorm::model(table = "review_aggregate_secret", encrypted = "secret")]
@@ -301,10 +297,7 @@ async fn aggregate_projection_alias_keeps_encryption_source() {
 /// column is named, while a raw `ORDER BY` stays the caller's own.
 #[tokio::test]
 async fn encrypted_columns_cannot_order_rows() {
-    let db = crate::fixtures::memory_database(
-        "CREATE TABLE audit_secrets(id INTEGER PRIMARY KEY,value TEXT)",
-    )
-    .await;
+    let db = memory_database("CREATE TABLE audit_secrets(id INTEGER PRIMARY KEY,value TEXT)").await;
     encrypted_error(Secret::query_with(&db).order_asc("value").get().await);
     encrypted_error(
         Secret::query_with(&db)

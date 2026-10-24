@@ -1,95 +1,34 @@
 use super::*;
 use std::error::Error as StdError;
 
+/// Without a driver classification, the suggestion is read from the message.
 #[test]
 fn test_error_suggestions() {
-    let err = Error::not_found("User with ID 123 not found");
-    let suggestion = err.suggestion();
-    assert!(
-        suggestion.contains("verify")
-            || suggestion.contains("exists")
-            || suggestion.contains("ID")
-            || suggestion.contains("record")
-    );
-
-    let err = Error::connection("Connection refused");
-    let suggestion = err.suggestion();
-    assert!(suggestion.contains("running") || suggestion.contains("server"));
-
-    let err = Error::query("duplicate key value violates unique constraint");
-    let suggestion = err.suggestion();
-    assert!(suggestion.contains("Duplicate") || suggestion.contains("unique"));
-
-    let err = Error::query("violates foreign key constraint");
-    let suggestion = err.suggestion();
-    assert!(suggestion.contains("Foreign key") || suggestion.contains("foreign"));
-}
-
-#[test]
-fn test_error_codes() {
-    assert_eq!(Error::not_found("User not found").code(), "TIDE_NOT_FOUND");
-    assert_eq!(Error::connection("test").code(), "TIDE_CONNECTION");
-    assert_eq!(Error::query("test").code(), "TIDE_QUERY");
-    assert_eq!(
-        Error::validation("field", "message").code(),
-        "TIDE_VALIDATION"
-    );
-    assert_eq!(Error::conversion("test").code(), "TIDE_CONVERSION");
-    assert_eq!(Error::transaction("test").code(), "TIDE_TRANSACTION");
-    assert_eq!(Error::configuration("test").code(), "TIDE_CONFIG");
-    assert_eq!(Error::internal("test").code(), "TIDE_INTERNAL");
-}
-
-#[test]
-fn test_http_status() {
-    assert_eq!(Error::not_found("User not found").http_status(), 404);
-    assert_eq!(Error::connection("test").http_status(), 503);
-    assert_eq!(Error::query("test").http_status(), 400);
-    assert_eq!(Error::validation("field", "message").http_status(), 422);
-    assert_eq!(Error::conversion("test").http_status(), 400);
-    assert_eq!(Error::transaction("test").http_status(), 409);
-    assert_eq!(Error::configuration("test").http_status(), 500);
-    assert_eq!(Error::internal("test").http_status(), 500);
-}
-
-#[test]
-fn test_is_retryable() {
-    let err = Error::connection("Connection timeout");
-    assert!(err.is_retryable());
-
-    let err = Error::connection("connection pool exhausted");
-    assert!(err.is_retryable());
-
-    let err = Error::query("deadlock detected");
-    assert!(err.is_retryable());
-
-    let err = Error::query("syntax error");
-    assert!(!err.is_retryable());
-
-    let err = Error::not_found("User not found");
-    assert!(!err.is_retryable());
-}
-
-#[test]
-fn test_error_context() {
-    let ctx = ErrorContext::new()
-        .table("users")
-        .column("email")
-        .condition("email = \"alice@example.com\"")
-        .operator_chain("email = \"alice@example.com\"")
-        .query("SELECT * FROM users");
-
-    assert_eq!(ctx.table, Some("users".to_string()));
-    assert_eq!(ctx.column, Some("email".to_string()));
-    assert_eq!(
-        ctx.conditions,
-        vec!["email = \"alice@example.com\"".to_string()]
-    );
-    assert_eq!(
-        ctx.operator_chain,
-        Some("email = \"alice@example.com\"".to_string())
-    );
-    assert_eq!(ctx.query, Some("SELECT * FROM users".to_string()));
+    for (err, expected) in [
+        (
+            Error::not_found("User with ID 123 not found"),
+            "hasn't been soft-deleted",
+        ),
+        (
+            Error::not_found("find user 123"),
+            "`Model::exists(id).await?`",
+        ),
+        (
+            Error::connection("Connection refused"),
+            "Database server is not running",
+        ),
+        (
+            Error::query("duplicate key value violates unique constraint"),
+            "Duplicate key violation",
+        ),
+        (
+            Error::query("violates foreign key constraint"),
+            "Foreign key constraint violation",
+        ),
+    ] {
+        let suggestion = err.suggestion();
+        assert!(suggestion.contains(expected), "{err}: {suggestion}");
+    }
 }
 
 #[test]
@@ -210,36 +149,23 @@ fn errors_that_never_reached_a_driver_report_no_failure() {
 
 #[test]
 fn sqlstate_classification_covers_what_the_driver_kind_does_not() {
-    assert_eq!(
-        DbFailureKind::from_sqlstate("40P01"),
-        DbFailureKind::Deadlock
-    );
-    assert_eq!(
-        DbFailureKind::from_sqlstate("42P01"),
-        DbFailureKind::UndefinedTable
-    );
-    assert_eq!(
-        DbFailureKind::from_sqlstate("42501"),
-        DbFailureKind::InsufficientPrivilege
-    );
-    // SQLite reports a native code, not a SQLSTATE; it stays unclassified
-    // here and is classified from the driver's own kind instead.
-    assert_eq!(
-        DbFailureKind::from_sqlstate("2067"),
-        DbFailureKind::Unclassified
-    );
-}
-
-/// A value that does not fit its column is the caller's input to fix, not a
-/// failure to retry.
-#[test]
-fn data_exceptions_classify_as_invalid_values() {
-    // Too long, out of range, a bad datetime, invalid text for the type.
-    for sqlstate in ["22001", "22003", "22007", "22P02"] {
-        let kind = DbFailureKind::from_sqlstate(sqlstate);
-        assert_eq!(kind, DbFailureKind::InvalidValue, "{sqlstate}");
-        assert!(!kind.is_retryable(), "{sqlstate}");
+    for (sqlstate, kind) in [
+        ("40P01", DbFailureKind::Deadlock),
+        ("42P01", DbFailureKind::UndefinedTable),
+        ("42501", DbFailureKind::InsufficientPrivilege),
+        // A value that does not fit its column (too long, out of range, a bad
+        // datetime, invalid text for the type) is the caller's input to fix.
+        ("22001", DbFailureKind::InvalidValue),
+        ("22003", DbFailureKind::InvalidValue),
+        ("22007", DbFailureKind::InvalidValue),
+        ("22P02", DbFailureKind::InvalidValue),
+        // SQLite reports a native code, not a SQLSTATE; it stays unclassified
+        // here and is classified from the driver's own kind instead.
+        ("2067", DbFailureKind::Unclassified),
+    ] {
+        assert_eq!(DbFailureKind::from_sqlstate(sqlstate), kind, "{sqlstate}");
     }
+    assert!(!DbFailureKind::InvalidValue.is_retryable());
 }
 
 #[test]

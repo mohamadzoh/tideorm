@@ -1,46 +1,3 @@
-mod profiling_n_plus_one {
-    use std::time::Duration;
-    use tideorm::profiling::{ProfiledQuery, Profiler};
-
-    #[test]
-    fn test_n_plus_one_detection_triggers_above_10_queries() {
-        let mut profiler = Profiler::start();
-
-        for i in 0..15 {
-            let q = ProfiledQuery::new(
-                format!("SELECT * FROM posts WHERE id = {}", i),
-                Duration::from_micros(500),
-            )
-            .with_table("posts");
-            profiler.record_full(q);
-        }
-
-        let report = profiler.stop();
-        let suggestions = report.suggestions();
-        assert!(
-            suggestions.iter().any(|s| s.contains("N+1")),
-            "should detect N+1 pattern, got: {:?}",
-            suggestions
-        );
-    }
-
-    #[test]
-    fn test_no_n_plus_one_below_threshold() {
-        let mut profiler = Profiler::start();
-        for i in 0..5 {
-            let q = ProfiledQuery::new(
-                format!("SELECT * FROM posts WHERE id = {}", i),
-                Duration::from_micros(500),
-            )
-            .with_table("posts");
-            profiler.record_full(q);
-        }
-        let report = profiler.stop();
-        let suggestions = report.suggestions();
-        assert!(!suggestions.iter().any(|s| s.contains("N+1")));
-    }
-}
-
 mod profiler_lifecycle {
     use std::time::Duration;
     use tideorm::profiling::Profiler;
@@ -69,50 +26,42 @@ mod profiling_query_analyzer {
     use tideorm::profiling::{QueryAnalyzer, QueryComplexity, SuggestionLevel};
 
     #[test]
-    fn test_analyzer_detects_leading_wildcard_like() {
-        let suggestions = QueryAnalyzer::analyze("SELECT * FROM users WHERE name LIKE '%john'");
-        assert!(suggestions.iter().any(|s| s.title.contains("wildcard")));
+    fn test_analyzer_flags_patterns_that_defeat_an_index() {
+        for (sql, title) in [
+            (
+                "SELECT * FROM users WHERE name LIKE '%john'",
+                "Leading wildcard in LIKE",
+            ),
+            (
+                "SELECT * FROM users WHERE id NOT IN (1,2,3)",
+                "NOT IN detected",
+            ),
+            (
+                "SELECT * FROM users WHERE LOWER(email) = 'a@b.com'",
+                "Function in WHERE clause",
+            ),
+            (
+                "SELECT id FROM users ORDER BY created_at",
+                "ORDER BY without LIMIT",
+            ),
+        ] {
+            let suggestions = QueryAnalyzer::analyze(sql);
+            assert!(
+                suggestions.iter().any(|s| s.title == title),
+                "{sql}: {suggestions:?}"
+            );
+        }
     }
 
     #[test]
-    fn test_analyzer_detects_not_in() {
-        let suggestions = QueryAnalyzer::analyze("SELECT * FROM users WHERE id NOT IN (1,2,3)");
-        assert!(suggestions.iter().any(|s| s.title.contains("NOT IN")));
-    }
-
-    #[test]
-    fn test_analyzer_detects_function_in_where() {
-        let suggestions =
-            QueryAnalyzer::analyze("SELECT * FROM users WHERE LOWER(email) = 'a@b.com'");
-        assert!(suggestions.iter().any(|s| s.title.contains("Function")));
-    }
-
-    #[test]
-    fn test_analyzer_order_by_without_limit() {
-        let suggestions = QueryAnalyzer::analyze("SELECT id FROM users ORDER BY created_at");
+    fn test_missing_where_on_update_is_critical() {
+        let suggestions = QueryAnalyzer::analyze("UPDATE users SET active = false");
         assert!(
             suggestions
                 .iter()
-                .any(|s| s.title.contains("ORDER BY") && s.title.contains("LIMIT"))
+                .any(|s| s.level == SuggestionLevel::Critical && s.title == "Missing WHERE clause"),
+            "{suggestions:?}"
         );
-    }
-
-    #[test]
-    fn test_complexity_very_complex_query() {
-        let sql = "SELECT u.*, p.*, c.*, t.* \
-                    FROM users u \
-                    JOIN posts p ON p.user_id = u.id \
-                    JOIN comments c ON c.post_id = p.id \
-                    JOIN tags t ON t.post_id = p.id \
-                    WHERE u.active = true \
-                    GROUP BY u.id \
-                    HAVING COUNT(p.id) > 5 \
-                    ORDER BY u.created_at DESC";
-        let complexity = QueryAnalyzer::estimate_complexity(sql);
-        assert!(matches!(
-            complexity,
-            QueryComplexity::Complex | QueryComplexity::VeryComplex
-        ));
     }
 
     #[test]
@@ -123,16 +72,6 @@ mod profiling_query_analyzer {
             complexity,
             QueryComplexity::Simple | QueryComplexity::Moderate
         ));
-    }
-
-    #[test]
-    fn test_missing_where_on_update_is_critical() {
-        let suggestions = QueryAnalyzer::analyze("UPDATE users SET active = false");
-        assert!(
-            suggestions
-                .iter()
-                .any(|s| s.level == SuggestionLevel::Critical && s.title.contains("WHERE"))
-        );
     }
 }
 
@@ -170,7 +109,7 @@ mod profiling_report_stats {
     }
 
     #[test]
-    fn test_report_display_does_not_panic() {
+    fn test_report_display_has_its_header_and_totals() {
         let mut profiler = Profiler::start();
         profiler.record("SELECT * FROM users WHERE id = 1", Duration::from_millis(5));
         let q = ProfiledQuery::new(
@@ -251,12 +190,13 @@ mod profiling_global {
         assert_eq!(stats.total_queries, 4);
         assert_eq!(stats.slow_queries, 2);
         assert!((stats.slow_percentage() - 50.0).abs() < 0.1);
-        assert!(stats.avg_query_time() > Duration::ZERO);
+        assert_eq!(stats.avg_query_time(), Duration::from_millis(85));
 
         let display = format!("{}", stats);
         assert!(display.contains("Total Queries:"));
         assert!(display.contains("Slow Queries:"));
 
+        GlobalProfiler::set_slow_threshold(100);
         GlobalProfiler::disable();
     }
 }

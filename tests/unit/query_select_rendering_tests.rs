@@ -1,6 +1,6 @@
 use crate::config::DatabaseType;
+use crate::internal::Value;
 use crate::model::Model;
-use crate::query::CTE;
 
 #[tideorm::model(table = "select_render_users")]
 struct SelectRenderUser {
@@ -24,10 +24,10 @@ struct BillingInvoice {
     total: i64,
 }
 
-/// A model with a schema is reached as `schema.table` by every statement, or it
-/// reads and writes a same-named table on the search path instead.
+/// A model with a schema is read as `schema.table`, by its own queries and
+/// through a join, or it reads a same-named table on the search path instead.
 #[test]
-fn test_schema_qualified_models_render_their_schema_everywhere() {
+fn test_schema_qualified_models_render_their_schema() {
     use crate::model::ModelMeta;
 
     assert_eq!(BillingInvoice::schema_name(), Some("billing"));
@@ -36,10 +36,9 @@ fn test_schema_qualified_models_render_their_schema_everywhere() {
     let select = BillingInvoice::query()
         .where_eq("total", 5)
         .build_select_sql_for_db(DatabaseType::Postgres);
-    assert!(
-        select.contains(r#"FROM "billing"."invoices" WHERE "invoices"."total""#)
-            || select.contains(r#"FROM "billing"."invoices" WHERE "total""#),
-        "{select}"
+    assert_eq!(
+        select,
+        "SELECT \"invoices\".\"id\", \"invoices\".\"total\" FROM \"billing\".\"invoices\" WHERE \"total\" = 5"
     );
 
     let joined = SelectRenderUser::query()
@@ -49,35 +48,6 @@ fn test_schema_qualified_models_render_their_schema_everywhere() {
     assert!(
         joined.contains(r#"INNER JOIN "billing"."invoices" ON"#),
         "{joined}"
-    );
-}
-
-fn cte() -> CTE {
-    CTE::new("recent", "SELECT id FROM select_render_users".to_string())
-}
-
-#[test]
-fn test_typed_and_raw_selections_compose_in_one_projection() {
-    let sql = SelectRenderUser::query()
-        .select(vec!["id", "name"])
-        .select_raw("COUNT(*) AS total")
-        .build_select_sql_for_db(DatabaseType::Postgres);
-
-    assert_eq!(
-        sql,
-        "SELECT \"select_render_users\".\"id\", \"select_render_users\".\"name\", COUNT(*) AS total FROM \"select_render_users\""
-    );
-}
-
-#[test]
-fn test_distinct_prefixes_the_projection() {
-    let sql = SelectRenderUser::query()
-        .distinct()
-        .build_select_sql_for_db(DatabaseType::Postgres);
-
-    assert_eq!(
-        sql,
-        "SELECT DISTINCT \"select_render_users\".\"id\", \"select_render_users\".\"name\" FROM \"select_render_users\""
     );
 }
 
@@ -167,73 +137,40 @@ fn test_empty_selection_falls_back_to_the_model_projection() {
     );
 }
 
+/// A field renamed with `column = ".."` renders as its database column in
+/// every clause, qualified with the model's table or not; the Rust name never
+/// reaches SQL, and another table's column is left as written.
 #[test]
-fn test_cte_name_uses_backend_identifier_quoting() {
-    let query = SelectRenderUser::query().with_cte(cte());
-
-    let mysql_sql = query.build_select_sql_for_db(DatabaseType::MySQL);
-    assert!(
-        mysql_sql.starts_with("WITH `recent` AS ("),
-        "MySQL rejects a double-quoted CTE name: {mysql_sql}"
-    );
-
-    let postgres_sql = query.build_select_sql_for_db(DatabaseType::Postgres);
-    assert!(
-        postgres_sql.starts_with("WITH \"recent\" AS ("),
-        "{postgres_sql}"
-    );
-}
-
-#[test]
-fn test_self_qualified_rust_field_name_renders_the_database_column() {
+fn test_rust_field_names_render_the_database_column() {
     let sql = SelectRenderAccount::query()
         .select(vec!["select_render_accounts.user_name_field"])
+        .where_eq("select_render_accounts.user_name_field", "alice")
+        .where_eq("user_name_field", "bob")
         .group_by("select_render_accounts.user_name_field")
         .order_desc("select_render_accounts.user_name_field")
-        .build_select_sql_for_db(DatabaseType::Postgres);
-
-    assert!(
-        !sql.contains("user_name_field"),
-        "the Rust field name must not reach SQL: {sql}"
-    );
-    assert!(
-        sql.starts_with("SELECT \"select_render_accounts\".\"user_name\" "),
-        "{sql}"
-    );
-    assert!(
-        sql.contains("GROUP BY \"select_render_accounts\".\"user_name\""),
-        "{sql}"
-    );
-    assert!(
-        sql.contains("ORDER BY \"select_render_accounts\".\"user_name\" DESC"),
-        "{sql}"
-    );
-}
-
-#[test]
-fn test_unqualified_rust_field_name_still_renders_the_database_column() {
-    let sql = SelectRenderAccount::query()
         .order_asc("user_name_field")
         .build_select_sql_for_db(DatabaseType::Postgres);
 
-    assert!(sql.ends_with("ORDER BY \"user_name\" ASC"), "{sql}");
-}
+    assert_eq!(
+        sql,
+        "SELECT \"select_render_accounts\".\"user_name\" FROM \"select_render_accounts\" \
+         WHERE \"select_render_accounts\".\"user_name\" = 'alice' AND \"user_name\" = 'bob' \
+         GROUP BY \"select_render_accounts\".\"user_name\" \
+         ORDER BY \"select_render_accounts\".\"user_name\" DESC, \"user_name\" ASC"
+    );
 
-#[test]
-fn test_foreign_qualifier_is_left_untouched() {
-    let sql = SelectRenderAccount::query()
+    let joined = SelectRenderAccount::query()
         .inner_join(
             "select_render_logins",
             "select_render_accounts.id",
             "select_render_logins.account_id",
         )
         .build_select_sql_for_db(DatabaseType::Postgres);
-
     assert!(
-        sql.contains(
+        joined.contains(
             "ON \"select_render_accounts\".\"id\" = \"select_render_logins\".\"account_id\""
         ),
-        "{sql}"
+        "{joined}"
     );
 }
 
@@ -259,8 +196,8 @@ fn test_select_subquery_binds_its_values_ahead_of_the_where_clause() {
     assert_eq!(
         params,
         vec![
-            crate::internal::Value::String(Some("o'brien".to_string())),
-            crate::internal::Value::String(Some("ada".to_string())),
+            Value::String(Some("o'brien".to_string())),
+            Value::String(Some("ada".to_string())),
         ]
     );
 }
@@ -302,10 +239,9 @@ fn test_lock_for_update_closes_the_statement_and_survives_a_fragment() {
 
 /// The page size is written into the SQL and the offset bound after every
 /// other value, so each page of a paged query reuses one prepared statement.
+/// An offset without a limit takes each backend's way to write no limit.
 #[test]
 fn test_offset_is_bound_last_and_the_limit_written_in() {
-    use crate::internal::Value;
-
     let (sql, params) = SelectRenderUser::query()
         .where_eq("name", "ada")
         .limit(20)
@@ -325,6 +261,17 @@ fn test_offset_is_bound_last_and_the_limit_written_in() {
         .offset(40)
         .build_select_sql_for_db(DatabaseType::MySQL);
     assert!(preview.ends_with(" LIMIT 20 OFFSET 40"), "{preview}");
+
+    for (db_type, page) in [
+        (DatabaseType::Postgres, "\"select_render_users\" OFFSET 40"),
+        (DatabaseType::SQLite, " LIMIT -1 OFFSET 40"),
+        (DatabaseType::MySQL, " LIMIT 18446744073709551615 OFFSET 40"),
+    ] {
+        let preview = SelectRenderUser::query()
+            .offset(40)
+            .build_select_sql_for_db(db_type);
+        assert!(preview.ends_with(page), "{db_type:?}: {preview}");
+    }
 }
 
 /// A long list is one array parameter on PostgreSQL and one JSON value on

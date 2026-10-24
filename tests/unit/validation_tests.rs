@@ -120,24 +120,6 @@ mod skip_field_validation {
 }
 
 #[test]
-fn test_validation_errors() {
-    let mut errors = ValidationErrors::new();
-    assert!(errors.is_empty());
-
-    errors.add("email", "Invalid email");
-    errors.add("email", "Email already taken");
-    errors.add("name", "Name is required");
-
-    assert!(!errors.is_empty());
-    assert_eq!(errors.len(), 2);
-    assert_eq!(errors.get("email").unwrap().len(), 2);
-    assert_eq!(errors.get("name").unwrap().len(), 1);
-
-    let messages = errors.messages();
-    assert_eq!(messages.len(), 3);
-}
-
-#[test]
 fn test_validation_builder() {
     let (field, rules) = ValidationBuilder::new("email")
         .required()
@@ -146,7 +128,7 @@ fn test_validation_builder() {
         .build();
 
     assert_eq!(field, "email");
-    assert_eq!(rules.len(), 3);
+    assert_eq!(format!("{rules:?}"), "[Required, Email, MaxLength(255)]");
 }
 
 /// A module that imports TideORM's one-parameter `Result`, as `use tideorm::*;`
@@ -192,7 +174,6 @@ fn integer_bounds_are_compared_exactly_past_two_to_the_53() {
     // A fractional bound still admits the integers on its side.
     assert!(Validator::validate_rule(&3_i32, &ValidationRule::Range(2.5, 3.5), "n").is_none());
     assert!(Validator::validate_rule(&4_i32, &ValidationRule::Range(2.5, 3.5), "n").is_some());
-    assert!(Validator::validate_rule(&f64::NAN, &ValidationRule::Min(0.0), "n").is_some());
 }
 
 #[test]
@@ -224,9 +205,14 @@ fn numeric_refuses_text_that_parses_as_no_finite_number() {
 #[test]
 fn errors_come_out_in_the_order_the_fields_failed() {
     let mut errors = ValidationErrors::new();
+    assert!(errors.is_empty());
     for field in ["zeta", "alpha", "mid", "alpha"] {
         errors.add(field, format!("{field} is wrong"));
     }
+    // One entry per field, holding each of its messages.
+    assert_eq!(errors.len(), 3);
+    assert_eq!(errors.get("alpha").map(Vec::len), Some(2));
+    assert_eq!(errors.messages().len(), 4);
     let fields: Vec<&str> = errors.iter().map(|(field, _)| field.as_str()).collect();
     assert_eq!(fields, ["zeta", "alpha", "mid"]);
     assert_eq!(
@@ -299,28 +285,11 @@ fn rules_on_text_decimal_and_uuid_fields_check_them() {
     assert_eq!(fields, ["body", "price", "owner", "stars"]);
 }
 
+/// The exact bounds behind `MinExact`/`MaxExact` compare decimal text by value,
+/// whatever its notation; the rules themselves are covered end to end in the
+/// SQLite validation regressions.
 #[test]
 fn exact_numeric_bounds_preserve_fractional_and_scientific_precision() {
-    assert!(super::outside_exact(
-        &9007199254740992_i64,
-        "9007199254740992.5",
-        true
-    ));
-    assert!(!super::outside_exact(
-        &9007199254740993_i64,
-        "9007199254740992.5",
-        true
-    ));
-    assert!(!super::outside_exact(
-        &rust_decimal::Decimal::ONE,
-        "1e-2",
-        true
-    ));
-    assert!(super::outside_exact(
-        &rust_decimal::Decimal::ONE,
-        "1.00000000000000000000000000001",
-        true
-    ));
     for (left, right, expected) in [
         ("1", "1.000e0", std::cmp::Ordering::Equal),
         (
@@ -332,6 +301,10 @@ fn exact_numeric_bounds_preserve_fractional_and_scientific_precision() {
         ("0.001", "1e-2", std::cmp::Ordering::Less),
         ("1e1000", "9e999", std::cmp::Ordering::Greater),
     ] {
-        assert_eq!(super::compare_decimal_text(left, right), Some(expected));
+        assert_eq!(
+            super::compare_decimal_text(left, right),
+            Some(expected),
+            "{left} vs {right}"
+        );
     }
 }

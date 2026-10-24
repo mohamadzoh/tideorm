@@ -1,5 +1,6 @@
 //! FTS5 index installation, trigger-name conflicts, rank aliases and attached schemas.
 
+use super::install;
 use crate::fixtures::{global_memory_database, memory_database};
 use tideorm::fulltext::{FullTextIndex, FullTextSearch, FullTextSearchBuilder};
 use tideorm::prelude::*;
@@ -26,15 +27,16 @@ async fn index(db: &Database) -> tideorm::Result<()> {
         "audit_articles",
         vec!["body".into()],
     );
-    for sql in index.to_sqlite_sql() {
-        db.exec_raw(&sql).await?;
-    }
-    Ok(())
+    install(db, &index).await
 }
 
 #[tokio::test]
 async fn fulltext_rank_does_not_shadow_model_column() {
-    let db=global_memory_database("CREATE TABLE audit_articles(id INTEGER PRIMARY KEY,body TEXT,_fts_rank REAL); INSERT INTO audit_articles VALUES(1,'alpha alpha',123.5),(2,'alpha beta',456.5)").await;
+    let db = global_memory_database(
+        "CREATE TABLE audit_articles(id INTEGER PRIMARY KEY,body TEXT,_fts_rank REAL); \
+         INSERT INTO audit_articles VALUES(1,'alpha alpha',123.5),(2,'alpha beta',456.5)",
+    )
+    .await;
     index(&db).await.unwrap();
     let ranked = Article::search(&["body"], "alpha")
         .get_ranked()
@@ -58,15 +60,25 @@ async fn fulltext_rank_does_not_shadow_model_column() {
 #[tokio::test]
 async fn fulltext_conflicting_triggers_fail_without_replacing_user_definitions() {
     for (suffix, event) in [("ai", "INSERT"), ("ad", "DELETE"), ("au", "UPDATE")] {
-        let db=global_memory_database("CREATE TABLE audit_articles(id INTEGER PRIMARY KEY,body TEXT,_fts_rank REAL); CREATE TABLE audit_log(article_id INTEGER)").await;
+        let db = global_memory_database(
+            "CREATE TABLE audit_articles(id INTEGER PRIMARY KEY,body TEXT,_fts_rank REAL); \
+             CREATE TABLE audit_log(article_id INTEGER)",
+        )
+        .await;
         let trigger = format!(
-            "CREATE TRIGGER audit_articles_{suffix} AFTER {event} ON audit_articles BEGIN INSERT INTO audit_log VALUES(100); END"
+            "CREATE TRIGGER audit_articles_{suffix} AFTER {event} ON audit_articles \
+             BEGIN INSERT INTO audit_log VALUES(100); END"
         );
         db.exec_raw(&trigger).await.unwrap();
         let error = index(&db).await.unwrap_err().to_string();
         assert!(error.contains("full-text trigger name conflict"), "{error}");
         // The caller's trigger remains installed and still executes.
-        db.exec_raw("INSERT INTO audit_articles VALUES(1,'alpha',123.5); UPDATE audit_articles SET body='beta'; DELETE FROM audit_articles").await.unwrap();
+        db.exec_raw(
+            "INSERT INTO audit_articles VALUES(1,'alpha',123.5); \
+             UPDATE audit_articles SET body='beta'; DELETE FROM audit_articles",
+        )
+        .await
+        .unwrap();
         // Renaming is a caller decision; dropping this fixture trigger lets installation succeed.
         db.exec_raw(&format!("DROP TRIGGER audit_articles_{suffix}"))
             .await
@@ -97,16 +109,20 @@ async fn fulltext_conflicting_triggers_fail_without_replacing_user_definitions()
 
 #[tokio::test]
 async fn fulltext_trigger_checks_use_the_index_schema_and_are_idempotent() {
-    let db = global_memory_database("CREATE TABLE audit_articles(id INTEGER PRIMARY KEY,body TEXT); CREATE TRIGGER audit_articles_ai AFTER INSERT ON audit_articles BEGIN SELECT 1; END; ATTACH ':memory:' AS tenant; CREATE TABLE tenant.audit_articles(id INTEGER PRIMARY KEY,body TEXT)").await;
+    let db = global_memory_database(
+        "CREATE TABLE audit_articles(id INTEGER PRIMARY KEY,body TEXT); \
+         CREATE TRIGGER audit_articles_ai AFTER INSERT ON audit_articles BEGIN SELECT 1; END; \
+         ATTACH ':memory:' AS tenant; \
+         CREATE TABLE tenant.audit_articles(id INTEGER PRIMARY KEY,body TEXT)",
+    )
+    .await;
     let index = FullTextIndex::new(
         "tenant_search",
         "tenant.audit_articles",
         vec!["body".into()],
     );
     for _ in 0..2 {
-        for sql in index.to_sqlite_sql() {
-            db.exec_raw(&sql).await.unwrap();
-        }
+        install(&db, &index).await.unwrap();
     }
     db.exec_raw("INSERT INTO tenant.audit_articles VALUES(1,'alpha')")
         .await
@@ -156,16 +172,24 @@ struct MainArticle {
 
 #[tokio::test]
 async fn searches_use_the_models_index_when_schema_names_collide() {
-    let db = memory_database("").await;
-    db.exec_raw("ATTACH DATABASE ':memory:' AS tenant; CREATE TABLE main.query_behavior_articles(id INTEGER PRIMARY KEY,title TEXT); CREATE TABLE tenant.query_behavior_articles(id INTEGER PRIMARY KEY,title TEXT); INSERT INTO main.query_behavior_articles VALUES(1,'apple'),(2,'pear'),(3,'apple'); INSERT INTO tenant.query_behavior_articles VALUES(1,'pear'),(2,'apple'),(3,'pear')")
-        .await.unwrap();
+    let db = memory_database(
+        "ATTACH DATABASE ':memory:' AS tenant; \
+         CREATE TABLE main.query_behavior_articles(id INTEGER PRIMARY KEY,title TEXT); \
+         CREATE TABLE tenant.query_behavior_articles(id INTEGER PRIMARY KEY,title TEXT); \
+         INSERT INTO main.query_behavior_articles VALUES(1,'apple'),(2,'pear'),(3,'apple'); \
+         INSERT INTO tenant.query_behavior_articles VALUES(1,'pear'),(2,'apple'),(3,'pear')",
+    )
+    .await;
     for table in [
         "main.query_behavior_articles",
         "tenant.query_behavior_articles",
     ] {
-        for sql in FullTextIndex::new("search", table, vec!["title".into()]).to_sqlite_sql() {
-            db.exec_raw(&sql).await.unwrap();
-        }
+        install(
+            &db,
+            &FullTextIndex::new("search", table, vec!["title".into()]),
+        )
+        .await
+        .unwrap();
     }
     db.transaction(|_| {
         Box::pin(async {

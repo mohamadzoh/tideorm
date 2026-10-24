@@ -36,72 +36,46 @@ async fn insert_all_rejects_an_invalid_model_before_touching_the_database() {
         },
     ];
 
-    // No connection is configured, so reaching the database would fail with
-    // a connection error instead.
+    // The table exists nowhere, so reaching the database would fail with a
+    // connection or query error instead.
     match insert_all::<ValidatedUser>(batch).await {
         Err(Error::Validation { field, message }) => {
             assert_eq!(field, "email");
-            assert!(message.contains("model 1 of the batch"), "{message}");
+            assert!(message.contains("model at index 1"), "{message}");
         }
         other => panic!("expected a validation error, got {other:?}"),
     }
 }
 
+/// `paginate` refuses a page before it reads: a zero page or page size, or a
+/// page size or offset past `i64::MAX`. The drivers take LIMIT and OFFSET as
+/// `i64`, and SQLite's and PostgreSQL's panic converting a larger `u64`.
 #[tokio::test]
-async fn paginate_rejects_a_zero_page_number() {
-    let error = crate::internal::QueryExecutor::paginate::<PaginationUser>(0, 10)
-        .await
-        .expect_err("page 0 should be rejected");
-
-    assert!(
-        error.to_string().contains("must be at least 1"),
-        "unexpected error: {error}"
-    );
-}
-
-#[tokio::test]
-async fn paginate_rejects_a_zero_page_size() {
-    let error = crate::internal::QueryExecutor::paginate::<PaginationUser>(1, 0)
-        .await
-        .expect_err("per_page 0 should be rejected");
-
-    assert!(
-        error.to_string().contains("must be greater than 0"),
-        "unexpected error: {error}"
-    );
-}
-
-#[tokio::test]
-async fn paginate_reports_an_offset_that_would_overflow() {
-    let error = crate::internal::QueryExecutor::paginate::<PaginationUser>(u64::MAX, 4)
-        .await
-        .expect_err("an overflowing offset should be reported");
-
-    assert!(
-        error.to_string().contains("exceeds i64::MAX"),
-        "unexpected error: {error}"
-    );
-}
-
-#[tokio::test]
-async fn paginate_rejects_a_page_size_or_offset_past_i64_max() {
-    // The drivers take LIMIT and OFFSET as `i64`; SQLite's and PostgreSQL's
-    // panic converting a larger `u64`.
-    let error = crate::internal::QueryExecutor::paginate::<PaginationUser>(1, i64::MAX as u64 + 1)
-        .await
-        .expect_err("an oversized page size should be rejected");
-    assert!(
-        matches!(&error, Error::Validation { field, .. } if field == "per_page"),
-        "unexpected error: {error:?}"
-    );
-
-    let error = crate::internal::QueryExecutor::paginate::<PaginationUser>(3, 1 << 62)
-        .await
-        .expect_err("an offset past i64::MAX should be rejected");
-    assert!(
-        matches!(&error, Error::Validation { field, .. } if field == "page"),
-        "unexpected error: {error:?}"
-    );
+async fn paginate_rejects_a_page_no_backend_can_read() {
+    for (page, per_page, field, message) in [
+        (0, 10, "page", "must be at least 1"),
+        (1, 0, "per_page", "must be greater than 0"),
+        (
+            1,
+            i64::MAX as u64 + 1,
+            "per_page",
+            "must be at most i64::MAX",
+        ),
+        (u64::MAX, 4, "page", "exceeds i64::MAX"),
+        (3, 1 << 62, "page", "exceeds i64::MAX"),
+    ] {
+        let error = crate::internal::QueryExecutor::paginate::<PaginationUser>(page, per_page)
+            .await
+            .expect_err("the page should be rejected");
+        assert!(
+            matches!(
+                &error,
+                Error::Validation { field: refused, message: why }
+                    if refused == field && why.contains(message)
+            ),
+            "page {page} of {per_page}: {error:?}"
+        );
+    }
 }
 
 #[tokio::test]

@@ -1,26 +1,33 @@
 use super::*;
 
-#[tokio::test]
-async fn sqlite_query_with_and_find_with_work_without_global_db() {
+/// Insert a `ci_users` row into `db` on its own connection, never through the
+/// global database, and return its id.
+async fn insert_local(db: &Database, email: &str, name: &str, active: bool) -> i64 {
     use tideorm::internal::{ActiveModelTrait, InternalModel};
 
-    let db = local_db_with(CI_USERS_DDL).await;
     let conn = db
         .__internal_connection()
         .expect("local SQLite connection should be available");
-
-    let inserted = CiUser {
+    CiUser {
         id: 0,
-        email: "local@example.com".to_string(),
-        name: "Local User".to_string(),
-        active: true,
+        email: email.to_string(),
+        name: name.to_string(),
+        active,
     }
     .into_active_model()
     .insert(&conn)
     .await
-    .expect("failed to seed local user");
+    .expect("failed to seed local user")
+    .id
+}
 
-    let fetched = CiUser::find_with(inserted.id, &db)
+#[tokio::test]
+async fn sqlite_query_with_and_find_with_work_without_global_db() {
+    Database::reset_global();
+    let db = local_db_with(CI_USERS_DDL).await;
+    let id = insert_local(&db, "local@example.com", "Local User", true).await;
+
+    let fetched = CiUser::find_with(id, &db)
         .await
         .expect("find_with failed")
         .expect("local user should exist");
@@ -37,52 +44,18 @@ async fn sqlite_query_with_and_find_with_work_without_global_db() {
 
 #[tokio::test]
 async fn sqlite_query_with_supports_aggregate_queries_without_global_db() {
-    use tideorm::internal::{ActiveModelTrait, InternalModel};
-
+    Database::reset_global();
     let db = local_db_with(CI_USERS_DDL).await;
-    let conn = db
-        .__internal_connection()
-        .expect("local SQLite connection should be available");
-
-    let first = CiUser {
-        id: 0,
-        email: "aggregate1@example.com".to_string(),
-        name: "Aggregate One".to_string(),
-        active: true,
-    }
-    .into_active_model()
-    .insert(&conn)
-    .await
-    .expect("failed to seed first local user");
-
-    let second = CiUser {
-        id: 0,
-        email: "aggregate2@example.com".to_string(),
-        name: "Aggregate Two".to_string(),
-        active: true,
-    }
-    .into_active_model()
-    .insert(&conn)
-    .await
-    .expect("failed to seed second local user");
-
-    let third = CiUser {
-        id: 0,
-        email: "aggregate3@example.com".to_string(),
-        name: "Aggregate Three".to_string(),
-        active: false,
-    }
-    .into_active_model()
-    .insert(&conn)
-    .await
-    .expect("failed to seed third local user");
+    let first = insert_local(&db, "aggregate1@example.com", "Aggregate One", true).await;
+    let second = insert_local(&db, "aggregate2@example.com", "Aggregate Two", true).await;
+    let third = insert_local(&db, "aggregate3@example.com", "Aggregate Three", false).await;
 
     let active_sum: i64 = CiUser::query_with(&db)
         .where_eq("active", true)
         .sum("id")
         .await
         .expect("sum with explicit db should succeed");
-    assert_eq!(active_sum, first.id + second.id);
+    assert_eq!(active_sum, first + second);
 
     let inactive_distinct = CiUser::query_with(&db)
         .where_eq("active", false)
@@ -95,10 +68,7 @@ async fn sqlite_query_with_supports_aggregate_queries_without_global_db() {
         .avg("id")
         .await
         .expect("avg with explicit db should succeed");
-    assert_eq!(
-        total_avg,
-        Some((first.id + second.id + third.id) as f64 / 3.0)
-    );
+    assert_eq!(total_avg, Some((first + second + third) as f64 / 3.0));
 }
 
 #[tokio::test]
@@ -153,7 +123,6 @@ async fn sqlite_query_errors_include_query_builder_context() {
 #[tokio::test]
 async fn sqlite_uncached_queries_do_not_touch_global_query_cache() {
     use tideorm::QueryCache;
-    use tideorm::internal::{ActiveModelTrait, InternalModel};
 
     let cache = QueryCache::global();
     cache.clear();
@@ -161,20 +130,7 @@ async fn sqlite_uncached_queries_do_not_touch_global_query_cache() {
     cache.enable();
 
     let db = local_db_with(CI_USERS_DDL).await;
-    let conn = db
-        .__internal_connection()
-        .expect("local SQLite connection should be available");
-
-    CiUser {
-        id: 0,
-        email: "uncached@example.com".to_string(),
-        name: "Uncached User".to_string(),
-        active: true,
-    }
-    .into_active_model()
-    .insert(&conn)
-    .await
-    .expect("failed to seed uncached user");
+    insert_local(&db, "uncached@example.com", "Uncached User", true).await;
 
     let results = CiUser::query_with(&db)
         .where_eq("email", "uncached@example.com")
@@ -194,18 +150,16 @@ async fn sqlite_uncached_queries_do_not_touch_global_query_cache() {
         stats.entries, 0,
         "uncached queries should not populate the cache"
     );
-    assert!(
-        cache.is_empty(),
-        "uncached queries should leave the cache empty"
-    );
 
     cache.disable();
     cache.clear();
     cache.reset_stats();
 }
 
+/// A model operation that fails against a missing table reports the table and
+/// the operation it ran.
 #[tokio::test]
-async fn sqlite_model_crud_errors_include_model_context() {
+async fn sqlite_model_operation_errors_include_model_context() {
     connect_global().await;
 
     let find_err = CiUser::find(1)
@@ -249,41 +203,22 @@ async fn sqlite_model_crud_errors_include_model_context() {
         "expected update operation in context: {:?}",
         update_ctx.query
     );
-}
 
-#[tokio::test]
-async fn sqlite_model_helper_errors_include_context() {
-    connect_global().await;
-
-    let all_err = CiUser::all()
-        .await
-        .expect_err("all should fail when the table is missing");
-    let all_ctx = all_err
-        .context()
-        .expect("all errors should include model context");
-    assert_eq!(all_ctx.table.as_deref(), Some("ci_users"));
-    assert!(
-        all_ctx
-            .query
-            .as_deref()
-            .is_some_and(|query| query.contains("find_all()")),
-        "expected helper operation in context: {:?}",
-        all_ctx.query
-    );
-
-    let count_err = CiUser::count()
-        .await
-        .expect_err("count should fail when the table is missing");
-    let count_ctx = count_err
-        .context()
-        .expect("count errors should include model context");
-    assert_eq!(count_ctx.table.as_deref(), Some("ci_users"));
-    assert!(
-        count_ctx
-            .query
-            .as_deref()
-            .is_some_and(|query| query.contains("count(*)")),
-        "expected helper operation in context: {:?}",
-        count_ctx.query
-    );
+    for (operation, error) in [
+        ("find_all()", CiUser::all().await.map(drop)),
+        ("count(*)", CiUser::count().await.map(drop)),
+    ] {
+        let error = error.expect_err("the table is missing");
+        let ctx = error
+            .context()
+            .expect("helper errors include model context");
+        assert_eq!(ctx.table.as_deref(), Some("ci_users"), "{operation}");
+        assert!(
+            ctx.query
+                .as_deref()
+                .is_some_and(|query| query.contains(operation)),
+            "expected {operation} in context: {:?}",
+            ctx.query
+        );
+    }
 }

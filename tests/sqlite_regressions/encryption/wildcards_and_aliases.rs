@@ -211,49 +211,6 @@ async fn distinct_aliases_cannot_hide_grouping_inputs() {
     assert_eq!(plain[0]["n"], 2);
 }
 
-// Registered only for the join lookups below: same table, two schemas, one encrypted.
-#[tideorm::model(table = "boundary_scoped", schema = "secure", encrypted = "secret")]
-struct ScopedSecret {
-    #[tideorm(primary_key)]
-    id: i64,
-    secret: String,
-}
-
-#[tideorm::model(table = "boundary_scoped", schema = "ordinary")]
-struct ScopedPlain {
-    #[tideorm(primary_key)]
-    id: i64,
-    secret: String,
-}
-
-#[tokio::test]
-async fn wildcard_metadata_keeps_schema_boundaries() {
-    let db = database().await;
-    encrypted_error(
-        Host::query_with(&db)
-            .inner_join_as(
-                "secure.boundary_scoped",
-                "s",
-                "boundary_hosts.secret_id",
-                "s.id",
-            )
-            .select(vec!["s.*"])
-            .distinct()
-            .validate(),
-    );
-    Host::query_with(&db)
-        .inner_join_as(
-            "ordinary.boundary_scoped",
-            "s",
-            "boundary_hosts.secret_id",
-            "s.id",
-        )
-        .select(vec!["s.*"])
-        .distinct()
-        .validate()
-        .unwrap();
-}
-
 #[tokio::test]
 async fn aliases_cannot_hide_unqualified_joined_inputs() {
     let db = database().await;

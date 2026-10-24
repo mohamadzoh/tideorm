@@ -1,6 +1,7 @@
-//! SQLite integration tests: the shared scenarios in
-//! `support/integration_parity.rs` plus global-profiler coverage, on an
-//! in-memory database. Opt out with `SKIP_SQLITE_TESTS`.
+//! SQLite integration tests: the scenarios every backend runs, in
+//! `support/integration_parity.rs`, and below, the global profiler counting
+//! every execution path. They run on an in-memory database, except the
+//! scenarios that reconnect, which use a file. Opt out with `SKIP_SQLITE_TESTS`.
 //!
 //! Run with:
 //! cargo test --test sqlite_integration_tests --no-default-features --features sqlite,runtime-tokio

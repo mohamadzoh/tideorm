@@ -1,79 +1,72 @@
 use tideorm::types::Hashed;
 
 #[test]
-fn test_hashed_uses_argon2_format() {
-    let hashed = Hashed::new("secret123");
-    assert!(hashed.hash().starts_with("$argon2"));
+fn new_hashes_are_salted_argon2id_and_verify_only_their_input() {
+    let hashes = [
+        Hashed::new("secret123"),
+        Hashed::try_new("secret123").unwrap(),
+        "secret123".into(),
+        "secret123".to_string().into(),
+    ];
+
+    assert!(
+        hashes[0].hash().starts_with("$argon2id$"),
+        "{}",
+        hashes[0].hash()
+    );
+    assert_ne!(
+        hashes[0].hash(),
+        hashes[1].hash(),
+        "each hash takes a fresh salt"
+    );
+    for hashed in &hashes {
+        assert!(hashed.verify("secret123"));
+        assert!(!hashed.verify("wrong-password"));
+    }
 }
 
+/// A hash stored by an earlier release, with argon2 0.5, still verifies after
+/// a dependency upgrade; a stored value that is no Argon2 hash verifies
+/// nothing.
 #[test]
-fn test_hashed_verify_accepts_matching_password() {
-    let hashed = Hashed::new("secret123");
-    assert!(hashed.verify("secret123"));
-    assert!(!hashed.verify("wrong-password"));
+fn stored_hashes_verify_across_releases() {
+    let stored = Hashed::from_hash(
+        "$argon2id$v=19$m=19456,t=2,p=1$Zml4ZWQtc2FsdC1ieXRlcw$AuzHlNYhVa2jgXvOE0GSBh+rjHdv9UiMpC26iZQLBmc"
+            .to_string(),
+    );
+    assert!(stored.verify("hunter42"));
+    assert!(!stored.verify("hunter43"));
+
+    let legacy = Hashed::from_hash("legacy-hash-value".to_string());
+    assert!(!legacy.verify("legacy-hash-value"));
 }
 
+/// The hash is what an offline attack on the password starts from, so it is
+/// never shown or serialized.
 #[test]
-fn test_hashed_is_salted() {
-    let first = Hashed::new("secret123");
-    let second = Hashed::new("secret123");
-
-    assert_ne!(first.hash(), second.hash());
-    assert!(first.verify("secret123"));
-    assert!(second.verify("secret123"));
-}
-
-#[test]
-fn test_hashed_verify_rejects_non_argon2_hashes() {
-    let hashed = Hashed::from_hash("legacy-hash-value".to_string());
-
-    assert!(!hashed.verify("secret123"));
-    assert!(!hashed.verify("wrong-password"));
-}
-
-#[test]
-fn test_hashed_from_str_and_string_hash_the_input() {
-    let from_str: Hashed = "password123".into();
-    let from_string: Hashed = "password123".to_string().into();
-
-    assert!(from_str.verify("password123"));
-    assert!(from_string.verify("password123"));
-}
-
-#[test]
-fn test_hashed_serialize_redacts_raw_hash() {
+fn debug_display_and_serialize_leave_the_hash_out() {
     let hashed = Hashed::new("password123");
 
-    let serialized = serde_json::to_value(&hashed).unwrap();
-
-    assert_eq!(serialized, serde_json::json!("***HASHED***"));
-    assert_ne!(serialized, serde_json::json!(hashed.hash()));
-}
-
-#[test]
-fn test_hashed_nested_serialization_does_not_leak_argon2_hash() {
-    #[derive(serde::Serialize)]
-    struct UserPayload {
-        password: Hashed,
+    assert_eq!(
+        serde_json::to_value(&hashed).unwrap(),
+        serde_json::json!("***HASHED***")
+    );
+    for rendered in [format!("{hashed:?}"), hashed.to_string()] {
+        assert!(!rendered.contains("argon2"), "{rendered}");
+        assert!(rendered.contains("***HASHED***"), "{rendered}");
     }
-
-    let payload = UserPayload {
-        password: Hashed::new("password123"),
-    };
-
-    let serialized = serde_json::to_value(&payload).unwrap();
-    let password = serialized
-        .get("password")
-        .and_then(serde_json::Value::as_str)
-        .unwrap();
-
-    assert_eq!(password, "***HASHED***");
-    assert!(!password.starts_with("$argon2"));
 }
 
+/// A stored hash deserializes as itself; the redacted form it serializes to
+/// is refused rather than loaded as a hash that verifies nothing.
 #[test]
-fn test_hashed_deserialize_rejects_redacted_payload() {
-    let err = serde_json::from_value::<Hashed>(serde_json::json!("***HASHED***")).unwrap_err();
+fn deserialize_takes_a_stored_hash_and_refuses_the_redacted_form() {
+    let stored: Hashed = serde_json::from_value(serde_json::json!(
+        "$argon2id$v=19$m=19456,t=2,p=1$Zml4ZWQtc2FsdC1ieXRlcw$AuzHlNYhVa2jgXvOE0GSBh+rjHdv9UiMpC26iZQLBmc"
+    ))
+    .unwrap();
+    assert!(stored.verify("hunter42"));
 
+    let err = serde_json::from_value::<Hashed>(serde_json::json!("***HASHED***")).unwrap_err();
     assert!(err.to_string().contains("redacted serialization format"));
 }

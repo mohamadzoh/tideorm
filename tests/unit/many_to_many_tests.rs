@@ -18,15 +18,6 @@ struct M2mRenderPostTag {
     tag_id: i64,
 }
 
-/// A related model carrying a `json` column — the type PostgreSQL has no
-/// equality operator for, and therefore cannot `SELECT DISTINCT` over.
-#[tideorm::model(table = "m2m_render_documents")]
-struct M2mRenderDocument {
-    #[tideorm(primary_key, auto_increment)]
-    id: i64,
-    metadata: serde_json::Value,
-}
-
 /// A pivot whose key fields are renamed columns.
 #[tideorm::model(table = "m2m_render_renamed_links")]
 struct M2mRenderRenamedLink {
@@ -74,39 +65,26 @@ fn test_load_reads_each_related_row_once_through_a_semi_join() {
     }
 }
 
-#[test]
-fn test_load_does_not_distinct_over_a_json_column() {
-    let relation: HasManyThrough<M2mRenderDocument, M2mRenderPostTag> =
-        HasManyThrough::new("post_id", "tag_id", "id", "id", "m2m_render_post_tags");
-    let sql = load_sql(relation, json!(1));
-
-    assert!(
-        sql.starts_with(
-            "SELECT \"m2m_render_documents\".\"id\", \"m2m_render_documents\".\"metadata\" FROM"
-        ),
-        "{sql}"
-    );
-    assert!(
-        !sql.contains("DISTINCT") && !sql.contains("GROUP BY"),
-        "{sql}"
-    );
-}
-
 /// A pivot key naming the field of a renamed column reads that column.
 #[test]
 fn test_pivot_keys_resolve_renamed_columns() {
-    let relation: HasManyThrough<M2mRenderTag, M2mRenderRenamedLink> =
-        HasManyThrough::new("post_id", "tag_id", "id", "id", "m2m_render_renamed_links");
-    let sql = load_sql(relation, json!(1));
+    let relation = || {
+        HasManyThrough::<M2mRenderTag, M2mRenderRenamedLink>::new(
+            "post_id",
+            "tag_id",
+            "id",
+            "id",
+            "m2m_render_renamed_links",
+        )
+    };
+    let sql = load_sql(relation(), json!(1));
     assert!(
         sql.contains("SELECT \"m2m_render_renamed_links\".\"tid\" FROM"),
         "{sql}"
     );
     assert!(sql.contains("WHERE \"pid\" = 1)"), "{sql}");
 
-    let relation: HasManyThrough<M2mRenderTag, M2mRenderRenamedLink> =
-        HasManyThrough::new("post_id", "tag_id", "id", "id", "m2m_render_renamed_links");
-    let joined = relation
+    let joined = relation()
         .scope_to_pivot(M2mRenderTag::query(), &json!(1))
         .build_select_sql_for_db(DatabaseType::Postgres);
     assert!(

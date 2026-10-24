@@ -98,54 +98,43 @@ async fn seed_relations(
     .await
 }
 
+/// A model an entity manager loads has its relations attached to the
+/// manager's database, so they query it with no global database installed.
 #[tokio::test]
-async fn hasone_load_queries_through_the_attached_database_without_global_db()
+async fn relations_query_via_parent_entity_manager_database_without_global_db()
 -> crate::error::Result<()> {
     Database::reset_global();
 
     let Some(db) = setup_database().await? else {
         return Ok(());
     };
-    let (user, profile, _) = seed_relations(db.as_ref()).await?;
+    let (user, profile, post) = seed_relations(db.as_ref()).await?;
     let entity_manager = EntityManager::new(db.clone());
 
-    let mut relation = HasOne::<DirectEntityManagerRelationProfile>::new("user_id", "id")
-        .with_metadata("profile", USER_TABLE)
-        .with_parent_pk(json!(user.id));
-    relation.attach_query_database(entity_manager.database());
-
-    let loaded = relation
+    let user = entity_manager
+        .find::<DirectEntityManagerRelationUser>(user.id)
+        .await?
+        .expect("entity-manager user should exist");
+    assert!(user.profile.exists().await?);
+    let loaded = user
+        .profile
         .load()
         .await?
-        .expect("has_one relation should query via the attached database");
-
+        .expect("has_one relation should query via the parent entity manager database");
     assert_eq!(loaded.id, profile.id);
     assert_eq!(loaded.user_id, user.id);
     assert_eq!(loaded.name, profile.name);
 
-    Ok(())
-}
-
-#[tokio::test]
-async fn belongsto_load_queries_through_the_attached_database_without_global_db()
--> crate::error::Result<()> {
-    Database::reset_global();
-
-    let Some(db) = setup_database().await? else {
-        return Ok(());
-    };
-    let (user, _, post) = seed_relations(db.as_ref()).await?;
-    let entity_manager = EntityManager::new(db.clone());
-
-    let mut relation = BelongsTo::<DirectEntityManagerRelationUser>::new("user_id", "id")
-        .with_fk_value(json!(post.user_id));
-    relation.attach_query_database(entity_manager.database());
-
-    let loaded = relation
-        .load()
+    let post = entity_manager
+        .find::<DirectEntityManagerRelationPost>(post.id)
         .await?
-        .expect("belongs_to relation should query via the attached database");
-
+        .expect("entity-manager post should exist");
+    assert!(post.user.exists().await?);
+    let loaded = post
+        .user
+        .load_with(|query| query)
+        .await?
+        .expect("belongs_to relation should query via the parent entity manager database");
     assert_eq!(loaded.id, user.id);
     assert_eq!(loaded.name, user.name);
 
@@ -156,160 +145,55 @@ async fn belongsto_load_queries_through_the_attached_database_without_global_db(
 // same row; loading the relation into the manager must keep the tracked
 // instance rather than overwrite it with that copy.
 #[tokio::test]
-async fn hasone_cached_load_keeps_the_tracked_instance() -> crate::error::Result<()> {
+async fn cached_loads_keep_the_tracked_instance() -> crate::error::Result<()> {
     let entity_manager = EntityManager::new(Arc::new(Database::disconnected()));
-    entity_manager
-        .register(DirectEntityManagerRelationProfile {
-            id: 7,
-            user_id: 1,
-            name: "Edited in memory".to_string(),
-        })
-        .await;
-
-    let mut relation = HasOne::<DirectEntityManagerRelationProfile>::new("user_id", "id")
-        .with_metadata("profile", USER_TABLE)
-        .with_parent_pk(json!(1));
-    relation.set_cached(Some(DirectEntityManagerRelationProfile {
+    let profile = |name: &str| DirectEntityManagerRelationProfile {
         id: 7,
         user_id: 1,
-        name: "Stale eager copy".to_string(),
-    }));
+        name: name.to_string(),
+    };
+    let user = |name: &str| DirectEntityManagerRelationUser {
+        id: 1,
+        name: name.to_string(),
+        profile: Default::default(),
+    };
+    entity_manager.register(profile("Edited in memory")).await;
+    entity_manager.register(user("Edited in memory")).await;
 
+    let mut has_one = HasOne::<DirectEntityManagerRelationProfile>::new("user_id", "id")
+        .with_metadata("profile", USER_TABLE)
+        .with_parent_pk(json!(1));
+    has_one.set_cached(Some(profile("Stale eager copy")));
     let loaded = entity_manager
-        .load(&mut relation)
+        .load(&mut has_one)
         .await?
         .expect("the cached profile should stay loaded");
-    assert_eq!(loaded.name, "Edited in memory");
+    assert_eq!(loaded.name, "Edited in memory", "has_one");
+
+    let mut belongs_to =
+        BelongsTo::<DirectEntityManagerRelationUser>::new("user_id", "id").with_fk_value(json!(1));
+    belongs_to.set_cached(Some(user("Stale eager copy")));
+    let loaded = entity_manager
+        .load(&mut belongs_to)
+        .await?
+        .expect("the cached owner should stay loaded");
+    assert_eq!(loaded.name, "Edited in memory", "belongs_to");
+
+    let mut has_many = HasMany::<DirectEntityManagerRelationProfile>::new("user_id", "id")
+        .with_metadata("profiles", USER_TABLE)
+        .with_parent_pk(json!(1));
+    has_many.set_cached(vec![profile("Stale eager copy")]);
+    let loaded = entity_manager.load(&mut has_many).await?;
+    assert_eq!(loaded.len(), 1, "has_many");
+    assert_eq!(loaded[0].name, "Edited in memory", "has_many");
 
     let tracked = entity_manager
         .get::<DirectEntityManagerRelationProfile>(&7)?
         .expect("the identity map should still hold the tracked profile");
     assert_eq!(tracked.name, "Edited in memory");
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn belongsto_cached_load_keeps_the_tracked_instance() -> crate::error::Result<()> {
-    let entity_manager = EntityManager::new(Arc::new(Database::disconnected()));
-    entity_manager
-        .register(DirectEntityManagerRelationUser {
-            id: 1,
-            name: "Edited in memory".to_string(),
-            profile: Default::default(),
-        })
-        .await;
-
-    let mut relation =
-        BelongsTo::<DirectEntityManagerRelationUser>::new("user_id", "id").with_fk_value(json!(1));
-    relation.set_cached(Some(DirectEntityManagerRelationUser {
-        id: 1,
-        name: "Stale eager copy".to_string(),
-        profile: Default::default(),
-    }));
-
-    let loaded = entity_manager
-        .load(&mut relation)
-        .await?
-        .expect("the cached owner should stay loaded");
-    assert_eq!(loaded.name, "Edited in memory");
-
     let tracked = entity_manager
         .get::<DirectEntityManagerRelationUser>(&1)?
         .expect("the identity map should still hold the tracked owner");
-    assert_eq!(tracked.name, "Edited in memory");
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn hasone_helpers_query_via_parent_entity_manager_database_without_global_db()
--> crate::error::Result<()> {
-    Database::reset_global();
-
-    let Some(db) = setup_database().await? else {
-        return Ok(());
-    };
-    let (user, profile, _) = seed_relations(db.as_ref()).await?;
-    let entity_manager = EntityManager::new(db.clone());
-
-    let user = entity_manager
-        .find::<DirectEntityManagerRelationUser>(user.id)
-        .await?
-        .expect("entity-manager user should exist");
-
-    assert!(user.profile.exists().await?);
-
-    let loaded = user
-        .profile
-        .load()
-        .await?
-        .expect("has_one relation should query via the parent entity manager database");
-
-    assert_eq!(loaded.id, profile.id);
-    assert_eq!(loaded.user_id, user.id);
-    assert_eq!(loaded.name, profile.name);
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn belongsto_helpers_query_via_parent_entity_manager_database_without_global_db()
--> crate::error::Result<()> {
-    Database::reset_global();
-
-    let Some(db) = setup_database().await? else {
-        return Ok(());
-    };
-    let (user, _, post) = seed_relations(db.as_ref()).await?;
-    let entity_manager = EntityManager::new(db.clone());
-
-    let post = entity_manager
-        .find::<DirectEntityManagerRelationPost>(post.id)
-        .await?
-        .expect("entity-manager post should exist");
-
-    assert!(post.user.exists().await?);
-
-    let loaded = post
-        .user
-        .load_with(|query| query)
-        .await?
-        .expect("belongs_to relation should query via the parent entity manager database");
-
-    assert_eq!(loaded.id, user.id);
-    assert_eq!(loaded.name, user.name);
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn hasmany_cached_load_keeps_the_tracked_instances() -> crate::error::Result<()> {
-    let entity_manager = EntityManager::new(Arc::new(Database::disconnected()));
-    entity_manager
-        .register(DirectEntityManagerRelationProfile {
-            id: 7,
-            user_id: 1,
-            name: "Edited in memory".to_string(),
-        })
-        .await;
-
-    let mut relation = HasMany::<DirectEntityManagerRelationProfile>::new("user_id", "id")
-        .with_metadata("profiles", USER_TABLE)
-        .with_parent_pk(json!(1));
-    relation.set_cached(vec![DirectEntityManagerRelationProfile {
-        id: 7,
-        user_id: 1,
-        name: "Stale eager copy".to_string(),
-    }]);
-
-    let loaded = entity_manager.load(&mut relation).await?;
-    assert_eq!(loaded.len(), 1);
-    assert_eq!(loaded[0].name, "Edited in memory");
-
-    let tracked = entity_manager
-        .get::<DirectEntityManagerRelationProfile>(&7)?
-        .expect("the identity map should still hold the tracked profile");
     assert_eq!(tracked.name, "Edited in memory");
 
     Ok(())

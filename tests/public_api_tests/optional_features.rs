@@ -74,16 +74,6 @@ mod translations_extended_tests {
     }
 
     #[test]
-    fn test_has_translations_set_single() {
-        let mut product = TestProduct::new(1, "Product", "Description");
-
-        product.set_translation("name", "ar", "منتج").unwrap();
-
-        let trans = product.get_translation("name", "ar").unwrap();
-        assert_eq!(trans, Some(serde_json::json!("منتج")));
-    }
-
-    #[test]
     fn test_has_translations_set_multiple() {
         let mut product = TestProduct::new(1, "Product", "Description");
 
@@ -109,15 +99,7 @@ mod translations_extended_tests {
     }
 
     #[test]
-    fn test_has_translations_fallback_to_default() {
-        let product = TestProduct::new(1, "Default Product", "Default Description");
-
-        let name = product.get_translated("name", "ar").unwrap();
-        assert_eq!(name, serde_json::json!("Default Product"));
-    }
-
-    #[test]
-    fn test_has_translations_get_all() {
+    fn test_has_translations_get_all_and_available_languages() {
         let mut product = TestProduct::new(1, "Product", "Description");
 
         product.set_translation("name", "en", "English").unwrap();
@@ -129,6 +111,10 @@ mod translations_extended_tests {
         assert_eq!(all.get("en"), Some(&serde_json::json!("English")));
         assert_eq!(all.get("ar"), Some(&serde_json::json!("عربي")));
         assert_eq!(all.get("fr"), Some(&serde_json::json!("Français")));
+
+        let mut languages = product.available_languages("name").unwrap();
+        languages.sort();
+        assert_eq!(languages, ["ar", "en", "fr"]);
     }
 
     #[test]
@@ -210,34 +196,18 @@ mod translations_extended_tests {
     }
 
     #[test]
-    fn test_has_translations_available_languages() {
+    fn test_set_translation_rejects_an_unknown_field_or_language() {
         let mut product = TestProduct::new(1, "Product", "Description");
 
-        product.set_translation("name", "en", "English").unwrap();
-        product.set_translation("name", "ar", "عربي").unwrap();
-        product.set_translation("name", "fr", "Français").unwrap();
-
-        let langs = product.available_languages("name").unwrap();
-        assert_eq!(langs.len(), 3);
-        assert!(langs.contains(&"en".to_string()));
-        assert!(langs.contains(&"ar".to_string()));
-        assert!(langs.contains(&"fr".to_string()));
-    }
-
-    #[test]
-    fn test_has_translations_invalid_field() {
-        let mut product = TestProduct::new(1, "Product", "Description");
-
-        let result = product.set_translation("invalid_field", "en", "value");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_has_translations_invalid_language() {
-        let mut product = TestProduct::new(1, "Product", "Description");
-
-        let result = product.set_translation("name", "invalid_lang", "value");
-        assert!(result.is_err());
+        assert!(matches!(
+            product.set_translation("invalid_field", "en", "value"),
+            Err(TranslationError::InvalidField(_))
+        ));
+        assert!(matches!(
+            product.set_translation("name", "invalid_lang", "value"),
+            Err(TranslationError::InvalidLanguage(_))
+        ));
+        assert!(!product.has_any_translation("name").unwrap());
     }
 
     #[test]
@@ -275,31 +245,10 @@ mod translations_extended_tests {
         product.set_translation("name", "en", "Product").unwrap();
 
         let json = product.to_json_with_all_translations();
-        assert!(json.get("translations").is_some());
-    }
-
-    #[test]
-    fn test_apply_translations() {
-        let mut product = TestProduct::new(1, "Product", "Description");
-
-        let mut input = TranslationInput::new();
-        input.add("name", "ar", "منتج");
-        input.add("name", "fr", "Produit");
-        input.add("description", "ar", "الوصف");
-
-        product.apply_translations(input).unwrap();
-
+        assert_eq!(json["name"], "Default Product");
         assert_eq!(
-            product.get_translation("name", "ar").unwrap(),
-            Some(serde_json::json!("منتج"))
-        );
-        assert_eq!(
-            product.get_translation("name", "fr").unwrap(),
-            Some(serde_json::json!("Produit"))
-        );
-        assert_eq!(
-            product.get_translation("description", "ar").unwrap(),
-            Some(serde_json::json!("الوصف"))
+            json["translations"],
+            serde_json::json!({"name": {"ar": "منتج", "en": "Product"}})
         );
     }
 
@@ -318,6 +267,10 @@ mod translations_extended_tests {
         assert_eq!(
             product.get_translation("name", "ar").unwrap(),
             Some(serde_json::json!("منتج"))
+        );
+        assert_eq!(
+            product.get_translation("name", "fr").unwrap(),
+            Some(serde_json::json!("Produit"))
         );
         assert_eq!(
             product.get_translation("description", "ar").unwrap(),

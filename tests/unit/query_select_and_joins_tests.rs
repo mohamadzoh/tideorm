@@ -10,38 +10,49 @@ struct LinkedSelectUser {
 const UNSAFE_TABLE: &str = "profiles\" ON 1 = 1; DROP TABLE profiles; --";
 
 #[test]
-fn test_select_with_linked_validates_its_join_table() {
-    let query = LinkedSelectUser::query().select_with_linked(
+fn test_join_helpers_validate_their_identifiers() {
+    for query in [
+        LinkedSelectUser::query().select_with_linked(
+            vec!["id"],
+            UNSAFE_TABLE,
+            "profile_id",
+            "id",
+            vec!["bio"],
+        ),
+        LinkedSelectUser::query().select_also_linked(UNSAFE_TABLE, "id", "user_id", vec!["bio"]),
+        LinkedSelectUser::query().right_join(UNSAFE_TABLE, "linked_select_users.id", "profiles.id"),
+        LinkedSelectUser::query().left_join_as(UNSAFE_TABLE, "p", "linked_select_users.id", "p.id"),
+    ] {
+        let err = query
+            .ensure_query_is_valid()
+            .expect_err("an unsafe join table must invalidate the query");
+        assert!(err.to_string().contains("unsafe JOIN table"), "{err}");
+        assert!(
+            !query.known_qualifiers().iter().any(|q| q.contains("DROP")),
+            "a rejected join must not whitelist its qualifier"
+        );
+    }
+
+    let unsafe_alias = LinkedSelectUser::query().right_join_as(
+        "profiles",
+        "p; --",
+        "linked_select_users.id",
+        "p.id",
+    );
+    let err = unsafe_alias
+        .ensure_query_is_valid()
+        .expect_err("an unsafe join alias must invalidate the query");
+    assert!(err.to_string().contains("unsafe JOIN alias"), "{err}");
+
+    let linked = LinkedSelectUser::query().select_with_linked(
         vec!["id"],
-        UNSAFE_TABLE,
+        "profiles",
         "profile_id",
         "id",
         vec!["bio"],
     );
-
-    let err = query
-        .ensure_query_is_valid()
-        .expect_err("an unsafe linked table must invalidate the query");
-    assert!(err.to_string().contains("unsafe JOIN table"), "{err}");
-    assert!(
-        !query.known_qualifiers().iter().any(|q| q.contains("DROP")),
-        "a rejected join must not whitelist its qualifier"
-    );
-}
-
-#[test]
-fn test_select_also_linked_validates_its_join_table() {
-    let query =
-        LinkedSelectUser::query().select_also_linked(UNSAFE_TABLE, "id", "user_id", vec!["bio"]);
-
-    let err = query
-        .ensure_query_is_valid()
-        .expect_err("an unsafe linked table must invalidate the query");
-    assert!(err.to_string().contains("unsafe JOIN table"), "{err}");
-    assert!(
-        !query.known_qualifiers().iter().any(|q| q.contains("DROP")),
-        "a rejected join must not whitelist its qualifier"
-    );
+    assert!(linked.ensure_query_is_valid().is_ok());
+    assert!(linked.known_qualifiers().contains("profiles"));
 }
 
 #[test]
@@ -57,73 +68,49 @@ fn test_distinct_is_idempotent() {
     );
 }
 
+/// A SELECT DISTINCT can only order by a column it selects.
 #[test]
 fn test_distinct_rejects_order_by_outside_the_projection() {
-    let err = LinkedSelectUser::query()
-        .inner_join("profiles", "linked_select_users.profile_id", "profiles.id")
-        .distinct()
-        .order_desc("profiles.created_at")
-        .ensure_query_is_valid()
-        .expect_err("a SELECT DISTINCT cannot order by a column it does not select");
+    let joined = || {
+        LinkedSelectUser::query().inner_join(
+            "profiles",
+            "linked_select_users.profile_id",
+            "profiles.id",
+        )
+    };
 
-    assert!(
-        err.to_string().contains("not part of the distinct()"),
-        "{err}"
-    );
-}
+    for query in [
+        joined().distinct().order_desc("profiles.created_at"),
+        // An explicit select() narrows what may be ordered by.
+        LinkedSelectUser::query()
+            .select(vec!["id"])
+            .distinct()
+            .order_desc("profile_id"),
+    ] {
+        let err = query
+            .ensure_query_is_valid()
+            .expect_err("the ordering column is not selected");
+        assert!(
+            err.to_string().contains("not part of the distinct()"),
+            "{err}"
+        );
+    }
 
-#[test]
-fn test_distinct_allows_order_by_a_projected_column() {
-    let query = LinkedSelectUser::query()
-        .inner_join("profiles", "linked_select_users.profile_id", "profiles.id")
-        .distinct()
-        .order_desc("linked_select_users.id");
-
-    assert!(query.ensure_query_is_valid().is_ok());
-}
-
-#[test]
-fn test_distinct_narrows_the_allowed_order_by_to_an_explicit_select() {
-    let err = LinkedSelectUser::query()
-        .select(vec!["id"])
-        .distinct()
-        .order_desc("profile_id")
-        .ensure_query_is_valid()
-        .expect_err("an explicit select() narrows what a SELECT DISTINCT can order by");
-
-    assert!(
-        err.to_string().contains("not part of the distinct()"),
-        "{err}"
-    );
-}
-
-#[test]
-fn test_distinct_leaves_raw_order_by_and_raw_projections_to_the_caller() {
-    let raw_order = LinkedSelectUser::query()
-        .distinct()
-        .order_by_raw("profile_id", crate::query::Order::Desc);
-    assert!(raw_order.ensure_query_is_valid().is_ok());
-
-    let raw_projection = LinkedSelectUser::query()
-        .inner_join("profiles", "linked_select_users.profile_id", "profiles.id")
-        .select_raw("profiles.bio")
-        .distinct()
-        .order_desc("profiles.bio");
-    assert!(raw_projection.ensure_query_is_valid().is_ok());
-}
-
-#[test]
-fn test_select_with_linked_still_registers_a_valid_join() {
-    let query = LinkedSelectUser::query().select_with_linked(
-        vec!["id"],
-        "profiles",
-        "profile_id",
-        "id",
-        vec!["bio"],
-    );
-
-    assert!(query.ensure_query_is_valid().is_ok());
-    assert!(query.known_qualifiers().contains("profiles"));
+    for query in [
+        joined().distinct().order_desc("linked_select_users.id"),
+        // A raw ordering or a raw projection is the caller's to vouch for.
+        LinkedSelectUser::query()
+            .distinct()
+            .order_by_raw("profile_id", crate::query::Order::Desc),
+        joined()
+            .select_raw("profiles.bio")
+            .distinct()
+            .order_desc("profiles.bio"),
+    ] {
+        query
+            .ensure_query_is_valid()
+            .expect("the ordering column is selected, or raw");
+    }
 }
 
 #[test]
@@ -160,27 +147,6 @@ fn test_right_and_aliased_joins_render_their_clause_on_every_backend() {
             && mysql.contains("RIGHT JOIN `accounts` AS `a` ON"),
         "{mysql}"
     );
-}
-
-#[test]
-fn test_right_and_aliased_joins_validate_their_identifiers() {
-    let rejected = [
-        LinkedSelectUser::query().right_join(UNSAFE_TABLE, "linked_select_users.id", "profiles.id"),
-        LinkedSelectUser::query().right_join_as(
-            "profiles",
-            "p; --",
-            "linked_select_users.id",
-            "p.id",
-        ),
-        LinkedSelectUser::query().left_join_as(UNSAFE_TABLE, "p", "linked_select_users.id", "p.id"),
-    ];
-
-    for query in rejected {
-        assert!(
-            query.ensure_query_is_valid().is_err(),
-            "an unsafe join must invalidate the query"
-        );
-    }
 }
 
 #[test]
@@ -319,49 +285,27 @@ struct LinkedAuditEvent {
     token: uuid::Uuid,
 }
 
-/// A filter on a joined table named with its schema binds as the joined
-/// model's column type: `linked_audit_events.token` is a UUID, not text,
-/// although the join names `audit.linked_audit_events`.
+/// A filter on a joined table binds as the joined model's column type when
+/// the join names that model's schema: `linked_audit_events.token` is a UUID,
+/// not text, through `audit.linked_audit_events`, but a same-named table in
+/// another schema is not that model.
 #[test]
-fn a_schema_qualified_join_binds_its_columns_as_their_types() {
-    let token = uuid::Uuid::nil();
-    let (_, params) = LinkedSelectUser::query()
-        .inner_join(
-            "audit.linked_audit_events",
-            "linked_select_users.id",
-            "linked_audit_events.id",
-        )
-        .where_eq("linked_audit_events.token", token)
-        .build_select_sql_with_params_for_db(crate::config::DatabaseType::Postgres);
+fn a_joined_column_binds_as_its_type_only_in_its_models_schema() {
+    for (schema, expect_uuid) in [("audit", true), ("other", false)] {
+        let (_, params) = LinkedSelectUser::query()
+            .inner_join(
+                &format!("{schema}.linked_audit_events"),
+                "linked_select_users.id",
+                "linked_audit_events.id",
+            )
+            .where_eq("linked_audit_events.token", uuid::Uuid::nil().to_string())
+            .build_select_sql_with_params_for_db(crate::config::DatabaseType::Postgres);
 
-    assert!(
-        params
-            .iter()
-            .any(|value| matches!(value, crate::internal::Value::Uuid(Some(_)))),
-        "{params:?}"
-    );
-}
-
-#[test]
-fn a_join_in_another_schema_does_not_reuse_column_types() {
-    let (_, params) = LinkedSelectUser::query()
-        .inner_join(
-            "other.linked_audit_events",
-            "linked_select_users.id",
-            "linked_audit_events.id",
-        )
-        .where_eq("linked_audit_events.token", uuid::Uuid::nil().to_string())
-        .build_select_sql_with_params_for_db(crate::config::DatabaseType::Postgres);
-    assert!(
-        params
-            .iter()
-            .any(|value| matches!(value, crate::internal::Value::String(Some(_)))),
-        "{params:?}"
-    );
-    assert!(
-        !params
-            .iter()
-            .any(|value| matches!(value, crate::internal::Value::Uuid(_))),
-        "{params:?}"
-    );
+        let expected = if expect_uuid {
+            crate::internal::Value::from(uuid::Uuid::nil())
+        } else {
+            crate::internal::Value::from(uuid::Uuid::nil().to_string())
+        };
+        assert_eq!(params, vec![expected], "{schema}");
+    }
 }

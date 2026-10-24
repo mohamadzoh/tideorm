@@ -120,15 +120,15 @@ impl<M: Model> QueryBuilder<M> {
     /// `select()`, the raw expressions of `select_raw()`, the scalar subqueries
     /// of `select_subquery()`, then the window functions of `window()` — so a
     /// query that mixes them keeps every requested output column instead of
-    /// silently dropping the typed half. `table.*` is only supplied when nothing
-    /// but window functions was selected, because it is a default rather than a
-    /// contribution.
+    /// silently dropping the typed half. The default projection (the model's
+    /// columns, or `table.*` beside a raw union arm) is only supplied when
+    /// nothing but window functions was selected, because it is a default
+    /// rather than a contribution.
     ///
     /// `distinct()` records itself as a sentinel among the raw expressions
     /// because it modifies the projection as a whole. The sentinel is dropped
     /// here and re-emitted as the `DISTINCT` keyword in front of the joined
-    /// list, so it never reaches SQL and never counts towards the `table.*`
-    /// fallback.
+    /// list, so it never reaches SQL and never counts as a contribution.
     ///
     /// The projection precedes every other clause, so the subqueries' values
     /// are the first ones bound.

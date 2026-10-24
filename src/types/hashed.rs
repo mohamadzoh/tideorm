@@ -49,22 +49,18 @@ impl Hashed {
 
     /// Verify a plain text value against the stored Argon2 hash.
     pub fn verify(&self, plain_text: &str) -> bool {
-        let Ok(parsed_hash) = argon2::password_hash::PasswordHash::new(&self.hash) else {
-            return false;
-        };
-
         argon2::Argon2::default()
-            .verify_password(plain_text.as_bytes(), &parsed_hash)
+            .verify_password(plain_text.as_bytes(), self.hash.as_str())
             .is_ok()
     }
 
-    /// Compute an Argon2 hash suitable for password storage.
+    /// Compute an Argon2 hash suitable for password storage, under a fresh
+    /// random salt.
     fn compute_hash(input: &str) -> crate::error::Result<String> {
-        use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
+        use argon2::password_hash::PasswordHasher;
 
-        let salt = SaltString::generate(&mut OsRng);
         argon2::Argon2::default()
-            .hash_password(input.as_bytes(), &salt)
+            .hash_password(input.as_bytes())
             .map(|hash| hash.to_string())
             .map_err(|error| {
                 crate::error::Error::internal(format!("Argon2 hashing failed: {error}"))

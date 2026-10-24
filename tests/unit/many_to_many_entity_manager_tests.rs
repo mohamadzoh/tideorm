@@ -59,13 +59,10 @@ async fn setup_database() -> crate::error::Result<Option<Arc<Database>>> {
     .await
 }
 
+/// A post linked to one tag.
 async fn seed_relations(
     db: &Database,
-) -> crate::error::Result<(
-    ManyToManyEntityManagerPost,
-    ManyToManyEntityManagerTag,
-    ManyToManyEntityManagerPostTag,
-)> {
+) -> crate::error::Result<(ManyToManyEntityManagerPost, ManyToManyEntityManagerTag)> {
     __in_db_scope(db, async {
         let post = ManyToManyEntityManagerPost {
             id: 0,
@@ -82,7 +79,7 @@ async fn seed_relations(
         .save()
         .await?;
 
-        let pivot = ManyToManyEntityManagerPostTag {
+        ManyToManyEntityManagerPostTag {
             id: 0,
             post_id: post.id,
             tag_id: tag.id,
@@ -90,40 +87,9 @@ async fn seed_relations(
         .save()
         .await?;
 
-        Ok((post, tag, pivot))
+        Ok((post, tag))
     })
     .await
-}
-
-fn tags_relation(
-    post_id: i64,
-) -> HasManyThrough<ManyToManyEntityManagerTag, ManyToManyEntityManagerPostTag> {
-    HasManyThrough::new("post_id", "tag_id", "id", "id", PIVOT_TABLE)
-        .with_metadata("tags", POST_TABLE)
-        .with_parent_pk(json!(post_id))
-}
-
-#[tokio::test]
-async fn has_many_through_load_queries_through_the_attached_database_without_global_db()
--> crate::error::Result<()> {
-    Database::reset_global();
-
-    let Some(db) = setup_database().await? else {
-        return Ok(());
-    };
-    let (post, tag, _pivot) = seed_relations(db.as_ref()).await?;
-    let entity_manager = EntityManager::new(db.clone());
-
-    let mut relation = tags_relation(post.id);
-    relation.attach_query_database(entity_manager.database());
-
-    let loaded = relation.load().await?;
-
-    assert_eq!(loaded.len(), 1);
-    assert_eq!(loaded[0].id, tag.id);
-    assert_eq!(loaded[0].name, tag.name);
-
-    Ok(())
 }
 
 #[tokio::test]
@@ -134,7 +100,7 @@ async fn has_many_through_helpers_query_via_parent_entity_manager_database_witho
     let Some(db) = setup_database().await? else {
         return Ok(());
     };
-    let (post, tag, _pivot) = seed_relations(db.as_ref()).await?;
+    let (post, tag) = seed_relations(db.as_ref()).await?;
     let entity_manager = EntityManager::new(db.clone());
 
     let post = entity_manager
@@ -161,7 +127,7 @@ async fn has_many_through_entity_manager_load_collapses_duplicate_pivot_rows()
     let Some(db) = setup_database().await? else {
         return Ok(());
     };
-    let (post, tag, _pivot) = seed_relations(db.as_ref()).await?;
+    let (post, tag) = seed_relations(db.as_ref()).await?;
     __in_db_scope(db.as_ref(), async {
         ManyToManyEntityManagerPostTag {
             id: 0,
@@ -209,7 +175,16 @@ async fn has_many_through_cached_load_keeps_the_tracked_instance() -> crate::err
         })
         .await;
 
-    let mut relation = tags_relation(1);
+    let mut relation =
+        HasManyThrough::<ManyToManyEntityManagerTag, ManyToManyEntityManagerPostTag>::new(
+            "post_id",
+            "tag_id",
+            "id",
+            "id",
+            PIVOT_TABLE,
+        )
+        .with_metadata("tags", POST_TABLE)
+        .with_parent_pk(json!(1));
     relation.set_cached(vec![ManyToManyEntityManagerTag {
         id: 7,
         name: "stale-eager-copy".to_string(),

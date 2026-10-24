@@ -80,6 +80,8 @@ fn comment_introducers_inside_a_literal_are_still_accepted() {
     // the scanner at all.
     validate_raw_sql_fragment("WHERE raw SQL", "\"note\" = 'buy 2 -- get 1 free'")
         .expect("a comment introducer inside a literal is just data");
+    validate_raw_sql_fragment("WHERE raw SQL", "\"note\" = 'issue #42'")
+        .expect("MySQL's `#` comment introducer inside a literal is just data");
     validate_raw_sql_fragment("WHERE raw SQL", "\"note\" = $1")
         .expect("a bound placeholder carries no literal at all");
     validate_raw_sql_fragment("WHERE raw SQL", "\"note\" = ?")

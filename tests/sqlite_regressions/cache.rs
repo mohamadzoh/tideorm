@@ -7,6 +7,10 @@ use crate::fixtures::{
 use std::time::Duration;
 use tideorm::prelude::*;
 
+/// `review_users` holding one [`User`], named `old`.
+const OLD_USER: &str = "CREATE TABLE review_users(id INTEGER PRIMARY KEY, name TEXT, active BOOLEAN); \
+     INSERT INTO review_users VALUES(1, 'old', 1)";
+
 #[tideorm::model(table = "flattened_cache_rows")]
 #[derive(serde::Serialize)]
 struct FlattenedCacheRow {
@@ -16,6 +20,8 @@ struct FlattenedCacheRow {
     extra: Option<serde_json::Value>,
 }
 
+/// A user `Serialize` that flattens a field writes JSON the model does not
+/// read back, so such rows are never cached rather than served without it.
 #[tokio::test]
 async fn flattened_serde_models_never_lose_fields_on_cached_reads() {
     let db = memory_database(
@@ -34,10 +40,12 @@ async fn flattened_serde_models_never_lose_fields_on_cached_reads() {
     assert_eq!(cache.stats().entries, 0);
 }
 
-/// External writers use table invalidation after committing. SQL spelling and
-/// parenthesized table factors must not leave their old rows cached.
+/// External writers use table invalidation after committing, which reaches a
+/// cached read through every table its raw condition names: in a
+/// parenthesized join or comma list, after a join's `ON` or `USING`, and
+/// however its name is spelled.
 #[tokio::test]
-async fn table_invalidation_reaches_parenthesized_and_mixed_case_dependencies() {
+async fn table_invalidation_reaches_every_table_a_raw_condition_names() {
     use tideorm::orm::ConnectionTrait;
     let db = memory_database(
         "CREATE TABLE review_users(id INTEGER PRIMARY KEY, name TEXT, active BOOLEAN); \
@@ -52,6 +60,8 @@ async fn table_invalidation_reaches_parenthesized_and_mixed_case_dependencies() 
         "(posts JOIN flags ON flags.id = posts.id)",
         "((posts JOIN flags ON flags.id = posts.id))",
         "(flags, posts)",
+        "flags f JOIN flags f2 ON f.id=f2.id, posts",
+        "flags f LEFT JOIN flags f2 USING(id), posts",
         "POSTS",
         "\"POSTS\"",
     ] {
@@ -67,6 +77,7 @@ async fn table_invalidation_reaches_parenthesized_and_mixed_case_dependencies() 
             ))
             .cache(Duration::from_secs(60));
         assert_eq!(query.clone().get().await.unwrap().len(), 1, "{source}");
+        assert!(!cache.is_empty(), "{source}: the read was not cached");
         db.__internal_connection()
             .unwrap()
             .execute_unprepared("UPDATE posts SET user_id = 99")
@@ -80,7 +91,7 @@ async fn table_invalidation_reaches_parenthesized_and_mixed_case_dependencies() 
 #[tokio::test]
 async fn writes_and_commits_preserve_an_unrelated_databases_cache() {
     let (a, _file) = file_database("cache-scope").await;
-    a.exec_raw(crate::fixtures::OLD_USER).await.unwrap();
+    a.exec_raw(OLD_USER).await.unwrap();
     let b = users_and_posts("other", 20).await;
     let cache = crate::fixtures::global_cache();
     let qa = User::query_with(&a).cache(Duration::from_secs(60));
@@ -128,7 +139,7 @@ async fn writes_and_commits_preserve_an_unrelated_databases_cache() {
 #[tokio::test]
 async fn separate_pools_on_one_file_invalidate_each_other() {
     let (writer, file) = file_database("shared-cache-scope").await;
-    writer.exec_raw(crate::fixtures::OLD_USER).await.unwrap();
+    writer.exec_raw(OLD_USER).await.unwrap();
     let reader =
         crate::fixtures::single_connection(&format!("sqlite://{}?mode=rw", file.display())).await;
     let cache = crate::fixtures::global_cache();
@@ -157,7 +168,7 @@ async fn attached_databases_keep_conservative_invalidation() {
 
 async fn check_attachment_invalidation(attach: &str) {
     let (file_db, file) = file_database("attached-cache-scope").await;
-    file_db.exec_raw(crate::fixtures::OLD_USER).await.unwrap();
+    file_db.exec_raw(OLD_USER).await.unwrap();
     // SQLITE_OPEN_MEMORY also affects ATTACH unless its URI overrides the
     // mode. Use a file-backed, single-connection pool for this file attachment.
     let attaching_file = crate::fixtures::TempFile::new("attaching-cache-scope", "sqlite");
@@ -193,9 +204,9 @@ async fn named_memory_cache_scopes_follow_shared_and_private_storage() {
         );
         let a = crate::fixtures::single_connection(&url).await;
         let b = crate::fixtures::single_connection(&url).await;
-        a.exec_raw(crate::fixtures::OLD_USER).await.unwrap();
+        a.exec_raw(OLD_USER).await.unwrap();
         if mode == "private" {
-            b.exec_raw(crate::fixtures::OLD_USER).await.unwrap();
+            b.exec_raw(OLD_USER).await.unwrap();
         }
         let cache = crate::fixtures::global_cache();
         let query = User::query_with(&b).cache(Duration::from_secs(60));
@@ -241,7 +252,7 @@ async fn cache_hits_do_not_replace_another_pools_baseline() {
 async fn a_write_is_replayed_by_the_transaction_it_ran_in() {
     let (a, _a_file) = file_database("replay-a").await;
     let (b, _b_file) = file_database("replay-b").await;
-    a.exec_raw(crate::fixtures::OLD_USER).await.unwrap();
+    a.exec_raw(OLD_USER).await.unwrap();
     let _cache = crate::fixtures::global_cache();
     let read = |db: Database| async move {
         User::query_with(&db)
@@ -382,43 +393,6 @@ async fn a_cancelled_write_still_invalidates_cached_reads() {
 }
 
 #[tokio::test]
-async fn mixed_join_and_comma_dependencies_invalidate_cached_results() {
-    #[tideorm::model(table = "review_flags")]
-    struct Flag {
-        #[tideorm(primary_key)]
-        id: i64,
-        enabled: bool,
-    }
-    let db = users_and_posts("cached", 10).await;
-    Database::set_global(db.clone()).unwrap();
-    db.exec_raw("CREATE TABLE review_flags(id INTEGER PRIMARY KEY, enabled BOOLEAN)")
-        .await
-        .unwrap();
-    db.exec_raw("INSERT INTO review_flags VALUES(1, 1)")
-        .await
-        .unwrap();
-    let _cache = crate::fixtures::global_cache();
-    for join in [
-        "JOIN review_posts p2 ON p.id=p2.id",
-        "LEFT JOIN review_posts p2 USING(id)",
-    ] {
-        let mut flag = Flag::find_with(1, &db).await.unwrap().unwrap();
-        flag.enabled = true;
-        flag = flag.update().await.unwrap();
-        let query = User::query_with(&db)
-            .where_raw(&format!(
-                "EXISTS (SELECT 1 FROM review_posts p {join}, review_flags f WHERE f.enabled=1)"
-            ))
-            .cache(Duration::from_secs(60));
-        assert_eq!(query.clone().get().await.unwrap().len(), 1);
-        assert_eq!(query.clone().get().await.unwrap().len(), 1);
-        flag.enabled = false;
-        flag.update().await.unwrap();
-        assert!(query.get().await.unwrap().is_empty());
-    }
-}
-
-#[tokio::test]
 async fn writable_pragmas_invalidate_cached_reads() {
     // A pragma changes one connection's settings; pin this test to one pool connection.
     let db = memory_database(
@@ -523,7 +497,8 @@ async fn failed_writes_invalidate_trigger_side_effects() {
                     .await
                     .is_err()
             );
-            // Another connection can cache pre-commit values after the first flush.
+            // Stands in for another connection caching what it read after the
+            // write's own invalidation: the commit must evict it again.
             QueryCache::global().set(
                 "review_failed_write_commit",
                 &1,
@@ -607,7 +582,8 @@ async fn database_side_writes_invalidate_all_cached_tables_and_replay_on_commit(
                 .set("code", 30)
                 .execute()
                 .await?;
-            // Simulate another connection caching pre-commit data after the first flush.
+            // Stands in for another connection caching what it read after the
+            // write's own invalidation: the commit must evict it again.
             QueryCache::global().set("review_before_commit", &1, None, "review_cascade_child")?;
             Ok(())
         })

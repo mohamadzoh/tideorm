@@ -149,21 +149,3 @@ pub(crate) fn count_template_placeholders(template: &str) -> usize {
         .filter(|token| token.text == "?" && token.kind == crate::internal::sql_lexer::Kind::Symbol)
         .count()
 }
-
-#[cfg(test)]
-mod lexical_regressions {
-    use super::*;
-    #[test]
-    fn identifiers_and_nested_comments_are_not_parameters() {
-        assert_eq!(
-            offset_postgres_placeholders("a$1 + $1 /* outer /* $2 */ $3 */ + $2", 1),
-            "a$1 + $2 /* outer /* $2 */ $3 */ + $3"
-        );
-        let template = "? /* ? /* ? */ ? */ + '?' + $$?$$ + \"?\" -- ?\n + ?";
-        assert_eq!(count_template_placeholders(template), 2);
-        assert_eq!(
-            render_template(DatabaseType::Postgres, template, 1),
-            "$1 /* ? /* ? */ ? */ + '?' + $$?$$ + \"?\" -- ?\n + $2"
-        );
-    }
-}

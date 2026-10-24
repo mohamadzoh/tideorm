@@ -60,28 +60,64 @@ fn self_ref_tree_sql_rejects_unknown_columns() {
 }
 
 #[tokio::test]
-async fn direct_relation_helpers_reject_composite_keys() {
-    let composite_key = serde_json::json!([1, 2]);
+async fn relation_loads_reject_composite_keys() {
+    let composite_key = || json!([1, 2]);
+    let refusals = [
+        (
+            "HasMany::load",
+            HasMany::<RelationTestNode>::new("parent_slug", "slug")
+                .with_parent_pk(composite_key())
+                .load()
+                .await
+                .map(drop),
+        ),
+        (
+            "BelongsTo::load",
+            BelongsTo::<RelationTestNode>::new("parent_slug", "slug")
+                .with_fk_value(composite_key())
+                .load()
+                .await
+                .map(drop),
+        ),
+        (
+            "HasManyThrough::load",
+            HasManyThrough::<RelationTestNode, RelationTestPivot>::new(
+                "left_id",
+                "right_id",
+                "id",
+                "id",
+                "relation_test_pivots",
+            )
+            .with_parent_pk(composite_key())
+            .load()
+            .await
+            .map(drop),
+        ),
+        (
+            "MorphOne::load",
+            MorphOne::<RelationTestNode>::new("nodeable", "id")
+                .with_parent(composite_key(), "relation_test_nodes".to_string())
+                .load()
+                .await
+                .map(drop),
+        ),
+        (
+            "SelfRefMany::load_tree",
+            SelfRefMany::<RelationTestNode>::new("parent_slug", "slug")
+                .with_parent_pk(composite_key())
+                .load_tree(2)
+                .await
+                .map(drop),
+        ),
+    ];
 
-    let err = HasMany::<RelationTestNode>::new("parent_slug", "slug")
-        .with_parent_pk(composite_key.clone())
-        .load()
-        .await
-        .unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("HasMany::load only supports scalar relation keys")
-    );
-
-    let err = BelongsTo::<RelationTestNode>::new("parent_slug", "slug")
-        .with_fk_value(composite_key)
-        .load()
-        .await
-        .unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("BelongsTo::load only supports scalar relation keys")
-    );
+    for (call, outcome) in refusals {
+        let error = outcome.expect_err(call).to_string();
+        assert!(
+            error.contains(&format!("{call} only supports scalar relation keys")),
+            "{error}"
+        );
+    }
 }
 
 #[test]

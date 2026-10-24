@@ -1,59 +1,53 @@
 mod error_exhaustive_variants {
     use tideorm::error::Error;
 
-    /// One error of every variant.
-    fn every_variant() -> Vec<Error> {
-        vec![
-            Error::not_found("find user"),
-            Error::connection("Connection refused"),
-            Error::query("syntax error"),
-            Error::validation("email", "invalid"),
-            Error::conversion("type mismatch"),
-            Error::transaction("timeout"),
-            Error::configuration("not set"),
-            Error::internal("oops"),
-            Error::backend_not_supported("arrays", "SQLite"),
-            Error::primary_key_not_set("missing pk", "Post"),
-            Error::tokenization("encode failed"),
-            Error::invalid_token("tampered"),
-        ]
-    }
-
+    /// Every variant reports its own stable code, an HTTP status and a
+    /// suggestion.
     #[test]
-    fn test_all_error_variants_have_unique_codes() {
-        let errors = every_variant();
-
-        let codes: Vec<&str> = errors.iter().map(|e| e.code()).collect();
-        let unique: std::collections::HashSet<&&str> = codes.iter().collect();
-        assert_eq!(codes.len(), unique.len(), "all error codes must be unique");
-    }
-
-    #[test]
-    fn test_all_error_http_statuses_are_valid() {
-        let errors = every_variant();
-
-        for err in &errors {
-            let status = err.http_status();
-            assert!(
-                (100..600).contains(&status),
-                "error code {} has invalid HTTP status {}",
-                err.code(),
-                status
-            );
-        }
-    }
-
-    #[test]
-    fn test_all_suggestions_are_nonempty() {
-        let errors = every_variant();
-
-        for err in &errors {
-            let suggestion = err.suggestion();
-            assert!(
-                !suggestion.is_empty(),
-                "{} should have a suggestion",
-                err.code()
-            );
+    fn test_every_variant_has_a_code_a_status_and_a_suggestion() {
+        for (error, code, status) in [
+            (Error::not_found("find user"), "TIDE_NOT_FOUND", 404),
+            (
+                Error::connection("Connection refused"),
+                "TIDE_CONNECTION",
+                503,
+            ),
+            (Error::query("syntax error"), "TIDE_QUERY", 400),
+            (
+                Error::validation("email", "invalid"),
+                "TIDE_VALIDATION",
+                422,
+            ),
+            (Error::conversion("type mismatch"), "TIDE_CONVERSION", 400),
+            (Error::transaction("timeout"), "TIDE_TRANSACTION", 409),
+            (Error::configuration("not set"), "TIDE_CONFIG", 500),
+            (Error::internal("oops"), "TIDE_INTERNAL", 500),
+            (
+                Error::access_denied("delete", "posts"),
+                "TIDE_ACCESS_DENIED",
+                403,
+            ),
+            (Error::rbac("no role"), "TIDE_RBAC", 500),
+            (
+                Error::backend_not_supported("arrays", "SQLite"),
+                "TIDE_BACKEND_NOT_SUPPORTED",
+                501,
+            ),
+            (
+                Error::primary_key_not_set("missing pk", "Post"),
+                "TIDE_PRIMARY_KEY_NOT_SET",
+                400,
+            ),
+            (
+                Error::tokenization("encode failed"),
+                "TIDE_TOKENIZATION",
+                400,
+            ),
+            (Error::invalid_token("tampered"), "TIDE_INVALID_TOKEN", 401),
+        ] {
+            assert_eq!(error.code(), code, "{error:?}");
+            assert_eq!(error.http_status(), status, "{error:?}");
+            assert!(!error.suggestion().is_empty(), "{error:?}");
         }
     }
 }
@@ -61,34 +55,23 @@ mod error_exhaustive_variants {
 mod error_retryable_edge_cases {
     use tideorm::error::Error;
 
+    /// Without a driver classification, retries are judged from the message.
     #[test]
-    fn test_connection_refused_is_retryable() {
-        assert!(Error::connection("Connection refused by host").is_retryable());
-    }
-
-    #[test]
-    fn test_query_lock_timeout_is_retryable() {
-        assert!(Error::query("lock wait timeout exceeded").is_retryable());
-    }
-
-    #[test]
-    fn test_transaction_serialization_is_retryable() {
-        assert!(Error::transaction("serialization failure").is_retryable());
-    }
-
-    #[test]
-    fn test_validation_not_retryable() {
-        assert!(!Error::validation("email", "invalid").is_retryable());
-    }
-
-    #[test]
-    fn test_configuration_not_retryable() {
-        assert!(!Error::configuration("missing key").is_retryable());
-    }
-
-    #[test]
-    fn test_backend_not_supported_not_retryable() {
-        assert!(!Error::backend_not_supported("arrays", "sqlite").is_retryable());
+    fn test_only_transient_failures_are_retryable() {
+        for (error, retryable) in [
+            (Error::connection("Connection refused by host"), true),
+            (Error::connection("connection pool exhausted"), true),
+            (Error::query("lock wait timeout exceeded"), true),
+            (Error::transaction("serialization failure"), true),
+            (Error::query("deadlock detected"), true),
+            (Error::query("syntax error"), false),
+            (Error::not_found("User not found"), false),
+            (Error::validation("email", "invalid"), false),
+            (Error::configuration("missing key"), false),
+            (Error::backend_not_supported("arrays", "sqlite"), false),
+        ] {
+            assert_eq!(error.is_retryable(), retryable, "{error:?}");
+        }
     }
 }
 
@@ -96,18 +79,11 @@ mod error_display {
     use tideorm::error::Error;
 
     #[test]
-    fn test_not_found_with_empty_message() {
-        let err = Error::not_found("");
-        assert!(matches!(err, Error::NotFound { .. }));
-        assert_eq!(err.to_string(), "Record not found: ");
-    }
-
-    #[test]
-    fn test_message_special_characters_are_kept_verbatim() {
-        let err = Error::query("Error: 'invalid' \"syntax\" <tag> & more\nline 2");
-        assert!(
-            err.to_string()
-                .contains("'invalid' \"syntax\" <tag> & more\nline 2")
+    fn test_display_prefixes_the_kind_and_keeps_the_message_verbatim() {
+        assert_eq!(Error::not_found("").to_string(), "Record not found: ");
+        assert_eq!(
+            Error::query("Error: 'invalid' \"syntax\" <tag> & more\nline 2").to_string(),
+            "Query error: Error: 'invalid' \"syntax\" <tag> & more\nline 2"
         );
     }
 }
@@ -116,25 +92,22 @@ mod error_context_application {
     use tideorm::error::{Error, ErrorContext};
 
     #[test]
-    fn test_with_context_on_not_found() {
-        let ctx = ErrorContext::new().table("users").column("id");
-        let err = Error::not_found("user 42").with_context(ctx);
-        assert!(err.context().is_some());
-        assert_eq!(err.context().unwrap().table.as_deref(), Some("users"));
-    }
+    fn test_with_context_is_kept_by_not_found_and_query_errors_only() {
+        let ctx = || ErrorContext::new().table("users").column("id");
 
-    #[test]
-    fn test_with_context_on_query() {
-        let ctx = ErrorContext::new().query("SELECT 1");
-        let err = Error::query("bad sql").with_context(ctx);
-        assert!(err.context().is_some());
-    }
-
-    #[test]
-    fn test_with_context_on_other_variants_is_noop() {
-        let ctx = ErrorContext::new().table("users");
-        let err = Error::connection("refused").with_context(ctx);
-        assert!(err.context().is_none());
+        for error in [
+            Error::not_found("user 42").with_context(ctx()),
+            Error::query("bad sql").with_context(ctx()),
+        ] {
+            let kept = error.context().expect("the context is kept");
+            assert_eq!(kept.table.as_deref(), Some("users"), "{error:?}");
+        }
+        assert!(
+            Error::connection("refused")
+                .with_context(ctx())
+                .context()
+                .is_none()
+        );
     }
 
     #[test]

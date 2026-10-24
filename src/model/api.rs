@@ -432,8 +432,10 @@ pub trait Model:
     /// Built on [`Model::to_json`] with no options, so hidden attributes stay
     /// hidden. Every value is stringified — numbers and booleans become their
     /// text form, `null` becomes `"null"`, and nested objects and arrays become
-    /// their JSON text. Intended for template context and form population, not
-    /// for round-tripping back into a model.
+    /// their JSON text. A field named `params` holding an object or an array is
+    /// left out: `params` is reserved for presenter payloads. Intended for
+    /// template context and form population, not for round-tripping back into
+    /// a model.
     fn to_hash_map(&self) -> HashMap<String, String> {
         serialization::to_hash_map::<Self>(self)
     }

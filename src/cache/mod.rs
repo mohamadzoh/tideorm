@@ -20,10 +20,12 @@
 //!
 //! ## Cache Strategies
 //!
-//! The query cache can evict entries using different strategies:
+//! Every entry expires after its TTL. When the cache is full, its strategy picks
+//! the entry that makes room:
 //!
-//! - **TTL (Time To Live)** - Entries expire after a fixed duration
-//! - **LRU (Least Recently Used)** - Oldest entries are evicted when cache is full
+//! - **LRU (Least Recently Used)** - the entry read least recently
+//! - **FIFO (First In, First Out)** - the entry stored first
+//! - **TTL (Time To Live)** - the entry closest to expiring
 //!
 //! ## Global caches and late configuration
 //!

@@ -4,21 +4,6 @@ use std::thread;
 use std::time::Duration;
 
 #[test]
-fn prepared_statement_registration_hits_refresh_recency() {
-    let cache = PreparedStatementCache::new();
-    cache.enable();
-    cache.set_max_statements(2);
-    cache.get_or_prepare("SELECT 1");
-    thread::sleep(Duration::from_millis(2));
-    cache.get_or_prepare("SELECT 2");
-    thread::sleep(Duration::from_millis(2));
-    assert!(cache.get_or_prepare("SELECT 1").1);
-    cache.get_or_prepare("SELECT 3");
-    assert!(cache.get_or_prepare("SELECT 1").1);
-    assert!(!cache.get_or_prepare("SELECT 2").1);
-}
-
-#[test]
 fn database_invalidation_protects_other_scopes_and_rejects_stale_fills() {
     let cache = QueryCache::new();
     cache.enable();
@@ -81,65 +66,6 @@ fn test_cache_config_default() {
     assert!(!config.enabled);
     assert_eq!(config.max_entries, 1000);
     assert_eq!(config.default_ttl, Duration::from_secs(60));
-}
-
-#[test]
-fn test_query_cache_basic() {
-    let cache = QueryCache::new();
-    cache.enable();
-
-    assert!(cache.is_enabled());
-    assert!(cache.is_empty());
-
-    cache
-        .set("test_key", &vec![1, 2, 3], None, "test_model")
-        .unwrap();
-
-    assert!(!cache.is_empty());
-    assert_eq!(cache.len(), 1);
-
-    let result: Option<Vec<i32>> = cache.get("test_key");
-    assert_eq!(result, Some(vec![1, 2, 3]));
-
-    let stats = cache.stats();
-    assert_eq!(stats.hits, 1);
-    assert_eq!(stats.entries, 1);
-}
-
-#[test]
-fn test_query_cache_respects_empty_results_toggle_for_empty_vectors() {
-    let cache = QueryCache::new();
-    cache.enable();
-    cache.set_cache_empty_results(false);
-
-    cache
-        .set("empty_vec", &Vec::<i32>::new(), None, "test_model")
-        .unwrap();
-
-    let result: Option<Vec<i32>> = cache.get("empty_vec");
-    assert!(result.is_none());
-    assert_eq!(cache.len(), 0);
-}
-
-#[test]
-fn test_query_cache_invalidation() {
-    let cache = QueryCache::new();
-    cache.enable();
-
-    cache.set("key1", &"value1", None, "model1").unwrap();
-    cache.set("key2", &"value2", None, "model1").unwrap();
-    cache.set("key3", &"value3", None, "model2").unwrap();
-
-    assert_eq!(cache.len(), 3);
-
-    cache.invalidate("key1");
-    assert_eq!(cache.len(), 2);
-
-    cache.invalidate_model("model1");
-    assert_eq!(cache.len(), 1);
-
-    cache.clear();
-    assert!(cache.is_empty());
 }
 
 #[test]
@@ -317,21 +243,6 @@ fn test_query_cache_enforces_max_size_bytes() {
 }
 
 #[test]
-fn test_query_cache_apply_config_replaces_configuration() {
-    let cache = QueryCache::new();
-    assert!(!cache.is_enabled());
-
-    cache.apply_config(CacheConfig {
-        enabled: true,
-        max_entries: 5,
-        ..CacheConfig::default()
-    });
-
-    assert!(cache.is_enabled());
-    assert_eq!(cache.config().max_entries, 5);
-}
-
-#[test]
 fn test_query_cache_byte_budget_is_part_of_the_configuration() {
     let cache = QueryCache::new();
     cache.set_max_size_bytes(64);
@@ -342,9 +253,11 @@ fn test_query_cache_byte_budget_is_part_of_the_configuration() {
         max_size_bytes: 10,
         ..CacheConfig::default()
     });
+    cache.set("fits", &"x", None, "model").unwrap();
     cache
         .set("too_big", &"x".repeat(20), None, "model")
         .unwrap();
+    assert!(cache.contains("fits"));
     assert!(
         !cache.contains("too_big"),
         "the configured byte budget must apply"
@@ -475,110 +388,6 @@ fn a_transaction_replays_its_invalidations_when_it_commits() {
 }
 
 #[test]
-fn test_prepared_statement_cache_reset_stats_preserves_cached_count() {
-    let cache = PreparedStatementCache::new();
-    cache.enable();
-
-    let sql = "SELECT * FROM users WHERE id = $1";
-
-    let _ = cache.get_or_prepare(sql);
-    cache.record_execution(sql, 250);
-
-    let before_reset = cache.stats();
-    assert_eq!(before_reset.cached_count, 1);
-    assert_eq!(before_reset.misses, 1);
-    assert_eq!(before_reset.total_executions, 1);
-
-    cache.reset_stats();
-
-    let after_reset = cache.stats();
-    assert_eq!(after_reset.hits, 0);
-    assert_eq!(after_reset.misses, 0);
-    assert_eq!(after_reset.evictions, 0);
-    assert_eq!(after_reset.total_executions, 0);
-    assert_eq!(after_reset.cached_count, 1);
-}
-
-#[test]
-fn test_prepared_statement_cache_zero_max_statements_caches_nothing() {
-    let cache = PreparedStatementCache::new();
-    cache.enable();
-    cache.set_max_statements(0);
-
-    // Before the guard existed this spun forever holding the write lock.
-    let (sql, cached) = cache.get_or_prepare("SELECT 1");
-
-    assert_eq!(sql, "SELECT 1");
-    assert!(!cached);
-    assert!(cache.is_empty());
-}
-
-#[test]
-fn test_prepared_statement_cached_info_handles_multibyte_sql() {
-    let cache = PreparedStatementCache::new();
-    cache.enable();
-
-    let sql = format!("SELECT '{}' AS label", "数".repeat(150));
-    let _ = cache.get_or_prepare(&sql);
-
-    let info = cache.cached_statements_info();
-
-    assert_eq!(info.len(), 1);
-    assert!(info[0].sql_preview.ends_with("..."));
-}
-
-#[test]
-fn test_prepared_statement_observe_execution_records_real_traffic() {
-    let disabled = PreparedStatementCache::new();
-    disabled.observe_execution("SELECT 1", 10);
-    assert_eq!(disabled.stats().total_executions, 0);
-
-    let cache = PreparedStatementCache::new();
-    cache.enable();
-
-    cache.observe_execution("SELECT 1", 120);
-    cache.observe_execution("SELECT 1", 80);
-
-    let stats = cache.stats();
-    assert_eq!(stats.misses, 1);
-    assert_eq!(stats.hits, 1);
-    assert_eq!(stats.total_executions, 2);
-    assert_eq!(stats.cached_count, 1);
-}
-
-#[test]
-fn test_prepared_statement_apply_config_replaces_configuration() {
-    let cache = PreparedStatementCache::new();
-    assert!(!cache.is_enabled());
-
-    cache.apply_config(PreparedStatementConfig {
-        enabled: true,
-        max_statements: 7,
-        max_age: Duration::from_secs(1),
-    });
-
-    assert!(cache.is_enabled());
-    assert_eq!(cache.config().max_statements, 7);
-}
-
-#[test]
-fn test_prepared_statement_cached_count_follows_a_statement_dropped_without_replacement() {
-    let cache = PreparedStatementCache::new();
-    cache.enable();
-    cache.get_or_prepare("SELECT 1");
-    assert_eq!(cache.stats().cached_count, 1);
-
-    // The expired statement is dropped and a zero budget registers nothing in
-    // its place; the reported count used to stay at 1 over an empty cache.
-    cache.set_max_age(Duration::ZERO);
-    cache.set_max_statements(0);
-    cache.get_or_prepare("SELECT 1");
-
-    assert!(cache.is_empty());
-    assert_eq!(cache.stats().cached_count, 0);
-}
-
-#[test]
 fn test_cache_key_builder() {
     let key = CacheKeyBuilder::new()
         .table("users")
@@ -628,13 +437,6 @@ fn test_cache_stats_hit_ratio() {
     stats.hits = 75;
     stats.misses = 25;
     assert!((stats.hit_ratio() - 0.75).abs() < 0.001);
-}
-
-#[test]
-fn test_cache_strategy_display() {
-    assert_eq!(format!("{}", CacheStrategy::LRU), "LRU");
-    assert_eq!(format!("{}", CacheStrategy::FIFO), "FIFO");
-    assert_eq!(format!("{}", CacheStrategy::TTL), "TTL");
 }
 
 /// A TTL past what an `Instant` can reach, such as `Duration::MAX` for "keep

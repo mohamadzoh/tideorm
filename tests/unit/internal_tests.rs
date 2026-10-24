@@ -166,12 +166,15 @@ fn count_select_omits_where_without_condition() {
 }
 
 #[test]
-fn exists_any_probe_reads_at_most_one_row() {
-    let statement = build_exists_any_statement::<InternalCountUser>(OrmBackend::Postgres);
-
+fn exists_any_probe_reads_at_most_one_row_and_keeps_the_soft_delete_scope() {
     assert_eq!(
-        statement.sql,
+        build_exists_any_statement::<InternalCountUser>(OrmBackend::Postgres).sql,
         "SELECT 1 AS \"tideorm_exists\" FROM \"internal_count_users\" LIMIT 1"
+    );
+    assert_eq!(
+        build_exists_any_statement::<InternalSoftDeleteUser>(OrmBackend::Postgres).sql,
+        "SELECT 1 AS \"tideorm_exists\" FROM \"internal_soft_delete_users\" \
+         WHERE \"internal_soft_delete_users\".\"deleted_at\" IS NULL LIMIT 1"
     );
 }
 
@@ -189,65 +192,71 @@ fn one_row_statement_writes_its_limit_into_the_sql() {
 }
 
 #[test]
-fn scoped_find_has_no_soft_delete_filter_for_regular_models() {
-    let statement = scoped_find::<InternalCountUser>().build(OrmBackend::Postgres);
-
+fn scoped_find_leaves_trashed_rows_out_only_for_soft_delete_models() {
     assert_eq!(
-        statement.sql,
+        scoped_find::<InternalCountUser>()
+            .build(OrmBackend::Postgres)
+            .sql,
         "SELECT \"internal_count_users\".\"id\", \"internal_count_users\".\"name\" FROM \"internal_count_users\""
     );
-}
-
-#[test]
-fn scoped_find_applies_soft_delete_filter_for_soft_delete_models() {
-    let statement = scoped_find::<InternalSoftDeleteUser>().build(OrmBackend::Postgres);
-
-    assert!(
-        statement
-            .sql
-            .contains("FROM \"internal_soft_delete_users\"")
-    );
-    assert!(
-        statement
-            .sql
-            .contains("WHERE \"internal_soft_delete_users\".\"deleted_at\" IS NULL")
+    assert_eq!(
+        scoped_find::<InternalSoftDeleteUser>()
+            .build(OrmBackend::Postgres)
+            .sql,
+        "SELECT \"internal_soft_delete_users\".\"id\", \"internal_soft_delete_users\".\"name\", \
+         \"internal_soft_delete_users\".\"deleted_at\" FROM \"internal_soft_delete_users\" \
+         WHERE \"internal_soft_delete_users\".\"deleted_at\" IS NULL"
     );
 }
 
 #[test]
-fn exists_any_probe_preserves_soft_delete_scope() {
-    let statement = build_exists_any_statement::<InternalSoftDeleteUser>(OrmBackend::Postgres);
-
-    assert!(
-        statement
-            .sql
-            .contains("WHERE \"internal_soft_delete_users\".\"deleted_at\" IS NULL"),
-        "{}",
-        statement.sql
-    );
-}
-
-#[test]
-fn translate_error_maps_unset_attributes_to_validation_errors() {
-    let err = translate_error(OrmError::AttrNotSet("email".to_string()));
-
-    assert!(
-        matches!(&err, crate::error::Error::Validation { field, .. } if field == "email"),
-        "err: {err:?}"
-    );
-}
-
-#[test]
-fn translate_error_maps_key_arity_mismatch_to_a_query_error() {
-    let err = translate_error(OrmError::KeyArityMismatch {
-        expected: 2,
-        received: 1,
-    });
-
-    assert!(
-        matches!(err, crate::error::Error::Query { .. }),
-        "key arity mismatch should not collapse into an internal error"
-    );
+fn translate_error_maps_each_engine_error_to_its_variant() {
+    type IsExpected = fn(&Error) -> bool;
+    let cases: Vec<(OrmError, IsExpected)> = vec![
+        (
+            OrmError::AttrNotSet("email".to_string()),
+            |error| matches!(error, Error::Validation { field, .. } if field == "email"),
+        ),
+        // Not collapsed into an internal error.
+        (
+            OrmError::KeyArityMismatch {
+                expected: 2,
+                received: 1,
+            },
+            |error| matches!(error, Error::Query { .. }),
+        ),
+        // A query error, as the migrator reports its own failures.
+        (
+            OrmError::Migration("relation exists".to_string()),
+            |error| matches!(error, Error::Query { message, .. } if message == "relation exists"),
+        ),
+        (
+            OrmError::AccessDenied {
+                permission: "delete".to_string(),
+                resource: "users".to_string(),
+            },
+            |error| {
+                matches!(error, Error::AccessDenied { permission, resource }
+                    if permission == "delete" && resource == "users")
+            },
+        ),
+        (
+            OrmError::RbacError("denied".to_string()),
+            |error| matches!(error, Error::Rbac { message } if message == "denied"),
+        ),
+        // Engine errors without a TideORM counterpart stay internal.
+        (OrmError::Custom("boom".to_string()), |error| {
+            matches!(error, Error::Internal { .. })
+        }),
+        (OrmError::MutexPoisonError, |error| {
+            matches!(error, Error::Internal { .. })
+        }),
+    ];
+    for (engine_error, expected) in cases {
+        let described = format!("{engine_error:?}");
+        let translated = translate_error(engine_error);
+        assert!(expected(&translated), "{described} became {translated:?}");
+    }
 }
 
 #[test]
@@ -256,50 +265,6 @@ fn count_to_u64_rejects_negative_counts() {
 
     assert!(err.to_string().contains("negative count"));
     assert!(err.to_string().contains("count(*)"));
-}
-
-#[test]
-fn migration_failures_are_query_errors_like_the_migrator_reports() {
-    match translate_error(OrmError::Migration("relation exists".to_string())) {
-        Error::Query { message, .. } => assert_eq!(message, "relation exists"),
-        other => panic!("unexpected translation: {other:?}"),
-    }
-}
-
-#[test]
-fn access_control_failures_get_their_own_variants() {
-    match translate_error(OrmError::AccessDenied {
-        permission: "delete".to_string(),
-        resource: "users".to_string(),
-    }) {
-        Error::AccessDenied {
-            permission,
-            resource,
-        } => {
-            assert_eq!(permission, "delete");
-            assert_eq!(resource, "users");
-        }
-        other => panic!("unexpected translation: {other:?}"),
-    }
-
-    match translate_error(OrmError::RbacError("denied".to_string())) {
-        Error::Rbac { message } => assert_eq!(message, "denied"),
-        other => panic!("unexpected translation: {other:?}"),
-    }
-}
-
-#[test]
-fn engine_errors_without_a_tideorm_counterpart_stay_internal() {
-    for err in [
-        OrmError::Custom("boom".to_string()),
-        OrmError::MutexPoisonError,
-    ] {
-        let translated = translate_error(err);
-        assert!(
-            matches!(translated, Error::Internal { .. }),
-            "unexpected translation: {translated:?}"
-        );
-    }
 }
 
 #[test]
@@ -343,6 +308,17 @@ fn the_engine_error_survives_as_the_source_of_the_translated_error() {
 fn engine_bookkeeping_errors_carry_no_driver_failure() {
     assert!(driver_failure(&OrmError::MutexPoisonError).is_none());
     assert!(driver_failure(&OrmError::RecordNotInserted).is_none());
+}
+
+#[test]
+fn every_backend_round_trips_through_the_engine_enum() {
+    for backend in [Backend::Postgres, Backend::MySql, Backend::Sqlite] {
+        assert_eq!(Backend::from(OrmBackend::from(backend)), backend);
+        assert_eq!(
+            Backend::from_orm_backend(OrmBackend::from(backend)),
+            Some(backend)
+        );
+    }
 }
 
 #[derive(Clone)]
@@ -404,12 +380,9 @@ impl ModelMeta for EncryptedModel {
 }
 
 #[test]
-fn models_without_encrypted_fields_keep_the_plaintext_fallback() {
+fn only_an_encrypted_model_is_refused_the_plaintext_conversion() {
     assert!(reject_encryption_blind_conversion::<PlainModel>("try_into_active_model").is_ok());
-}
 
-#[test]
-fn an_encrypted_model_never_falls_back_to_the_plaintext_conversion() {
     let error = reject_encryption_blind_conversion::<EncryptedModel>("try_from_entity_model")
         .expect_err("the plaintext fallback cannot decrypt");
     let message = error.to_string();

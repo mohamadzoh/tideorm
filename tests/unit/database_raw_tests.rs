@@ -3,16 +3,14 @@ use super::Database;
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn public_raw_reads_and_writes_flush_but_internal_queries_do_not() {
-    use crate::cache::QueryCache;
-
-    let cache = QueryCache::global();
-    let was_enabled = cache.is_enabled();
-    cache.enable();
+    let _guard = crate::test_support::global_db_lock().lock().await;
+    crate::test_support::set_query_cache(true);
+    let cache = crate::cache::QueryCache::global();
 
     let db = Database::connect("sqlite::memory:")
         .await
         .expect("sqlite in-memory connection should succeed");
-    db.exec_raw("CREATE TABLE raw_cache_probe (id INTEGER PRIMARY KEY, deleted_at TEXT)")
+    db.exec_raw("CREATE TABLE raw_cache_probe (id INTEGER PRIMARY KEY)")
         .await
         .expect("the probe table should be created");
 
@@ -32,15 +30,12 @@ async fn public_raw_reads_and_writes_flush_but_internal_queries_do_not() {
         );
     };
 
-    // A builder read on a soft-delete model renders `deleted_at`, which used
-    // to classify the read as a write and destroy the cache on every call.
+    // Raw SQL is opaque, so a public raw read flushes too: even a SELECT can
+    // write through a function or a view.
     seed();
-    db.query_raw_json(
-        "WITH scoped AS (SELECT id FROM raw_cache_probe WHERE deleted_at IS NULL) \
-         SELECT * FROM scoped",
-    )
-    .await
-    .expect("the CTE read should succeed");
+    db.query_raw_json("SELECT id FROM raw_cache_probe")
+        .await
+        .expect("the raw read should succeed");
     assert!(
         !cache.contains("raw-cache-probe"),
         "raw reads may write through functions or views"
@@ -67,9 +62,7 @@ async fn public_raw_reads_and_writes_flush_but_internal_queries_do_not() {
         "an unattributable raw write must still flush the query cache"
     );
 
-    if !was_enabled {
-        cache.disable();
-    }
+    crate::test_support::set_query_cache(false);
 }
 
 #[test]

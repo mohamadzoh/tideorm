@@ -12,6 +12,9 @@ mod distinct;
 #[path = "queries/filters.rs"]
 mod filters;
 
+#[path = "queries/json_rows.rs"]
+mod json_rows;
+
 #[path = "queries/projections.rs"]
 mod projections;
 

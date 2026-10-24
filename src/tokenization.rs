@@ -60,7 +60,7 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 
 use argon2::{Algorithm, Argon2, Params, Version};
-use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng, Payload};
+use chacha20poly1305::aead::{Aead, Generate, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 
 use crate::error::{Error, Result};
@@ -332,7 +332,7 @@ const NONCE_LEN: usize = 24;
 /// Seal `plaintext` with XChaCha20-Poly1305 under `key` and a fresh random
 /// nonce, returning `nonce || ciphertext`.
 pub(crate) fn seal(key: &[u8; 32], plaintext: &[u8], aad: &[u8]) -> Option<Vec<u8>> {
-    let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let nonce = XNonce::generate();
     let ciphertext = XChaCha20Poly1305::new(key.into())
         .encrypt(
             &nonce,
@@ -359,7 +359,7 @@ pub(crate) fn open(key: &[u8; 32], sealed: &[u8], aad: &[u8]) -> Option<Vec<u8>>
     let (nonce, ciphertext) = sealed.split_at(NONCE_LEN);
     XChaCha20Poly1305::new(key.into())
         .decrypt(
-            XNonce::from_slice(nonce),
+            &XNonce::try_from(nonce).ok()?,
             Payload {
                 msg: ciphertext,
                 aad,

@@ -97,8 +97,10 @@ struct User {
     pub roles: HasManyThrough<Role, UserRole>,
 }
 
+/// Relation fields are left out of the JSON, and a model reads back from JSON
+/// that has none of them.
 #[test]
-fn generated_serde_skips_relation_fields() {
+fn generated_serde_skips_relation_fields_both_ways() {
     let user = User {
         id: 1,
         email: "alice@example.com".to_string(),
@@ -109,7 +111,6 @@ fn generated_serde_skips_relation_fields() {
     };
 
     let value = serde_json::to_value(&user).unwrap();
-
     assert_eq!(
         value,
         serde_json::json!({
@@ -118,31 +119,11 @@ fn generated_serde_skips_relation_fields() {
             "name": "Alice"
         })
     );
-    assert!(value.get("profile").is_none());
-    assert!(value.get("posts").is_none());
-}
 
-#[test]
-fn generated_serde_restores_relation_fields_with_defaults() {
-    let user: User = serde_json::from_value(serde_json::json!({
-        "id": 1,
-        "email": "alice@example.com",
-        "name": "Alice"
-    }))
-    .unwrap();
-
-    assert_eq!(user.id, 1);
-    assert_eq!(user.email, "alice@example.com");
-    assert_eq!(user.name, "Alice");
-
-    let reserialized = serde_json::to_value(&user).unwrap();
+    let read: User = serde_json::from_value(value).unwrap();
     assert_eq!(
-        reserialized,
-        serde_json::json!({
-            "id": 1,
-            "email": "alice@example.com",
-            "name": "Alice"
-        })
+        (read.id, read.email.as_str(), read.name.as_str()),
+        (1, "alice@example.com", "Alice")
     );
 }
 
@@ -223,6 +204,7 @@ fn generated_related_impls_expose_relation_defs() {
     assert!(roles_via.is_some());
 }
 
+/// With no database reachable, `load()` serves what the wrapper holds.
 #[tokio::test]
 async fn eager_loaded_caches_back_wrapper_loads() {
     let mut user = User {

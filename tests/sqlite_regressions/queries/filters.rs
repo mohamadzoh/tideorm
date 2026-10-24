@@ -1,4 +1,4 @@
-//! Filters on binary, JSON array and text values, and soft-delete scopes.
+//! Filters on binary, JSON and text values, and soft-delete scopes.
 
 use crate::fixtures::{AuditRow, memory_database};
 use tideorm::prelude::*;
@@ -50,9 +50,26 @@ struct NameRow {
     name: Option<String>,
 }
 
+/// `where_contains`, `where_starts_with` and `where_ends_with` match their
+/// text literally, past a NUL the stored text holds; a NUL in the text
+/// searched for is refused, for a delete as for a read.
 #[tokio::test]
-async fn literal_text_filters_include_stored_text_after_nul() {
-    let db = memory_database("CREATE TABLE resume_names(id INTEGER PRIMARY KEY,name TEXT); INSERT INTO resume_names VALUES(1,'prefix'||char(0)||'suffix'),(2,'prefix'),(3,'A_%!tail'),(4,NULL),(5,'🙂suffix')").await;
+async fn literal_text_filters_match_past_a_stored_nul_and_refuse_one_in_the_pattern() {
+    let db = memory_database(
+        "CREATE TABLE resume_names(id INTEGER PRIMARY KEY,name TEXT); \
+         INSERT INTO resume_names VALUES(1,'prefix'||char(0)||'suffix'),(2,'prefix'),\
+         (3,'A_%!tail'),(4,NULL),(5,'🙂suffix')",
+    )
+    .await;
+    for query in [
+        NameRow::query_with(&db).where_contains("name", "a\0missing"),
+        NameRow::query_with(&db).where_starts_with("name", "a\0missing"),
+        NameRow::query_with(&db).where_ends_with("name", "a\0missing"),
+    ] {
+        let error = query.clone().get().await.unwrap_err().to_string();
+        assert!(error.contains("cannot represent a NUL"), "{error}");
+        assert!(query.delete().await.is_err());
+    }
     assert_eq!(
         NameRow::query_with(&db)
             .where_contains("name", "suffix")
@@ -134,13 +151,11 @@ async fn sqlite_empty_contains_excludes_sql_null() {
         id: i64,
         items: Option<serde_json::Value>,
     }
-    let db = Database::connect("sqlite::memory:").await.unwrap();
-    db.exec_raw("CREATE TABLE review_array_nulls(id INTEGER PRIMARY KEY, items JSON)")
-        .await
-        .unwrap();
-    db.exec_raw("INSERT INTO review_array_nulls VALUES(1,'[]'),(2,'[1]'),(3,NULL)")
-        .await
-        .unwrap();
+    let db = memory_database(
+        "CREATE TABLE review_array_nulls(id INTEGER PRIMARY KEY, items JSON); \
+         INSERT INTO review_array_nulls VALUES(1,'[]'),(2,'[1]'),(3,NULL)",
+    )
+    .await;
     let rows = ArrayNulls::query_with(&db)
         .where_array_contains("items", Vec::<serde_json::Value>::new())
         .order_by("id", Order::Asc)
@@ -162,13 +177,11 @@ struct BinaryRow {
 
 #[tokio::test]
 async fn binary_equality_matches_stored_bytes() {
-    let db = Database::connect("sqlite::memory:").await.unwrap();
-    db.exec_raw("CREATE TABLE review_bytes(id INTEGER PRIMARY KEY, payload BLOB)")
-        .await
-        .unwrap();
-    db.exec_raw("INSERT INTO review_bytes VALUES(1, X'0102'), (2, X'')")
-        .await
-        .unwrap();
+    let db = memory_database(
+        "CREATE TABLE review_bytes(id INTEGER PRIMARY KEY, payload BLOB); \
+         INSERT INTO review_bytes VALUES(1, X'0102'), (2, X'')",
+    )
+    .await;
     assert_eq!(
         BinaryRow::query_with(&db)
             .where_eq("payload", vec![1u8, 2])
@@ -199,11 +212,12 @@ async fn sqlite_array_filters_exclude_non_arrays_even_on_delete() {
         id: i64,
         payload: Option<serde_json::Value>,
     }
-    let db = Database::connect("sqlite::memory:").await.unwrap();
-    db.exec_raw("CREATE TABLE review_array_shapes(id INTEGER PRIMARY KEY, payload JSON)")
-        .await
-        .unwrap();
-    db.exec_raw(r#"INSERT INTO review_array_shapes VALUES(1,'[1]'),(2,'{"a":1}'),(3,'1'),(4,'[]'),(5,'true'),(6,'null'),(7,NULL)"#).await.unwrap();
+    let db = memory_database(
+        r#"CREATE TABLE review_array_shapes(id INTEGER PRIMARY KEY, payload JSON);
+           INSERT INTO review_array_shapes
+               VALUES(1,'[1]'),(2,'{"a":1}'),(3,'1'),(4,'[]'),(5,'true'),(6,'null'),(7,NULL)"#,
+    )
+    .await;
     let query = Shapes::query_with(&db);
     assert_eq!(
         query
@@ -326,4 +340,68 @@ async fn vacuous_filters_neither_license_mutations_nor_empty_queries() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("cannot be bound"), "{error}");
+}
+
+/// Columns named like those of SQLite's `json_each`, whose rows the JSON
+/// comparisons read.
+#[tideorm::model(table = "audit_documents")]
+struct Document {
+    #[tideorm(primary_key)]
+    pk: i64,
+    value: Json,
+    id: Json,
+    key: Json,
+    r#type: Json,
+    atom: Json,
+    json: Json,
+    parent: Json,
+    fullkey: Json,
+    path: Json,
+    payload: Json,
+}
+
+#[tokio::test]
+async fn json_subqueries_do_not_capture_outer_column_names() {
+    let db = memory_database(
+        "CREATE TABLE audit_documents(pk INTEGER PRIMARY KEY,value JSON,id JSON,key JSON,\
+         type JSON,atom JSON,json JSON,parent JSON,fullkey JSON,path JSON,payload JSON); \
+         INSERT INTO audit_documents VALUES(1,'[1,2]','[1,2]','[1,2]','[1,2]','[1,2]',\
+         '[1,2]','[1,2]','[1,2]','[1,2]','[1,2]')",
+    )
+    .await;
+    for column in [
+        "value", "id", "key", "type", "atom", "json", "parent", "fullkey", "path", "payload",
+    ] {
+        assert_eq!(
+            Document::query_with(&db)
+                .where_eq(column, json!([1, 2]))
+                .count()
+                .await
+                .unwrap(),
+            1,
+            "{column}"
+        );
+        assert_eq!(
+            Document::query_with(&db)
+                .where_array_contains(column, vec![1])
+                .count()
+                .await
+                .unwrap(),
+            1,
+            "{column}"
+        );
+        Document::query_with(&db)
+            .where_eq("pk", 1)
+            .update_all()
+            .array_remove(column, 2)
+            .execute()
+            .await
+            .unwrap();
+        let row = Document::find_with(1, &db).await.unwrap().unwrap();
+        assert_eq!(
+            serde_json::to_value(row).unwrap()[column],
+            json!([1]),
+            "{column}"
+        );
+    }
 }

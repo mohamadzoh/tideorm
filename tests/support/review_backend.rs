@@ -1,5 +1,15 @@
-//! Live regressions for the schema and migration findings from the review.
+//! Scenarios the PostgreSQL, MySQL and MariaDB targets run, and SQLite does
+//! not: mostly `SchemaWriter` exports replayed into the server, plus upserts,
+//! array and JSON filters and assignments, transactions, migrator locking,
+//! cache invalidation and raw row decoding there. Each returns early on a
+//! backend it does not concern.
+//!
+//! The including target supplies `mod backend` with `DATABASE_TYPE`,
+//! `database_url()` and `async fn connect() -> bool`, and `mod parity`, whose
+//! schema-export helpers these scenarios share.
+
 use super::backend;
+use super::parity::{export_statements, exported_schema};
 use std::time::Duration;
 use tideorm::prelude::*;
 use tideorm::schema::SchemaWriter;
@@ -17,7 +27,6 @@ async fn review_postgres_complete_export_restores_cross_schema_dependencies() {
     let admin = tideorm::require_db().unwrap();
     let source_name = format!("review_source_{}", uuid::Uuid::new_v4().simple());
     let destination_name = format!("review_destination_{}", uuid::Uuid::new_v4().simple());
-    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{source_name}.sql"));
     let restore = async {
         for name in [&source_name, &destination_name] {
             admin
@@ -70,13 +79,12 @@ async fn review_postgres_complete_export_restores_cross_schema_dependencies() {
             source.exec_raw(sql).await.unwrap();
         }
         Database::set_global(source.clone()).unwrap();
-        SchemaWriter::write_schema(&path).await.unwrap();
-        let script = std::fs::read_to_string(&path).unwrap();
+        let script = exported_schema(&source_name).await;
         destination
             .exec_raw("SET search_path=public")
             .await
             .unwrap();
-        for statement in postgres_statements(&script) {
+        for statement in export_statements(&script) {
             destination
                 .exec_raw(statement)
                 .await
@@ -145,7 +153,6 @@ async fn review_postgres_complete_export_restores_cross_schema_dependencies() {
     let result = std::panic::AssertUnwindSafe(restore).catch_unwind().await;
 
     Database::set_global(admin.clone()).unwrap();
-    let _ = std::fs::remove_file(path);
     // FORCE releases pooled sessions, including those retained after a panic.
     // Attempt both cleanups before propagating the original test failure.
     let source_cleanup = admin
@@ -210,10 +217,7 @@ async fn review_postgres_export_restores_types_identity_and_index_semantics() {
     ] {
         db.exec_raw(sql).await.unwrap();
     }
-    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("review_pg_export.sql");
-    SchemaWriter::write_schema(&path).await.unwrap();
-    let sql = std::fs::read_to_string(&path).unwrap();
-    std::fs::remove_file(&path).unwrap();
+    let sql = exported_schema("review_pg_export").await;
     assert!(sql.contains("GENERATED ALWAYS AS IDENTITY"), "{sql}");
     assert!(sql.contains("INCREMENT BY 7"), "{sql}");
     assert!(sql.contains("text_pattern_ops DESC"), "{sql}");
@@ -222,7 +226,7 @@ async fn review_postgres_export_restores_types_identity_and_index_semantics() {
         .unwrap();
     // Only recreate the objects owned by this test; the export may include
     // other scenarios' tables in the integration test database.
-    for statement in postgres_statements(&sql)
+    for statement in export_statements(&sql)
         .into_iter()
         .filter(|statement| statement.contains("review_export"))
     {
@@ -275,17 +279,14 @@ async fn review_mysql_export_keeps_on_update_timestamp() {
         .await
         .unwrap();
     db.exec_raw("CREATE TABLE review_timestamp(id BIGINT PRIMARY KEY, name TEXT, updated_at TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6))").await.unwrap();
-    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("review_mysql_export.sql");
-    SchemaWriter::write_schema(&path).await.unwrap();
-    let sql = std::fs::read_to_string(&path).unwrap();
-    std::fs::remove_file(&path).unwrap();
+    let sql = exported_schema("review_mysql_export").await;
     assert!(
         sql.to_ascii_uppercase()
             .contains("ON UPDATE CURRENT_TIMESTAMP(6)"),
         "{sql}"
     );
     db.exec_raw("DROP TABLE review_timestamp").await.unwrap();
-    for statement in postgres_statements(&sql)
+    for statement in export_statements(&sql)
         .into_iter()
         .filter(|statement| statement.contains("review_timestamp"))
     {
@@ -305,17 +306,15 @@ async fn review_mysql_export_keeps_on_update_timestamp() {
     db.exec_raw("DROP TABLE review_timestamp").await.unwrap();
 }
 
+/// Export the database, drop `schema`, and recreate it from the exported
+/// statements that name it, in one transaction, so the export's session
+/// settings (`check_function_bodies`) apply to every object.
 async fn replay_review_schema(db: &Database, schema: &str) {
-    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{schema}.sql"));
-    SchemaWriter::write_schema(&path).await.unwrap();
-    let sql = std::fs::read_to_string(&path).unwrap();
-    std::fs::remove_file(&path).unwrap();
+    let sql = exported_schema(schema).await;
     db.exec_raw(&format!("DROP SCHEMA {schema} CASCADE"))
         .await
         .unwrap();
-    // Functions can contain semicolons in dollar-quoted bodies. Restore on
-    // one connection so the exported session settings apply to every object.
-    let statements: Vec<String> = postgres_statements(&sql)
+    let statements: Vec<String> = export_statements(&sql)
         .into_iter()
         .filter(|statement| {
             statement.contains(schema) || statement.contains("check_function_bodies")
@@ -486,15 +485,11 @@ async fn review_mysql_export_preserves_quotes_and_backslashes_in_expressions() {
         .query_raw_json("SELECT * FROM review_expression_escaping")
         .await
         .unwrap();
-    let path =
-        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("review_expression_escaping.sql");
-    SchemaWriter::write_schema(&path).await.unwrap();
-    let sql = std::fs::read_to_string(&path).unwrap();
-    std::fs::remove_file(&path).unwrap();
+    let sql = exported_schema("review_expression_escaping").await;
     db.exec_raw("DROP TABLE review_expression_escaping")
         .await
         .unwrap();
-    for statement in postgres_statements(&sql)
+    for statement in export_statements(&sql)
         .into_iter()
         .filter(|s| s.contains("review_expression_escaping"))
     {
@@ -906,15 +901,11 @@ async fn review_mysql_export_preserves_mixed_index_directions() {
     db.exec_raw("CREATE TABLE review_index_directions(id BIGINT PRIMARY KEY,a INTEGER,b INTEGER,label VARCHAR(50),INDEX review_mixed(a DESC,b ASC),INDEX review_prefixed(label(10) DESC,b ASC))").await.unwrap();
     let lookup = "SELECT INDEX_NAME AS name,SEQ_IN_INDEX AS position,COLLATION AS direction FROM information_schema.statistics WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='review_index_directions' ORDER BY INDEX_NAME,SEQ_IN_INDEX";
     let before = db.query_raw_json(lookup).await.unwrap();
-    let path =
-        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("review_index_directions.sql");
-    SchemaWriter::write_schema(&path).await.unwrap();
-    let sql = std::fs::read_to_string(&path).unwrap();
-    std::fs::remove_file(&path).unwrap();
+    let sql = exported_schema("review_index_directions").await;
     db.exec_raw("DROP TABLE review_index_directions")
         .await
         .unwrap();
-    for statement in postgres_statements(&sql)
+    for statement in export_statements(&sql)
         .into_iter()
         .filter(|s| s.contains("review_index_directions"))
     {
@@ -992,15 +983,12 @@ async fn review_mysql_native_table_definitions_round_trip() {
     ] {
         db.exec_raw(sql).await.unwrap();
     }
-    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("review_native.sql");
-    SchemaWriter::write_schema(&path).await.unwrap();
-    let exported = std::fs::read_to_string(&path).unwrap();
-    std::fs::remove_file(path).unwrap();
+    let exported = exported_schema("review_native").await;
     for table in ["review_native_columns", "review_native_partition"] {
         let show = format!("SHOW CREATE TABLE {table}");
         let before = db.query_raw_json(&show).await.unwrap();
         db.exec_raw(&format!("DROP TABLE {table}")).await.unwrap();
-        for sql in postgres_statements(&exported)
+        for sql in export_statements(&exported)
             .into_iter()
             .filter(|sql| sql.contains(table))
         {
@@ -1112,18 +1100,6 @@ async fn review_postgres_jsonb_array_primitives_use_json_parameters() {
     db.exec_raw("DROP TABLE review_jsonb_elements")
         .await
         .unwrap();
-}
-
-use super::schema_script;
-
-fn postgres_statements(sql: &str) -> Vec<&str> {
-    schema_script::statements(
-        sql,
-        matches!(
-            backend::DATABASE_TYPE,
-            DatabaseType::MySQL | DatabaseType::MariaDB
-        ),
-    )
 }
 
 // Array columns need sea-query's PostgreSQL arrays, which only the `postgres` feature enables.
@@ -1454,11 +1430,19 @@ async fn review_postgres_export_preserves_routine_execution_acl() {
             .to_string()
             .contains("permission denied")
     );
-    db.transaction(|_| Box::pin(async {
-        Database::execute("SET LOCAL ROLE \"review Routine Allowed\"").await?;
-        assert_eq!(Database::raw_json("SELECT review_routine_acl.reveal() AS value").await?[0]["value"], "restricted");
-        Ok(())
-    })).await.unwrap();
+    db.transaction(|_| {
+        Box::pin(async {
+            Database::execute("SET LOCAL ROLE \"review Routine Allowed\"").await?;
+            assert_eq!(
+                Database::raw_json("SELECT review_routine_acl.reveal() AS value").await?[0]
+                    ["value"],
+                "restricted"
+            );
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
     db.exec_raw("DROP SCHEMA review_routine_acl CASCADE")
         .await
         .unwrap();
@@ -1526,7 +1510,9 @@ async fn review_postgres_table_owner_keeps_definer_access() {
         format!("ALTER TABLE review_table_owner.secret OWNER TO {role}"),
         "CREATE FUNCTION review_table_owner.read_secret() RETURNS integer LANGUAGE SQL SECURITY DEFINER RETURN (SELECT value FROM review_table_owner.secret LIMIT 1)".into(),
         format!("ALTER FUNCTION review_table_owner.read_secret() OWNER TO {role}"),
-    ] {db.exec_raw(&sql).await.unwrap();}
+    ] {
+        db.exec_raw(&sql).await.unwrap();
+    }
     for restore in [false, true] {
         if restore {
             replay_review_schema(&db, "review_table_owner").await;
@@ -1540,7 +1526,15 @@ async fn review_postgres_table_owner_keeps_definer_access() {
                 .unwrap()[0]["value"],
             42
         );
-        assert_eq!(db.query_raw_json("SELECT pg_get_userbyid(relowner) AS owner FROM pg_class WHERE oid='review_table_owner.secret'::regclass").await.unwrap()[0]["owner"],role);
+        assert_eq!(
+            db.query_raw_json(
+                "SELECT pg_get_userbyid(relowner) AS owner FROM pg_class \
+                 WHERE oid='review_table_owner.secret'::regclass"
+            )
+            .await
+            .unwrap()[0]["owner"],
+            role
+        );
     }
     db.exec_raw("DROP SCHEMA review_table_owner CASCADE")
         .await
@@ -1586,7 +1580,15 @@ async fn review_postgres_view_dependent_functions_restore_in_order() {
             .unwrap()[0]["value"],
         7
     );
-    assert_eq!(db.query_raw_json("SELECT reloptions::text AS options FROM pg_class WHERE oid='review_views.z_base'::regclass").await.unwrap()[0]["options"],"{security_barrier=true}");
+    assert_eq!(
+        db.query_raw_json(
+            "SELECT reloptions::text AS options FROM pg_class \
+             WHERE oid='review_views.z_base'::regclass"
+        )
+        .await
+        .unwrap()[0]["options"],
+        "{security_barrier=true}"
+    );
     db.exec_raw("DROP SCHEMA review_views CASCADE")
         .await
         .unwrap();
@@ -1636,69 +1638,6 @@ async fn review_postgres_row_type_check_restores_after_its_function() {
             .is_err()
     );
     db.exec_raw("DROP SCHEMA review_row_check CASCADE")
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-async fn review_json_assignment_distinguishes_json_null_from_option_none() {
-    if !backend::connect().await {
-        return;
-    }
-    let db = tideorm::require_db().unwrap();
-    #[tideorm::model(table = "review_json_null_assignment")]
-    struct Document {
-        #[tideorm(primary_key)]
-        id: i64,
-        payload: Option<serde_json::Value>,
-    }
-    let json_type = if backend::DATABASE_TYPE == DatabaseType::Postgres {
-        "JSONB"
-    } else {
-        "JSON"
-    };
-    db.exec_raw(&format!(
-        "CREATE TABLE review_json_null_assignment(id BIGINT PRIMARY KEY,payload {json_type})"
-    ))
-    .await
-    .unwrap();
-    db.exec_raw("INSERT INTO review_json_null_assignment VALUES(1,'{}')")
-        .await
-        .unwrap();
-    Document::query_with(&db)
-        .where_eq("id", 1)
-        .update_all()
-        .set("payload", serde_json::Value::Null)
-        .execute()
-        .await
-        .unwrap();
-    assert_eq!(
-        Document::find_with(1, &db).await.unwrap().unwrap().payload,
-        Some(serde_json::Value::Null)
-    );
-    Document::query_with(&db)
-        .where_eq("id", 1)
-        .update_all()
-        .set("payload", None::<serde_json::Value>)
-        .execute()
-        .await
-        .unwrap();
-    assert_eq!(
-        Document::find_with(1, &db).await.unwrap().unwrap().payload,
-        None
-    );
-    Document::query_with(&db)
-        .where_eq("id", 1)
-        .update_all()
-        .coalesce("payload", Some(serde_json::Value::Null))
-        .execute()
-        .await
-        .unwrap();
-    assert_eq!(
-        Document::find_with(1, &db).await.unwrap().unwrap().payload,
-        Some(serde_json::Value::Null)
-    );
-    db.exec_raw("DROP TABLE review_json_null_assignment")
         .await
         .unwrap();
 }
@@ -1826,7 +1765,15 @@ async fn review_postgres_restores_domain_partition_rule_and_replication_behavior
             serde_json::json!({"value":8})
         ]
     );
-    assert_eq!(db.query_raw_json("SELECT convalidated FROM pg_constraint WHERE contypid='review_fidelity.positive'::regtype AND conname='under_ten'").await.unwrap()[0]["convalidated"],false);
+    assert_eq!(
+        db.query_raw_json(
+            "SELECT convalidated FROM pg_constraint \
+             WHERE contypid='review_fidelity.positive'::regtype AND conname='under_ten'"
+        )
+        .await
+        .unwrap()[0]["convalidated"],
+        false
+    );
     db.exec_raw("DROP SCHEMA review_fidelity CASCADE")
         .await
         .unwrap();
@@ -1921,20 +1868,41 @@ async fn review_mysql_complete_export_is_portable_and_preserves_stored_objects()
             .await
             .unwrap();
     }
-    let result=std::panic::AssertUnwindSafe(async {
-        let mut url=url::Url::parse(backend::database_url()).unwrap();
+    let result = std::panic::AssertUnwindSafe(async {
+        let mut url = url::Url::parse(backend::database_url()).unwrap();
         url.set_path(&source_name);
-        let source=Database::builder().url(url.as_str()).max_connections(1).build().await.unwrap();
+        let source = Database::builder()
+            .url(url.as_str())
+            .max_connections(1)
+            .build()
+            .await
+            .unwrap();
         url.set_path(&destination_name);
-        let destination=Database::builder().url(url.as_str()).max_connections(1).build().await.unwrap();
-        let fold_names=source.query_raw_json("SELECT @@lower_case_table_names AS fold_names").await.unwrap()[0]["fold_names"].as_i64().unwrap()!=0;
-        let referenced_source=if fold_names {source_name.to_ascii_uppercase()} else {source_name.clone()};
+        let destination = Database::builder()
+            .url(url.as_str())
+            .max_connections(1)
+            .build()
+            .await
+            .unwrap();
+        let fold_names = source
+            .query_raw_json("SELECT @@lower_case_table_names AS fold_names")
+            .await
+            .unwrap()[0]["fold_names"]
+            .as_i64()
+            .unwrap()
+            != 0;
+        let referenced_source = if fold_names {
+            source_name.to_ascii_uppercase()
+        } else {
+            source_name.clone()
+        };
         for sql in [
             "ALTER DATABASE COLLATE utf8mb4_bin".to_string(),
             "CREATE FUNCTION equal_text(a VARCHAR(10),b VARCHAR(10)) RETURNS BOOLEAN DETERMINISTIC RETURN a=b".to_string(),
             "CREATE TABLE a(id INTEGER)".to_string(),
             "CREATE TABLE b(id INTEGER)".to_string(),
-            "INSERT INTO a VALUES(1)".to_string(),"INSERT INTO b VALUES(2)".to_string(),
+            "INSERT INTO a VALUES(1)".to_string(),
+            "INSERT INTO b VALUES(2)".to_string(),
             format!("CREATE PROCEDURE wipe() DELETE x,y FROM `{referenced_source}`.a x, `{referenced_source}`.b y"),
             format!("CREATE PROCEDURE wipe_comment() BEGIN --\tdon't parse this apostrophe\nDELETE FROM `{referenced_source}`.a; END"),
             format!("CREATE PROCEDURE wipe_target() DELETE `{referenced_source}`.a FROM `{referenced_source}`.a"),
@@ -1950,41 +1918,93 @@ async fn review_mysql_complete_export_is_portable_and_preserves_stored_objects()
             "CREATE EVENT reminder ON SCHEDULE AT '2035-01-01 12:00:00' DISABLE DO SELECT 1".to_string(),
             "SET SESSION sql_mode='NO_BACKSLASH_ESCAPES'".to_string(),
             r"CREATE TABLE notes(id INTEGER,note VARCHAR(30) DEFAULT 'end\')".to_string(),
-        ] {source.exec_raw(&sql).await.unwrap();}
-        Database::set_global(source.clone()).unwrap();
-        let path=std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{source_name}.sql"));
-        SchemaWriter::write_schema(&path).await.unwrap();
-        let script=std::fs::read_to_string(&path).unwrap();
-        std::fs::remove_file(path).unwrap();
-        destination.exec_raw("SET SESSION time_zone='+00:00'; SET SESSION sql_mode='NO_BACKSLASH_ESCAPES'").await.unwrap();
-        for statement in schema_script::statements(&script,true) {
-            destination.exec_raw(statement).await.unwrap_or_else(|e|panic!("{e}\n{statement}"));
+        ] {
+            source.exec_raw(&sql).await.unwrap();
         }
-        assert_eq!(destination.query_raw_json("SELECT @@SESSION.time_zone AS zone,@@SESSION.sql_mode AS mode").await.unwrap()[0],serde_json::json!({"zone":"+00:00","mode":"NO_BACKSLASH_ESCAPES"}));
-        assert_eq!(destination.query_raw_json("SELECT CAST(equal_text('a','A') AS SIGNED) AS equal_values").await.unwrap()[0]["equal_values"],0);
+        Database::set_global(source.clone()).unwrap();
+        let script = exported_schema(&source_name).await;
+        destination
+            .exec_raw("SET SESSION time_zone='+00:00'; SET SESSION sql_mode='NO_BACKSLASH_ESCAPES'")
+            .await
+            .unwrap();
+        for statement in export_statements(&script) {
+            destination
+                .exec_raw(statement)
+                .await
+                .unwrap_or_else(|e| panic!("{e}\n{statement}"));
+        }
+
+        async fn count(db: &Database, sql: &str) -> serde_json::Value {
+            db.query_raw_json(sql).await.unwrap()[0]["n"].clone()
+        }
+        const ROWS_IN_A: &str = "SELECT count(*) AS n FROM a";
+        const ROWS_IN_BOTH: &str = "SELECT (SELECT count(*) FROM a)+(SELECT count(*) FROM b) AS n";
+        assert_eq!(
+            destination
+                .query_raw_json("SELECT @@SESSION.time_zone AS zone,@@SESSION.sql_mode AS mode")
+                .await
+                .unwrap()[0],
+            serde_json::json!({"zone": "+00:00", "mode": "NO_BACKSLASH_ESCAPES"})
+        );
+        assert_eq!(
+            destination
+                .query_raw_json("SELECT CAST(equal_text('a','A') AS SIGNED) AS equal_values")
+                .await
+                .unwrap()[0]["equal_values"],
+            0
+        );
         assert!(destination.exec_raw("INSERT INTO a VALUES(-1)").await.is_err());
-        destination.exec_raw("INSERT INTO a VALUES(11); INSERT INTO b VALUES(22)").await.unwrap();
-        assert_eq!(destination.query_raw_json("SELECT id FROM a_visible").await.unwrap()[0]["id"],12);
+        destination
+            .exec_raw("INSERT INTO a VALUES(11); INSERT INTO b VALUES(22)")
+            .await
+            .unwrap();
+        assert_eq!(
+            destination
+                .query_raw_json("SELECT id FROM a_visible")
+                .await
+                .unwrap()[0]["id"],
+            12
+        );
         for routine in ["wipe_comment", "wipe_target"] {
-            destination.exec_raw(&format!("CALL {routine}()")).await.unwrap();
-            assert_eq!(source.query_raw_json("SELECT count(*) AS n FROM a").await.unwrap()[0]["n"], 1);
-            assert_eq!(destination.query_raw_json("SELECT count(*) AS n FROM a").await.unwrap()[0]["n"], 0);
+            destination
+                .exec_raw(&format!("CALL {routine}()"))
+                .await
+                .unwrap();
+            assert_eq!(count(&source, ROWS_IN_A).await, 1, "{routine}");
+            assert_eq!(count(&destination, ROWS_IN_A).await, 0, "{routine}");
             destination.exec_raw("INSERT INTO a VALUES(11)").await.unwrap();
         }
         destination.exec_raw("CALL wipe()").await.unwrap();
-        assert_eq!(source.query_raw_json("SELECT (SELECT count(*) FROM a)+(SELECT count(*) FROM b) AS n").await.unwrap()[0]["n"],2);
-        assert_eq!(destination.query_raw_json("SELECT (SELECT count(*) FROM a)+(SELECT count(*) FROM b) AS n").await.unwrap()[0]["n"],0);
+        assert_eq!(count(&source, ROWS_IN_BOTH).await, 2);
+        assert_eq!(count(&destination, ROWS_IN_BOTH).await, 0);
         for routine in ["insert_short", "replace_short", "insert_into", "replace_into"] {
-            destination.exec_raw(&format!("CALL {routine}()")).await.unwrap();
+            destination
+                .exec_raw(&format!("CALL {routine}()"))
+                .await
+                .unwrap();
         }
-        assert_eq!(source.query_raw_json("SELECT (SELECT count(*) FROM a)+(SELECT count(*) FROM b) AS n").await.unwrap()[0]["n"],2);
-        assert_eq!(destination.query_raw_json("SELECT (SELECT count(*) FROM a)+(SELECT count(*) FROM b) AS n").await.unwrap()[0]["n"],4);
-        let event="SELECT time_zone AS zone,CAST(execute_at AS CHAR) AS at_time FROM information_schema.events WHERE event_schema=DATABASE() AND event_name='reminder'";
-        assert_eq!(source.query_raw_json(event).await.unwrap(),destination.query_raw_json(event).await.unwrap());
+        assert_eq!(count(&source, ROWS_IN_BOTH).await, 2);
+        assert_eq!(count(&destination, ROWS_IN_BOTH).await, 4);
+        let event = "SELECT time_zone AS zone,CAST(execute_at AS CHAR) AS at_time \
+                     FROM information_schema.events \
+                     WHERE event_schema=DATABASE() AND event_name='reminder'";
+        assert_eq!(
+            source.query_raw_json(event).await.unwrap(),
+            destination.query_raw_json(event).await.unwrap()
+        );
+        let notes = "SELECT HEX(note) AS bytes FROM notes";
         source.exec_raw("INSERT INTO notes(id) VALUES(1)").await.unwrap();
-        destination.exec_raw("INSERT INTO notes(id) VALUES(1)").await.unwrap();
-        assert_eq!(source.query_raw_json("SELECT HEX(note) AS bytes FROM notes").await.unwrap(),destination.query_raw_json("SELECT HEX(note) AS bytes FROM notes").await.unwrap());
-    }).catch_unwind().await;
+        destination
+            .exec_raw("INSERT INTO notes(id) VALUES(1)")
+            .await
+            .unwrap();
+        assert_eq!(
+            source.query_raw_json(notes).await.unwrap(),
+            destination.query_raw_json(notes).await.unwrap()
+        );
+    })
+    .catch_unwind()
+    .await;
     Database::set_global(admin.clone()).unwrap();
     for name in [&source_name, &destination_name] {
         admin
@@ -2058,11 +2078,10 @@ async fn review_postgres_export_preserves_namespace_context_and_collation_owner(
         format!("ALTER COLLATION pgapp_review.ordered OWNER TO {role}"),
         "CREATE TABLE pgapp_review.items (state pgapp_review.status DEFAULT 'ready', label text COLLATE pgapp_review.ordered)".to_string(),
         "SET search_path=pgapp_review,public".to_string(),
-    ] { db.exec_raw(&sql).await.unwrap(); }
-    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{role}.sql"));
-    SchemaWriter::write_schema(&path).await.unwrap();
-    let script = std::fs::read_to_string(&path).unwrap();
-    std::fs::remove_file(path).unwrap();
+    ] {
+        db.exec_raw(&sql).await.unwrap();
+    }
+    let script = exported_schema(&role).await;
     assert_eq!(
         db.query_raw_json("SELECT current_setting('search_path') AS path")
             .await
@@ -2072,7 +2091,7 @@ async fn review_postgres_export_preserves_namespace_context_and_collation_owner(
     db.exec_raw("SET search_path=public; DROP SCHEMA pgapp_review CASCADE")
         .await
         .unwrap();
-    for statement in postgres_statements(&script)
+    for statement in export_statements(&script)
         .into_iter()
         .filter(|s| s.contains("pgapp_review"))
     {
@@ -2089,7 +2108,15 @@ async fn review_postgres_export_preserves_namespace_context_and_collation_owner(
             .unwrap()[0]["state"],
         "ready"
     );
-    assert_eq!(db.query_raw_json("SELECT pg_get_userbyid(collowner) AS owner FROM pg_collation WHERE oid='pgapp_review.ordered'::regcollation").await.unwrap()[0]["owner"], role);
+    assert_eq!(
+        db.query_raw_json(
+            "SELECT pg_get_userbyid(collowner) AS owner FROM pg_collation \
+             WHERE oid='pgapp_review.ordered'::regcollation"
+        )
+        .await
+        .unwrap()[0]["owner"],
+        role
+    );
     db.exec_raw(&format!(
         "DROP SCHEMA pgapp_review CASCADE; DROP ROLE {role}"
     ))
@@ -2114,14 +2141,11 @@ async fn review_postgres18_export_preserves_not_null_no_inherit() {
         return;
     }
     db.exec_raw("DROP SCHEMA IF EXISTS review_noinherit CASCADE; CREATE SCHEMA review_noinherit; CREATE TABLE review_noinherit.parent(value integer CONSTRAINT required_value NOT NULL NO INHERIT); CREATE TABLE review_noinherit.child() INHERITS(review_noinherit.parent)").await.unwrap();
-    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("review_noinherit.sql");
-    SchemaWriter::write_schema(&path).await.unwrap();
-    let script = std::fs::read_to_string(&path).unwrap();
-    std::fs::remove_file(path).unwrap();
+    let script = exported_schema("review_noinherit").await;
     db.exec_raw("DROP SCHEMA review_noinherit CASCADE")
         .await
         .unwrap();
-    for statement in postgres_statements(&script)
+    for statement in export_statements(&script)
         .into_iter()
         .filter(|s| s.contains("review_noinherit"))
     {
@@ -2164,15 +2188,11 @@ async fn review_postgres_replica_identity_finds_renamed_partition_index() {
     ] {
         db.exec_raw(sql).await.unwrap();
     }
-    let path =
-        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("review_replica_partition.sql");
-    SchemaWriter::write_schema(&path).await.unwrap();
-    let script = std::fs::read_to_string(&path).unwrap();
-    std::fs::remove_file(path).unwrap();
+    let script = exported_schema("review_replica_partition").await;
     db.exec_raw("DROP SCHEMA review_replica_partition CASCADE")
         .await
         .unwrap();
-    for statement in postgres_statements(&script)
+    for statement in export_statements(&script)
         .into_iter()
         .filter(|s| s.contains("review_replica_partition"))
     {
@@ -2185,7 +2205,15 @@ async fn review_postgres_replica_identity_finds_renamed_partition_index() {
         rows,
         vec![serde_json::json!({"unique_index":true,"primary_index":false,"identity":"i"})]
     );
-    assert_eq!(db.query_raw_json("SELECT indisprimary AS primary_index FROM pg_index WHERE indrelid='review_replica_partition.other_child'::regclass AND indisreplident").await.unwrap(), vec![serde_json::json!({"primary_index":true})]);
+    assert_eq!(
+        db.query_raw_json(
+            "SELECT indisprimary AS primary_index FROM pg_index \
+             WHERE indrelid='review_replica_partition.other_child'::regclass AND indisreplident"
+        )
+        .await
+        .unwrap(),
+        vec![serde_json::json!({"primary_index":true})]
+    );
     db.exec_raw("DROP SCHEMA review_replica_partition CASCADE")
         .await
         .unwrap();
@@ -2223,12 +2251,9 @@ async fn review_postgres_domain_default_qualifies_its_sequence() {
         .unwrap()[0]["n"],
         10
     );
-    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("review_domain_default.sql");
-    SchemaWriter::write_schema(&path).await.unwrap();
-    let script = std::fs::read_to_string(&path).unwrap();
-    std::fs::remove_file(path).unwrap();
+    let script = exported_schema("review_domain_default").await;
     db.exec_raw("SET search_path=public; DROP SCHEMA review_domain_default CASCADE; DROP SEQUENCE public.review_domain_sequence").await.unwrap();
-    for statement in postgres_statements(&script)
+    for statement in export_statements(&script)
         .into_iter()
         .filter(|s| s.contains("review_domain"))
     {

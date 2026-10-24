@@ -1,146 +1,100 @@
 use tideorm::error::Error;
-use tideorm::validation::{ValidatableValue, ValidationErrors, ValidationRule};
+use tideorm::validation::{ValidationErrors, ValidationRule};
 
+/// Each built-in rule applied to text: the values it accepts and the ones it
+/// rejects.
 #[test]
-fn test_validation_rule_required() {
-    let rule = ValidationRule::Required;
-    assert!(rule.validate(&"hello".to_string()).is_ok());
-    assert!(rule.validate(&"".to_string()).is_err());
-    assert!(rule.validate(&"   ".to_string()).is_err());
+fn rules_accept_and_reject_text_values() {
+    let cases: [(ValidationRule, &[&str], &[&str]); 14] = [
+        (ValidationRule::Required, &["hello"], &["", "   "]),
+        (
+            ValidationRule::Email,
+            &["test@example.com", "user.name+tag@domain.co.uk"],
+            &["invalid", "@nodomain.com", "noat.com", "test@"],
+        ),
+        (
+            ValidationRule::MinLength(5),
+            &["hello", "hello world"],
+            &["hi", ""],
+        ),
+        (
+            ValidationRule::MaxLength(10),
+            &["hello", ""],
+            &["hello world!"],
+        ),
+        (ValidationRule::Min(18.0), &["18", "25"], &["17", "0"]),
+        (ValidationRule::Max(100.0), &["50", "100"], &["101"]),
+        (
+            ValidationRule::Range(1.0, 100.0),
+            &["1", "50", "100"],
+            &["0", "101"],
+        ),
+        (
+            ValidationRule::Regex(r"^\d{3}-\d{4}$".to_string()),
+            &["123-4567"],
+            &["1234567", "abc-defg"],
+        ),
+        (
+            ValidationRule::Alpha,
+            &["hello", "HelloWorld"],
+            &["hello123", "hello world"],
+        ),
+        (
+            ValidationRule::Alphanumeric,
+            &["hello123", "ABC123"],
+            &["hello world", "hello-world"],
+        ),
+        (
+            ValidationRule::Numeric,
+            &["12345", "0", "12.34", "-123"],
+            &["abc", "12abc"],
+        ),
+        (
+            ValidationRule::Uuid,
+            &[
+                "550e8400-e29b-41d4-a716-446655440000",
+                "550E8400-E29B-41D4-A716-446655440000",
+            ],
+            &["not-a-uuid", "550e8400-e29b-41d4-a716"],
+        ),
+        (
+            ValidationRule::In(vec![
+                "red".to_string(),
+                "green".to_string(),
+                "blue".to_string(),
+            ]),
+            &["red", "green"],
+            &["yellow"],
+        ),
+        (
+            ValidationRule::NotIn(vec!["admin".to_string(), "root".to_string()]),
+            &["user", "guest"],
+            &["admin", "root"],
+        ),
+    ];
+
+    for (rule, accepted, rejected) in cases {
+        for value in accepted {
+            assert!(
+                rule.validate(&value.to_string()).is_ok(),
+                "{rule:?} should accept {value:?}"
+            );
+        }
+        for value in rejected {
+            assert!(
+                rule.validate(&value.to_string()).is_err(),
+                "{rule:?} should reject {value:?}"
+            );
+        }
+    }
 }
 
 #[test]
-fn test_validation_rule_email() {
-    let rule = ValidationRule::Email;
-    assert!(rule.validate(&"test@example.com".to_string()).is_ok());
-    assert!(
-        rule.validate(&"user.name+tag@domain.co.uk".to_string())
-            .is_ok()
+fn test_validation_error_messages() {
+    assert_eq!(
+        ValidationRule::MinLength(5).validate(&"hi".to_string()),
+        Err("The field must be at least 5 characters".to_string())
     );
-    assert!(rule.validate(&"invalid".to_string()).is_err());
-    assert!(rule.validate(&"@nodomain.com".to_string()).is_err());
-    assert!(rule.validate(&"noat.com".to_string()).is_err());
-    assert!(rule.validate(&"test@".to_string()).is_err());
-}
-
-#[test]
-fn test_validation_rule_min_length() {
-    let rule = ValidationRule::MinLength(5);
-    assert!(rule.validate(&"hello".to_string()).is_ok());
-    assert!(rule.validate(&"hello world".to_string()).is_ok());
-    assert!(rule.validate(&"hi".to_string()).is_err());
-    assert!(rule.validate(&"".to_string()).is_err());
-}
-
-#[test]
-fn test_validation_rule_max_length() {
-    let rule = ValidationRule::MaxLength(10);
-    assert!(rule.validate(&"hello".to_string()).is_ok());
-    assert!(rule.validate(&"".to_string()).is_ok());
-    assert!(rule.validate(&"hello world!".to_string()).is_err());
-}
-
-#[test]
-fn test_validation_rule_min() {
-    let rule = ValidationRule::Min(18.0);
-    assert!(rule.validate(&"18".to_string()).is_ok());
-    assert!(rule.validate(&"25".to_string()).is_ok());
-    assert!(rule.validate(&"17".to_string()).is_err());
-    assert!(rule.validate(&"0".to_string()).is_err());
-}
-
-#[test]
-fn test_validation_rule_max() {
-    let rule = ValidationRule::Max(100.0);
-    assert!(rule.validate(&"50".to_string()).is_ok());
-    assert!(rule.validate(&"100".to_string()).is_ok());
-    assert!(rule.validate(&"101".to_string()).is_err());
-}
-
-#[test]
-fn test_validation_rule_range() {
-    let rule = ValidationRule::Range(1.0, 100.0);
-    assert!(rule.validate(&"1".to_string()).is_ok());
-    assert!(rule.validate(&"50".to_string()).is_ok());
-    assert!(rule.validate(&"100".to_string()).is_ok());
-    assert!(rule.validate(&"0".to_string()).is_err());
-    assert!(rule.validate(&"101".to_string()).is_err());
-}
-
-#[test]
-fn test_validation_rule_regex() {
-    let rule = ValidationRule::Regex(r"^\d{3}-\d{4}$".to_string());
-    assert!(rule.validate(&"123-4567".to_string()).is_ok());
-    assert!(rule.validate(&"1234567".to_string()).is_err());
-    assert!(rule.validate(&"abc-defg".to_string()).is_err());
-}
-
-#[test]
-fn test_validation_rule_alpha() {
-    let rule = ValidationRule::Alpha;
-    assert!(rule.validate(&"hello".to_string()).is_ok());
-    assert!(rule.validate(&"HelloWorld".to_string()).is_ok());
-    assert!(rule.validate(&"hello123".to_string()).is_err());
-    assert!(rule.validate(&"hello world".to_string()).is_err());
-}
-
-#[test]
-fn test_validation_rule_alphanumeric() {
-    let rule = ValidationRule::Alphanumeric;
-    assert!(rule.validate(&"hello123".to_string()).is_ok());
-    assert!(rule.validate(&"ABC123".to_string()).is_ok());
-    assert!(rule.validate(&"hello world".to_string()).is_err());
-    assert!(rule.validate(&"hello-world".to_string()).is_err());
-}
-
-#[test]
-fn test_validation_rule_numeric() {
-    let rule = ValidationRule::Numeric;
-    assert!(rule.validate(&"12345".to_string()).is_ok());
-    assert!(rule.validate(&"0".to_string()).is_ok());
-    assert!(rule.validate(&"12.34".to_string()).is_ok());
-    assert!(rule.validate(&"-123".to_string()).is_ok());
-    assert!(rule.validate(&"abc".to_string()).is_err());
-    assert!(rule.validate(&"12abc".to_string()).is_err());
-}
-
-#[test]
-fn test_validation_rule_uuid() {
-    let rule = ValidationRule::Uuid;
-    assert!(
-        rule.validate(&"550e8400-e29b-41d4-a716-446655440000".to_string())
-            .is_ok()
-    );
-    assert!(
-        rule.validate(&"550E8400-E29B-41D4-A716-446655440000".to_string())
-            .is_ok()
-    );
-    assert!(rule.validate(&"not-a-uuid".to_string()).is_err());
-    assert!(
-        rule.validate(&"550e8400-e29b-41d4-a716".to_string())
-            .is_err()
-    );
-}
-
-#[test]
-fn test_validation_rule_in() {
-    let rule = ValidationRule::In(vec![
-        "red".to_string(),
-        "green".to_string(),
-        "blue".to_string(),
-    ]);
-    assert!(rule.validate(&"red".to_string()).is_ok());
-    assert!(rule.validate(&"green".to_string()).is_ok());
-    assert!(rule.validate(&"yellow".to_string()).is_err());
-}
-
-#[test]
-fn test_validation_rule_not_in() {
-    let rule = ValidationRule::NotIn(vec!["admin".to_string(), "root".to_string()]);
-    assert!(rule.validate(&"user".to_string()).is_ok());
-    assert!(rule.validate(&"guest".to_string()).is_ok());
-    assert!(rule.validate(&"admin".to_string()).is_err());
-    assert!(rule.validate(&"root".to_string()).is_err());
 }
 
 #[test]
@@ -166,49 +120,10 @@ fn test_validation_errors_display() {
     errors.add("email", "Invalid email");
     errors.add("password", "Too short");
 
-    let display = format!("{}", errors);
-    // Fields are kept in a map, so only the set of "field: message" parts is stable.
-    let mut parts: Vec<&str> = display.split("; ").collect();
-    parts.sort_unstable();
-    assert_eq!(parts, ["email: Invalid email", "password: Too short"]);
-}
-
-#[test]
-fn test_validatable_value_string() {
-    let value = "hello".to_string();
-    assert!(!value.is_empty_value());
-    assert_eq!(value.as_str_value(), Some("hello"));
-
-    let empty = "".to_string();
-    assert!(empty.is_empty_value());
-}
-
-#[test]
-fn test_validatable_value_option() {
-    let some_value: Option<String> = Some("test".to_string());
-    assert!(!some_value.is_empty_value());
-
-    let none_value: Option<String> = None;
-    assert!(none_value.is_empty_value());
-}
-
-#[test]
-fn test_validatable_value_numbers() {
-    let int_val: i32 = 42;
-    assert!(!int_val.is_empty_value());
-    assert_eq!(int_val.as_f64_value(), Some(42.0));
-
-    let float_val: f64 = 3.14;
-    assert_eq!(float_val.as_f64_value(), Some(3.14));
-}
-
-#[test]
-fn test_validation_error_messages() {
-    let rule = ValidationRule::MinLength(5);
-    let result = rule.validate(&"hi".to_string());
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(err.contains("5"));
+    assert_eq!(
+        errors.to_string(),
+        "email: Invalid email; password: Too short"
+    );
 }
 
 #[test]

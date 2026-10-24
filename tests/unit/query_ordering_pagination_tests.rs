@@ -8,40 +8,26 @@ struct PaginationUser {
 }
 
 #[test]
-fn test_page_rejects_an_overflowing_offset() {
-    let err = PaginationUser::query()
-        .page(u64::MAX, 2)
-        .ensure_query_is_valid()
-        .expect_err("an overflowing offset must invalidate the query");
+fn test_page_rejects_arguments_that_name_no_page() {
+    for (page, per_page, field, message) in [
+        (0, 10, "page", "at least 1"),
+        (1, 0, "per_page", ""),
+        (u64::MAX, 2, "page", "exceeds i64::MAX"),
+    ] {
+        let err = PaginationUser::query()
+            .page(page, per_page)
+            .ensure_query_is_valid()
+            .expect_err("the page must invalidate the query");
 
-    assert!(
-        matches!(&err, crate::error::Error::Validation { field, .. } if field == "page"),
-        "{err}"
-    );
-    assert!(err.to_string().contains("exceeds i64::MAX"), "{err}");
-}
-
-#[test]
-fn test_page_rejects_zero_page_number() {
-    let err = PaginationUser::query()
-        .page(0, 10)
-        .ensure_query_is_valid()
-        .expect_err("page 0 must invalidate the query");
-
-    assert!(
-        matches!(&err, crate::error::Error::Validation { field, .. } if field == "page"),
-        "{err}"
-    );
-    assert!(err.to_string().contains("at least 1"), "{err}");
-
-    let err = PaginationUser::query()
-        .page(1, 0)
-        .ensure_query_is_valid()
-        .expect_err("a zero page size must invalidate the query");
-    assert!(
-        matches!(&err, crate::error::Error::Validation { field, .. } if field == "per_page"),
-        "{err}"
-    );
+        assert!(
+            matches!(&err, crate::error::Error::Validation { field: name, .. } if name == field),
+            "page({page}, {per_page}): {err}"
+        );
+        assert!(
+            err.to_string().contains(message),
+            "page({page}, {per_page}): {err}"
+        );
+    }
 }
 
 #[test]

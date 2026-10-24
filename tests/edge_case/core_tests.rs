@@ -35,60 +35,24 @@ mod database_type_parsing {
         assert_eq!(DatabaseType::default(), DatabaseType::Postgres);
     }
 
+    /// The scheme alone decides, in any case and with no host; anything else
+    /// is unknown.
     #[test]
-    fn test_from_url_empty_string() {
-        assert_eq!(DatabaseType::from_url(""), None);
-    }
-
-    #[test]
-    fn test_from_url_bare_scheme() {
-        assert_eq!(DatabaseType::from_url("://"), None);
-    }
-
-    #[test]
-    fn test_from_url_unknown_scheme() {
-        assert_eq!(DatabaseType::from_url("oracle://host/db"), None);
-        assert_eq!(DatabaseType::from_url("mssql://host/db"), None);
-        assert_eq!(DatabaseType::from_url("mongodb://host/db"), None);
-    }
-
-    #[test]
-    fn test_from_url_case_insensitive() {
-        assert_eq!(
-            DatabaseType::from_url("POSTGRES://host"),
-            Some(DatabaseType::Postgres)
-        );
-        assert_eq!(
-            DatabaseType::from_url("MySQL://host"),
-            Some(DatabaseType::MySQL)
-        );
-        assert_eq!(
-            DatabaseType::from_url("MARIADB://host"),
-            Some(DatabaseType::MariaDB)
-        );
-        assert_eq!(
-            DatabaseType::from_url("SQLite:./db.sqlite"),
-            Some(DatabaseType::SQLite)
-        );
-    }
-
-    #[test]
-    fn test_from_url_postgresql_alias() {
-        assert_eq!(
-            DatabaseType::from_url("postgresql://localhost:5432/db"),
-            Some(DatabaseType::Postgres)
-        );
-    }
-
-    #[test]
-    fn test_from_url_no_host() {
-        assert_eq!(
-            DatabaseType::from_url("postgres://"),
-            Some(DatabaseType::Postgres)
-        );
-        assert_eq!(
-            DatabaseType::from_url("mysql://"),
-            Some(DatabaseType::MySQL)
-        );
+    fn test_from_url_reads_the_scheme_only() {
+        for (url, expected) in [
+            ("POSTGRES://host", Some(DatabaseType::Postgres)),
+            ("MySQL://host", Some(DatabaseType::MySQL)),
+            ("MARIADB://host", Some(DatabaseType::MariaDB)),
+            ("SQLite:./db.sqlite", Some(DatabaseType::SQLite)),
+            ("postgres://", Some(DatabaseType::Postgres)),
+            ("mysql://", Some(DatabaseType::MySQL)),
+            ("", None),
+            ("://", None),
+            ("oracle://host/db", None),
+            ("mssql://host/db", None),
+            ("mongodb://host/db", None),
+        ] {
+            assert_eq!(DatabaseType::from_url(url), expected, "{url:?}");
+        }
     }
 }

@@ -1,4 +1,5 @@
 //! Seed ledger decisions and callbacks share one lock for each operation.
+
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -8,7 +9,20 @@ use tideorm::prelude::*;
 use tideorm::seeding::{Seed, Seeder, async_trait};
 use tokio::sync::Notify;
 
+/// Counts its runs and writes one `seed_effects` row each time.
 struct CountedSeed(Arc<AtomicUsize>);
+
+#[async_trait]
+impl Seed for CountedSeed {
+    fn name(&self) -> &str {
+        "counted"
+    }
+    async fn run(&self, db: &Database) -> tideorm::Result<()> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        db.exec_raw("INSERT INTO seed_effects VALUES(1)").await?;
+        Ok(())
+    }
+}
 
 /// A file database, installed as the global one, holding `seed_effects` and
 /// the seed ledger, in WAL mode: a transaction's read snapshot then outlives
@@ -67,18 +81,6 @@ async fn stale_seed_snapshot_fails_before_repeating_a_committed_callback() {
     })
     .await
     .unwrap();
-}
-
-#[async_trait]
-impl Seed for CountedSeed {
-    fn name(&self) -> &str {
-        "counted"
-    }
-    async fn run(&self, db: &Database) -> tideorm::Result<()> {
-        self.0.fetch_add(1, Ordering::SeqCst);
-        db.exec_raw("INSERT INTO seed_effects VALUES(1)").await?;
-        Ok(())
-    }
 }
 
 #[tokio::test]

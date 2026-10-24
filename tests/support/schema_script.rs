@@ -1,8 +1,12 @@
-//! Split the exported client script without splitting function bodies or literals.
+//! Split a `SchemaWriter` export into statements without splitting function
+//! bodies, literals or comments.
 #[allow(dead_code)]
 #[path = "../../src/internal/sql_lexer.rs"]
 mod lexer;
 
+/// The statements of `sql`. A `DELIMITER` directive switches the separator;
+/// otherwise `;` separates, found with MySQL's quoting and comment rules when
+/// `mysql` is set and with the crate's SQL lexer when it is not.
 pub fn statements(sql: &str, mysql: bool) -> Vec<&str> {
     let mut remaining = sql;
     let mut delimiter = ";";

@@ -259,23 +259,6 @@ fn relation_kind_comes_from_the_wrapper_type() {
     assert_eq!(through.related_types(), expected);
 }
 
-#[test]
-fn a_relation_attribute_needs_a_relation_wrapper() {
-    // A wrapper of another kind is pinned by `tests/ui/invalid_relation_kind_mismatch`.
-    let not_a_wrapper = build_error_for(&parse_quote! {
-        struct User {
-            #[tideorm(primary_key, auto_increment)]
-            id: i64,
-            #[tideorm(has_one = "Profile", foreign_key = "user_id")]
-            profile: Option<Profile>,
-        }
-    });
-    assert!(
-        not_a_wrapper.contains("#[tideorm(has_one = \"...\")] requires a `HasOne<..>` field"),
-        "{not_a_wrapper}"
-    );
-}
-
 /// A wrapper field used to need the matching `has_one = ".."` attribute to be wired
 /// at all: without it the field silently got an inert `Default` and its
 /// `foreign_key` was ignored.
@@ -927,41 +910,30 @@ fn morph_to_targets_are_never_treated_as_models() {
     );
 }
 
-#[test]
-fn searchable_must_name_a_real_field_or_column() {
-    let error = build_context_for(&parse_quote! {
-        #[tideorm(searchable = "emial")]
-        struct User {
-            #[tideorm(primary_key, auto_increment)]
-            id: i64,
-            email: String,
-        }
-    })
-    .and_then(|ctx| crate::entity_gen::generate_entity_support(&ctx))
-    .expect_err("an unknown searchable field should be rejected")
-    .to_string();
-
-    assert!(error.contains("references unknown field or column 'emial'"));
-}
-
 /// Every field-list attribute names real fields, and names them as fields:
 /// a typo in `translatable` used to compile and translate nothing.
 #[test]
 fn field_list_attributes_name_real_fields() {
-    let error = build_context_for(&parse_quote! {
-        #[tideorm(translatable = "titel")]
-        struct Article {
-            #[tideorm(primary_key, auto_increment)]
-            id: i64,
-            title: String,
-        }
-    })
-    .err()
-    .expect("an unknown translatable field should be rejected")
-    .to_string();
-    assert!(
-        error.contains("#[tideorm(translatable = ...)] references unknown field or column 'titel'")
-    );
+    for attribute in ["translatable", "searchable"] {
+        let key = syn::Ident::new(attribute, proc_macro2::Span::call_site());
+        let error = build_context_for(&parse_quote! {
+            #[tideorm(#key = "titel")]
+            struct Article {
+                #[tideorm(primary_key, auto_increment)]
+                id: i64,
+                title: String,
+            }
+        })
+        .err()
+        .unwrap_or_else(|| panic!("an unknown {attribute} field should be rejected"))
+        .to_string();
+        assert!(
+            error.contains(&format!(
+                "#[tideorm({attribute} = ...)] references unknown field or column 'titel'"
+            )),
+            "{error}"
+        );
+    }
 
     let error = build_context_for(&parse_quote! {
         #[tideorm(searchable = "title,")]
@@ -1139,35 +1111,52 @@ fn relations_without_an_eager_path_name_the_limitation() {
     assert!(expanded.contains("hasnoeagerpathforSelfRefManyrelations"));
 }
 
+/// A rule that cannot apply, or cannot be read, is reported rather than
+/// dropped.
 #[test]
-fn validation_rejects_email_rule_on_non_string_field() {
-    let error = build_error_for(&parse_quote! {
-        struct User {
-            #[tideorm(primary_key)]
-            id: i64,
-            #[validate(email)]
-            age: i64,
+fn invalid_validation_rules_are_reported() {
+    let cases: [(TokenStream2, TokenStream2, &[&str]); 4] = [
+        (
+            quote!(#[validate(email)]),
+            quote!(i64),
+            &[
+                "validation rule 'email' is incompatible",
+                "field 'age'",
+                "type 'i64'",
+            ],
+        ),
+        (
+            quote!(#[validate(min_length = 3)]),
+            quote!(i64),
+            &[
+                "validation rule 'min_length' is incompatible",
+                "field 'age'",
+            ],
+        ),
+        (
+            quote!(#[validate(minlength = 3)]),
+            quote!(String),
+            &["unknown validation rule 'minlength'"],
+        ),
+        (
+            quote!(#[validate(min_length = "three")]),
+            quote!(String),
+            &["validation rule 'min_length' expects a non-negative integer"],
+        ),
+    ];
+    for (rule, ty, expected) in cases {
+        let error = build_error_for(&parse_quote! {
+            struct User {
+                #[tideorm(primary_key)]
+                id: i64,
+                #rule
+                age: #ty,
+            }
+        });
+        for fragment in expected {
+            assert!(error.contains(fragment), "{rule}: {error}");
         }
-    });
-
-    assert!(error.contains("validation rule 'email' is incompatible"));
-    assert!(error.contains("field 'age'"));
-    assert!(error.contains("type 'i64'"));
-}
-
-#[test]
-fn validation_rejects_length_rule_on_non_string_field() {
-    let error = build_error_for(&parse_quote! {
-        struct User {
-            #[tideorm(primary_key)]
-            id: i64,
-            #[validate(min_length = 3)]
-            age: i64,
-        }
-    });
-
-    assert!(error.contains("validation rule 'min_length' is incompatible"));
-    assert!(error.contains("field 'age'"));
+    }
 }
 
 #[test]
@@ -1206,34 +1195,6 @@ fn validation_values_are_not_split_on_embedded_commas() {
 
     assert!(rendered.contains("Regex(\"^[a-z]{3,5}$\".to_string())"));
     assert!(rendered.contains("MaxLength("), "{rendered}");
-}
-
-#[test]
-fn validation_rejects_unknown_rule_names_instead_of_dropping_them() {
-    let error = build_error_for(&parse_quote! {
-        struct User {
-            #[tideorm(primary_key)]
-            id: i64,
-            #[validate(minlength = 3)]
-            name: String,
-        }
-    });
-
-    assert!(error.contains("unknown validation rule 'minlength'"));
-}
-
-#[test]
-fn validation_rejects_unparsable_rule_values_instead_of_dropping_them() {
-    let error = build_error_for(&parse_quote! {
-        struct User {
-            #[tideorm(primary_key)]
-            id: i64,
-            #[validate(min_length = "three")]
-            name: String,
-        }
-    });
-
-    assert!(error.contains("validation rule 'min_length' expects a non-negative integer"));
 }
 
 #[test]

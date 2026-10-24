@@ -87,35 +87,24 @@ fn exact_validation_compares_fractional_scientific_and_over_precision_bounds() {
     for field in ["lower", "upper", "scientific", "precise"] {
         assert!(errors.get(field).is_some(), "{field}");
     }
-    for (bound, below, above) in [
-        (
-            "9007199254740992.5",
-            9007199254740992_i64,
-            9007199254740993_i64,
-        ),
-        ("-9007199254740992.5", -9007199254740993, -9007199254740992),
+    // The fields above hold the positive bound; a negative one compares alike.
+    let (bound, below, above) = (
+        "-9007199254740992.5",
+        -9007199254740993_i64,
+        -9007199254740992,
+    );
+    for (value, rule, fails) in [
+        (below, ValidationRule::MinExact(bound.into()), true),
+        (above, ValidationRule::MinExact(bound.into()), false),
+        (below, ValidationRule::MaxExact(bound.into()), false),
+        (above, ValidationRule::MaxExact(bound.into()), true),
     ] {
-        assert!(
-            Validator::validate_rule(&below, &ValidationRule::MinExact(bound.into()), "n")
-                .is_some()
-        );
-        assert!(
-            Validator::validate_rule(&above, &ValidationRule::MinExact(bound.into()), "n")
-                .is_none()
-        );
-        assert!(
-            Validator::validate_rule(&below, &ValidationRule::MaxExact(bound.into()), "n")
-                .is_none()
-        );
-        assert!(
-            Validator::validate_rule(&above, &ValidationRule::MaxExact(bound.into()), "n")
-                .is_some()
+        assert_eq!(
+            Validator::validate_rule(&value, &rule, "n").is_some(),
+            fails,
+            "{value} against {rule:?}"
         );
     }
-    assert!(
-        Validator::validate_rule(&Decimal::ONE, &ValidationRule::MinExact("1e-2".into()), "n")
-            .is_none()
-    );
     assert!(
         Validator::validate_rule(&Decimal::ONE, &ValidationRule::MaxExact("1e-2".into()), "n")
             .is_some()

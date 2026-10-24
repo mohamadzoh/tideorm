@@ -1,6 +1,6 @@
 [package]
 name = "tideorm"
-version = "0.16.0"
+version = "0.16.1"
 edition = "2024"
 authors = ["Mohamad Al Zohbie <alzoubi528@gmail.com>"]
 description = "A developer-friendly ORM for Rust with clean, expressive syntax"
@@ -37,7 +37,6 @@ exclude = [
     "tests/or_clause/**",
     "tests/sqlite_ci_smoke_test/**",
     "tests/sqlite_regressions/**",
-    "tests/tokenization_tests/**",
     "tests/typed_columns_and_join_tests/**",
     "tests/ui/**",
     "tests/public_api_tests/**",
@@ -80,44 +79,44 @@ encrypted-fields = []
 # This crate's MSRV is downstream of this line: sea-orm 2.x declares
 # `rust-version = "1.94.0"`, and `resolver = "3"` enforces it. Raising this range
 # can therefore raise the toolchain floor without any of our own code changing.
-sea-orm = { version = "2.0.2", default-features = false, features = ["macros", "with-chrono", "with-json", "with-rust_decimal", "with-uuid"] }
+sea-orm = { version = "2.0.4", default-features = false, features = ["macros", "with-chrono", "with-json", "with-rust_decimal", "with-uuid"] }
 
 # Async runtime
-async-trait = "0.1.89"
+async-trait = "0.1.92"
 # Runtime-independent, cancellable timers for SQLite migration lock waits.
 async-io = { version = "2.6.0", optional = true }
 
 # Serialization
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 
 # Types
-chrono = { version = "0.4.44", features = ["serde"] }
-uuid = { version = "1.23.0", features = ["serde", "v4"] }
-rust_decimal = { version = "1.41.0", features = ["serde"] }
+chrono = { version = "0.4.45", features = ["serde"] }
+uuid = { version = "1.29.0", features = ["serde", "v4"] }
+rust_decimal = { version = "1.43.0", features = ["serde"] }
 
 # Error handling
-thiserror = "2.0.18"
+thiserror = "2.0.21"
 
 # Derive macros (our own crate)
-tideorm-macros = { version = "0.16.0", path = "tideorm-macros" }
+tideorm-macros = { version = "0.16.1", path = "tideorm-macros" }
 
 # Utils
 parking_lot = "0.12.5"
 # An async mutex that works on either runtime; sea-orm already builds this crate.
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
-inventory = "0.3.21"
-regex = "1.12.3"
-url = "2.5.7"
-chacha20poly1305 = { version = "0.10.1", features = ["std"] }
-argon2 = { version = "0.5.3", features = ["std"] }
+inventory = "0.3.25"
+regex = "1.13.1"
+url = "2.5.8"
+chacha20poly1305 = "0.11.0"
+argon2 = "0.6.0"
 
 [dev-dependencies]
 async-std = "1.13.2"
-tokio = { version = "1.50.0", features = ["full", "test-util", "macros"] }
+tokio = { version = "1.54.1", features = ["full", "test-util", "macros"] }
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 dotenvy = "0.15.7"
-trybuild = "1.0.112"
+trybuild = "1.0.122"
 
 # Benchmarks. A bare `cargo bench` is not meaningful: the targets below carry
 # `required-features` for the driver they actually open a connection with, and

@@ -92,84 +92,87 @@ impl ManagedOps for OrderingEntry {
     }
 }
 
-/// Apply exactly the ordering `flush_in_scope` applies.
-fn flush_tables_in_order(entries: &[Arc<dyn ManagedOps>]) -> Vec<&'static str> {
+/// `entries` in the order `flush_in_scope` writes them.
+fn flush_order(entries: &[Arc<dyn ManagedOps>]) -> Vec<Arc<dyn ManagedOps>> {
     let order = plan_flush_order(entries);
     let mut sorted = entries.to_vec();
     sorted.sort_by_key(|entry| flush_sort_key(entry.as_ref(), &order));
-    sorted.iter().map(|entry| entry.table_name()).collect()
+    order_self_references(&mut sorted);
+    sorted
+}
+
+fn flush_tables_in_order(entries: &[Arc<dyn ManagedOps>]) -> Vec<&'static str> {
+    flush_order(entries)
+        .iter()
+        .map(|entry| entry.table_name())
+        .collect()
+}
+
+/// The `id` of each node, in the order a flush writes them.
+fn flush_rows_in_order(entries: &[Arc<dyn ManagedOps>]) -> Vec<String> {
+    flush_order(entries)
+        .iter()
+        .map(|entry| entry.row_links()[0].provides.clone().unwrap_or_default())
+        .collect()
 }
 
 #[test]
-fn inserts_run_parents_before_children_whatever_the_registration_order() {
-    let entries = vec![
-        OrderingEntry::new("posts", EntityState::New)
-            .with_parents(&["users"])
-            .shared(),
-        OrderingEntry::new("users", EntityState::New).shared(),
+fn tables_flush_in_the_order_their_declared_relations_need() {
+    let new = |table| OrderingEntry::new(table, EntityState::New);
+    let cases: Vec<(&str, Vec<OrderingEntry>, Vec<&str>)> = vec![
+        (
+            "inserts run parents first, whatever the registration order",
+            vec![new("posts").with_parents(&["users"]), new("users")],
+            vec!["users", "posts"],
+        ),
+        (
+            "a relation declared only on the parent still orders the insert",
+            vec![new("posts"), new("users").with_children(&["posts"])],
+            vec!["users", "posts"],
+        ),
+        (
+            "deletes run children first",
+            vec![
+                OrderingEntry::new("users", EntityState::Removed).with_children(&["posts"]),
+                OrderingEntry::new("posts", EntityState::Removed),
+            ],
+            vec!["posts", "users"],
+        ),
+        (
+            "the operation kind partitions ahead of the table order",
+            vec![
+                OrderingEntry::new("posts", EntityState::Removed),
+                new("posts").with_parents(&["users"]),
+                OrderingEntry::new("users", EntityState::Managed),
+                new("users"),
+            ],
+            vec!["users", "posts", "users", "posts"],
+        ),
+        (
+            "a self-referencing foreign key is not a cycle",
+            vec![
+                new("categories")
+                    .with_parents(&["categories"])
+                    .with_children(&["categories"]),
+                new("categories"),
+            ],
+            vec!["categories", "categories"],
+        ),
+        (
+            "a dependency on a table outside the flush is not a cycle",
+            vec![new("posts").with_parents(&["users"])],
+            vec!["posts"],
+        ),
     ];
 
-    assert_eq!(flush_tables_in_order(&entries), vec!["users", "posts"]);
-}
-
-#[test]
-fn a_relation_declared_only_on_the_parent_still_orders_the_insert() {
-    let entries = vec![
-        OrderingEntry::new("posts", EntityState::New).shared(),
-        OrderingEntry::new("users", EntityState::New)
-            .with_children(&["posts"])
-            .shared(),
-    ];
-
-    assert_eq!(flush_tables_in_order(&entries), vec!["users", "posts"]);
-}
-
-#[test]
-fn deletes_run_children_before_parents() {
-    let entries = vec![
-        OrderingEntry::new("users", EntityState::Removed)
-            .with_children(&["posts"])
-            .shared(),
-        OrderingEntry::new("posts", EntityState::Removed).shared(),
-    ];
-
-    assert_eq!(flush_tables_in_order(&entries), vec!["posts", "users"]);
-}
-
-#[test]
-fn operation_kind_still_partitions_ahead_of_table_order() {
-    let entries = vec![
-        OrderingEntry::new("posts", EntityState::Removed).shared(),
-        OrderingEntry::new("posts", EntityState::New)
-            .with_parents(&["users"])
-            .shared(),
-        OrderingEntry::new("users", EntityState::Managed).shared(),
-        OrderingEntry::new("users", EntityState::New).shared(),
-    ];
-
-    assert_eq!(
-        flush_tables_in_order(&entries),
-        vec!["users", "posts", "users", "posts"]
-    );
-}
-
-#[test]
-fn a_self_referencing_foreign_key_orders_without_reporting_a_cycle() {
-    let entries = vec![
-        OrderingEntry::new("categories", EntityState::New)
-            .with_parents(&["categories"])
-            .with_children(&["categories"])
-            .shared(),
-        OrderingEntry::new("categories", EntityState::New).shared(),
-    ];
-
-    let order = plan_flush_order(&entries);
-
-    assert!(order.unordered_tables().is_empty());
-    assert_eq!(
-        flush_tables_in_order(&entries),
-        vec!["categories", "categories"]
-    );
+    for (case, entries, expected) in cases {
+        let entries: Vec<_> = entries.into_iter().map(OrderingEntry::shared).collect();
+        assert!(
+            plan_flush_order(&entries).unordered_tables().is_empty(),
+            "{case}"
+        );
+        assert_eq!(flush_tables_in_order(&entries), expected, "{case}");
+    }
 }
 
 #[test]
@@ -192,95 +195,67 @@ fn a_two_table_cycle_is_reported_instead_of_looping() {
 }
 
 #[test]
-fn a_dependency_on_a_table_outside_the_flush_is_not_a_cycle() {
-    let entries = vec![
-        OrderingEntry::new("posts", EntityState::New)
-            .with_parents(&["users"])
-            .shared(),
-    ];
-
-    let order = plan_flush_order(&entries);
-
-    assert!(order.unordered_tables().is_empty());
-    assert_eq!(flush_tables_in_order(&entries), vec!["posts"]);
-}
-
-#[test]
-fn ordering_failures_leave_non_foreign_key_errors_alone() {
+fn ordering_failures_explain_only_foreign_key_violations() {
     let error = explain_flush_ordering_failure(Error::query("boom"), "posts", &[]);
-
     assert_eq!(error.to_string(), "Query error: boom");
-}
 
-#[test]
-fn a_foreign_key_violation_names_the_table_and_the_cycle() {
-    let violation = Error::query("insert on posts violates a foreign key constraint")
-        .with_db_failure(Some(DbFailure::new(DbFailureKind::ForeignKeyViolation)));
+    let violation = || {
+        Error::query("insert on posts violates a foreign key constraint")
+            .with_db_failure(Some(DbFailure::new(DbFailureKind::ForeignKeyViolation)))
+    };
 
-    let error = explain_flush_ordering_failure(violation, "posts", &["orders", "customers"]);
+    let error = explain_flush_ordering_failure(violation(), "posts", &["orders", "customers"]);
     let message = error.to_string();
-
     assert!(
         error.is_foreign_key_violation(),
         "the driver failure must survive so callers can still classify the error"
     );
-    assert!(message.contains("writing `posts`"));
-    assert!(message.contains("orders, customers"));
+    assert!(message.contains("writing `posts`"), "{message}");
+    assert!(message.contains("orders, customers"), "{message}");
+
+    let message = explain_flush_ordering_failure(violation(), "posts", &[]).to_string();
+    assert!(
+        message.contains("declares no relation"),
+        "without a cycle the relation was not declared: {message}"
+    );
 }
 
 #[test]
-fn a_foreign_key_violation_without_a_cycle_says_the_relation_was_not_declared() {
-    let violation = Error::query("insert on posts violates a foreign key constraint")
-        .with_db_failure(Some(DbFailure::new(DbFailureKind::ForeignKeyViolation)));
-
-    let message = explain_flush_ordering_failure(violation, "posts", &[]).to_string();
-
-    assert!(message.contains("declares no relation"));
-}
-
-/// The row order a flush writes `entries` in, by each node's `id`.
-fn flush_rows_in_order(entries: &[Arc<dyn ManagedOps>]) -> Vec<String> {
-    let order = plan_flush_order(entries);
-    let mut sorted = entries.to_vec();
-    sorted.sort_by_key(|entry| flush_sort_key(entry.as_ref(), &order));
-    order_self_references(&mut sorted);
-    sorted
-        .iter()
-        .map(|entry| entry.row_links()[0].provides.clone().unwrap_or_default())
-        .collect()
-}
-
-#[test]
-fn rows_of_a_self_referencing_table_insert_parents_first() {
-    let entries = vec![
-        OrderingEntry::node("3", Some("2"), EntityState::New).shared(),
-        OrderingEntry::node("2", Some("1"), EntityState::New).shared(),
-        OrderingEntry::node("1", None, EntityState::New).shared(),
-        OrderingEntry::node("4", None, EntityState::New).shared(),
+fn rows_of_a_self_referencing_table_flush_in_reference_order() {
+    let node = |id, parent, state| OrderingEntry::node(id, parent, state).shared();
+    let cases = [
+        (
+            "inserts run parents first",
+            vec![
+                node("3", Some("2"), EntityState::New),
+                node("2", Some("1"), EntityState::New),
+                node("1", None, EntityState::New),
+                node("4", None, EntityState::New),
+            ],
+            ["1", "2", "3", "4"].as_slice(),
+        ),
+        (
+            "deletes run children first",
+            vec![
+                node("1", None, EntityState::Removed),
+                node("2", Some("1"), EntityState::Removed),
+                node("3", Some("2"), EntityState::Removed),
+            ],
+            ["3", "2", "1"].as_slice(),
+        ),
+        (
+            "rows in a reference cycle keep their registration order",
+            vec![
+                node("1", Some("2"), EntityState::New),
+                node("2", Some("1"), EntityState::New),
+            ],
+            ["1", "2"].as_slice(),
+        ),
     ];
 
-    assert_eq!(flush_rows_in_order(&entries), ["1", "2", "3", "4"]);
-}
-
-#[test]
-fn rows_of_a_self_referencing_table_delete_children_first() {
-    let entries = vec![
-        OrderingEntry::node("1", None, EntityState::Removed).shared(),
-        OrderingEntry::node("2", Some("1"), EntityState::Removed).shared(),
-        OrderingEntry::node("3", Some("2"), EntityState::Removed).shared(),
-    ];
-
-    assert_eq!(flush_rows_in_order(&entries), ["3", "2", "1"]);
-}
-
-#[test]
-fn rows_in_a_reference_cycle_keep_registration_order() {
-    let entries = vec![
-        OrderingEntry::node("1", Some("2"), EntityState::New).shared(),
-        OrderingEntry::node("2", Some("1"), EntityState::New).shared(),
-    ];
-
-    assert_eq!(flush_rows_in_order(&entries), ["1", "2"]);
+    for (case, entries, expected) in cases {
+        assert_eq!(flush_rows_in_order(&entries), expected, "{case}");
+    }
 }
 
 #[tideorm::model(table = "flush_merge_readings")]

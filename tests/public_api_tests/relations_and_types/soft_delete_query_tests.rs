@@ -13,17 +13,14 @@ struct CustomSoftDeleteModel {
 }
 
 #[test]
-fn test_soft_delete_query_uses_overridden_column() {
-    let sql = CustomSoftDeleteModel::query().build_sql_preview();
-    assert!(sql.contains("\"archived_on\" IS NULL"));
-    assert!(!sql.contains("\"deleted_at\" IS NULL"));
-}
+fn test_soft_delete_scopes_use_the_overridden_column() {
+    let live = CustomSoftDeleteModel::query().build_sql_preview();
+    assert!(live.contains("\"archived_on\" IS NULL"), "{live}");
+    assert!(!live.contains("deleted_at"), "{live}");
 
-#[test]
-fn test_only_trashed_query_uses_overridden_column() {
-    let sql = CustomSoftDeleteModel::query()
+    let trashed = CustomSoftDeleteModel::query()
         .only_trashed()
         .build_sql_preview();
-    assert!(sql.contains("\"archived_on\" IS NOT NULL"));
-    assert!(!sql.contains("\"deleted_at\" IS NOT NULL"));
+    assert!(trashed.contains("\"archived_on\" IS NOT NULL"), "{trashed}");
+    assert!(!trashed.contains("deleted_at"), "{trashed}");
 }

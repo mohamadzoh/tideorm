@@ -1,4 +1,5 @@
-//! Migration locking and schema export on SQLite.
+//! Migration locking and foreign-key guards, column alterations, schema sync
+//! and schema export on SQLite.
 
 use tideorm::prelude::*;
 
@@ -257,12 +258,7 @@ async fn migration_lock_follows_the_opened_file_for_any_url_spelling() {
     let path = crate::fixtures::TempFile::new("migration-url", "sqlite");
     let slashed = path.display().to_string().replace('\\', "/");
     let url = format!("sqlite:///{}?mode=rwc", slashed.trim_start_matches('/'));
-    let db = Database::builder()
-        .url(&url)
-        .max_connections(1)
-        .build()
-        .await
-        .unwrap();
+    let db = crate::fixtures::single_connection(&url).await;
     let applied = __run_sql_migration(
         &db,
         "_migrations",
@@ -281,23 +277,20 @@ async fn migration_lock_follows_the_opened_file_for_any_url_spelling() {
 
 #[tokio::test]
 async fn sqlite_export_keeps_names_similar_to_reserved_prefix() {
-    let source = Database::connect("sqlite::memory:").await.unwrap();
-    for sql in [
-        "CREATE TABLE sqlitex_items(id INTEGER PRIMARY KEY, name TEXT)",
-        "CREATE TABLE normal(id INTEGER)",
-        "CREATE INDEX sqlitex_name ON sqlitex_items(name)",
-        "CREATE TRIGGER sqlitex_insert AFTER INSERT ON sqlitex_items BEGIN INSERT INTO normal VALUES(NEW.id); END",
-    ] {
-        source.exec_raw(sql).await.unwrap();
-    }
-    Database::set_global(source).unwrap();
+    crate::fixtures::global_memory_database(
+        "CREATE TABLE sqlitex_items(id INTEGER PRIMARY KEY, name TEXT); \
+         CREATE TABLE normal(id INTEGER); \
+         CREATE INDEX sqlitex_name ON sqlitex_items(name); \
+         CREATE TRIGGER sqlitex_insert AFTER INSERT ON sqlitex_items \
+         BEGIN INSERT INTO normal VALUES(NEW.id); END",
+    )
+    .await;
     let path = crate::fixtures::TempFile::new("prefix", "sql");
     tideorm::schema::SchemaWriter::write_schema(&*path)
         .await
         .unwrap();
     let script = std::fs::read_to_string(&*path).unwrap();
-    let restored = Database::connect("sqlite::memory:").await.unwrap();
-    restored.exec_raw(&script).await.unwrap();
+    let restored = crate::fixtures::memory_database(&script).await;
     restored
         .exec_raw("INSERT INTO sqlitex_items VALUES(7,'kept')")
         .await
@@ -515,7 +508,7 @@ async fn schema_sync_rejects_index_names_owned_by_another_table() {
         if preexisting {
             db.exec_raw(
                 "CREATE TABLE collision_first(id INTEGER PRIMARY KEY, code TEXT); \
-                         CREATE TABLE collision_second(id INTEGER PRIMARY KEY, code TEXT)",
+                 CREATE TABLE collision_second(id INTEGER PRIMARY KEY, code TEXT)",
             )
             .await
             .unwrap();
@@ -552,10 +545,13 @@ async fn schema_sync_rejects_index_names_owned_by_another_table() {
 /// A migration rebuilding a table runs with SQLite's foreign keys off when it
 /// asks to, through `Migration::foreign_keys_off`, so the rows pointing at the
 /// table keep pointing at it, where the `DROP TABLE` deleted them. Without
-/// asking, the pragma is refused rather than ignored, and a migration leaving
-/// a foreign key pointing nowhere is rolled back.
+/// asking, the pragma is refused rather than ignored, in any spelling (the
+/// spellings are unit-tested with `disables_foreign_keys`), and so it is
+/// outside a migration, where it would hold for one pooled connection only.
+/// A migration leaving a foreign key pointing nowhere is rolled back.
 #[tokio::test]
 async fn a_table_rebuild_with_foreign_keys_off_keeps_the_rows_pointing_at_it() {
+    use tideorm::config::DatabaseType;
     use tideorm::migration::{Migration, Migrator, Schema};
 
     const REBUILD: [&str; 4] = [
@@ -564,9 +560,11 @@ async fn a_table_rebuild_with_foreign_keys_off_keeps_the_rows_pointing_at_it() {
         "DROP TABLE parents",
         "ALTER TABLE parents_new RENAME TO parents",
     ];
+    const OFF: &str = "PRAGMA foreign_keys = OFF";
 
     struct Rebuild {
         version: &'static str,
+        pragma: &'static str,
         off: bool,
         orphan: bool,
     }
@@ -582,7 +580,7 @@ async fn a_table_rebuild_with_foreign_keys_off_keeps_the_rows_pointing_at_it() {
         }
 
         async fn up(&self, schema: &mut Schema) -> tideorm::Result<()> {
-            schema.raw("PRAGMA foreign_keys = OFF").await?;
+            schema.raw(self.pragma).await?;
             for sql in REBUILD {
                 schema.raw(sql).await?;
             }
@@ -620,10 +618,11 @@ async fn a_table_rebuild_with_foreign_keys_off_keeps_the_rows_pointing_at_it() {
                 .len()
         }
     };
-    let run = |version, off, orphan| async move {
+    let run = |version, pragma, off, orphan| async move {
         Migrator::new()
             .add(Rebuild {
                 version,
+                pragma,
                 off,
                 orphan,
             })
@@ -632,12 +631,39 @@ async fn a_table_rebuild_with_foreign_keys_off_keeps_the_rows_pointing_at_it() {
             .map(drop)
     };
 
-    let refused = run("refused", false, false).await.unwrap_err().to_string();
-    assert!(refused.contains("foreign_keys_off"), "{refused}");
-    let orphaned = run("orphan", true, true).await.unwrap_err().to_string();
+    // A pragma leaving foreign keys on is the caller's to run.
+    Schema::new(DatabaseType::SQLite)
+        .raw("PRAGMA foreign_keys = 257")
+        .await
+        .unwrap();
+    for pragma in [
+        OFF,
+        "PRAGMA foreign_keys(OFF)",
+        "PRAGMA foreign_keys = ON; PRAGMA foreign_keys = OFF;",
+    ] {
+        let refused = Schema::new(DatabaseType::SQLite)
+            .raw(pragma)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("one connection of a pool"),
+            "{pragma}: {refused}"
+        );
+        let refused = run("refused", pragma, false, false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("foreign_keys_off"), "{pragma}: {refused}");
+    }
+    assert_eq!(count("children").await, 1);
+    let orphaned = run("orphan", OFF, true, true)
+        .await
+        .unwrap_err()
+        .to_string();
     assert!(orphaned.contains("matches no row"), "{orphaned}");
     assert_eq!(count("parents").await, 1);
-    run("rebuild", true, false).await.unwrap();
+    run("rebuild", OFF, true, false).await.unwrap();
     assert_eq!(count("children").await, 1);
 
     // The pool's own connections still enforce foreign keys.
@@ -654,7 +680,10 @@ async fn a_table_rebuild_with_foreign_keys_off_keeps_the_rows_pointing_at_it() {
     )
     .await
     .unwrap();
-    let existing = run("existing", true, false).await.unwrap_err().to_string();
+    let existing = run("existing", OFF, true, false)
+        .await
+        .unwrap_err()
+        .to_string();
     assert!(
         existing.contains("already has 1 row(s) whose foreign key matches no row"),
         "{existing}"
@@ -664,73 +693,6 @@ async fn a_table_rebuild_with_foreign_keys_off_keeps_the_rows_pointing_at_it() {
     drop(db);
 }
 
-/// A pragma turning foreign keys off must not let a rebuild silently
-/// cascade-delete children while SQLite ignores it in a transaction; the
-/// spellings it is recognized in are unit-tested with `disables_foreign_keys`.
-#[tokio::test]
-async fn migration_foreign_key_guard_handles_sqlite_pragma_spellings() {
-    use tideorm::migration::{Migration, Migrator, Schema};
-
-    struct Rebuild(&'static str);
-    #[tideorm::async_trait::async_trait]
-    impl Migration for Rebuild {
-        fn version(&self) -> &str {
-            "guarded_rebuild"
-        }
-        fn name(&self) -> &str {
-            "guarded_rebuild"
-        }
-        async fn up(&self, schema: &mut Schema) -> tideorm::Result<()> {
-            schema.raw(self.0).await?;
-            schema.raw("DROP TABLE pragma_parents").await
-        }
-        async fn down(&self, _: &mut Schema) -> tideorm::Result<()> {
-            Ok(())
-        }
-    }
-
-    for sql in [
-        "PRAGMA foreign_keys(OFF)",
-        "PRAGMA foreign_keys = ON; PRAGMA foreign_keys = OFF;",
-    ] {
-        let db = crate::fixtures::global_memory_database(
-            "CREATE TABLE pragma_parents(id INTEGER PRIMARY KEY); \
-             CREATE TABLE pragma_children(parent_id INTEGER REFERENCES pragma_parents(id) ON DELETE CASCADE); \
-             INSERT INTO pragma_parents VALUES(1); INSERT INTO pragma_children VALUES(1)",
-        ).await;
-        let mut schema = Schema::new(tideorm::config::DatabaseType::SQLite);
-        schema.raw("PRAGMA foreign_keys = 257").await.unwrap();
-        // Outside a migration the pragma would change one pooled connection only.
-        let refusal = schema.raw(sql).await.unwrap_err().to_string();
-        assert!(
-            refusal.contains("one connection of a pool"),
-            "{sql}: {refusal}"
-        );
-        let outcome = Migrator::new().add(Rebuild(sql)).run().await;
-        let children = db
-            .query_raw_json("SELECT count(*) AS n FROM pragma_children")
-            .await
-            .unwrap();
-        assert!(
-            outcome.is_err(),
-            "{sql} was accepted, remaining children: {children:?}"
-        );
-        assert!(
-            outcome
-                .unwrap_err()
-                .to_string()
-                .contains("foreign_keys_off")
-        );
-        assert_eq!(children[0]["n"], 1, "{sql}");
-        assert_eq!(
-            db.query_raw_json("SELECT count(*) AS n FROM pragma_parents")
-                .await
-                .unwrap()[0]["n"],
-            1
-        );
-        Database::reset_global();
-    }
-}
 #[tokio::test]
 async fn sqlite_drop_column_uses_the_index_owners_schema() {
     use tideorm::migration::Schema;
@@ -799,4 +761,99 @@ async fn sqlite_drop_column_uses_the_index_owners_schema() {
         );
         Database::reset_global();
     }
+}
+
+/// SQLite's schema file recreates what `PRAGMA` metadata leaves out: a
+/// generated column, an index's collation, and `AUTOINCREMENT`, which keeps
+/// a deleted row's id from coming back. Rebuilt from the pragmas, the table
+/// lost the column, the unique index took "alice" beside "Alice", and ids
+/// were reused.
+#[tokio::test]
+async fn write_schema_keeps_what_sqlite_pragmas_leave_out() {
+    let _db = crate::fixtures::global_memory_database(
+        "CREATE TABLE exported_kinds (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, \
+         base INTEGER, doubled INTEGER GENERATED ALWAYS AS (base * 2)); \
+         CREATE UNIQUE INDEX exported_kinds_name ON exported_kinds (name COLLATE NOCASE)",
+    )
+    .await;
+    let path = crate::fixtures::TempFile::new("pragmas", "sql");
+    tideorm::schema::SchemaWriter::write_schema(&*path)
+        .await
+        .unwrap();
+    let script = std::fs::read_to_string(&*path).unwrap();
+    let restored = crate::fixtures::memory_database(&script).await;
+
+    restored
+        .exec_raw("INSERT INTO exported_kinds (name, base) VALUES ('Alice', 2)")
+        .await
+        .unwrap();
+    let rows = restored
+        .query_raw_json("SELECT id, doubled FROM exported_kinds")
+        .await
+        .unwrap();
+    assert_eq!(rows[0]["doubled"], serde_json::json!(4), "{script}");
+    assert!(
+        restored
+            .exec_raw("INSERT INTO exported_kinds (name) VALUES ('alice')")
+            .await
+            .is_err(),
+        "the index lost its collation:\n{script}"
+    );
+
+    let first = rows[0]["id"].as_i64().unwrap();
+    restored
+        .exec_raw("DELETE FROM exported_kinds")
+        .await
+        .unwrap();
+    restored
+        .exec_raw("INSERT INTO exported_kinds (name) VALUES ('Bob')")
+        .await
+        .unwrap();
+    let rows = restored
+        .query_raw_json("SELECT id FROM exported_kinds")
+        .await
+        .unwrap();
+    assert!(
+        rows[0]["id"].as_i64().unwrap() > first,
+        "a deleted id came back:\n{script}"
+    );
+}
+
+/// A recorded migration the migrator no longer registers stops a rollback, a
+/// multi-step rollback and a reset instead of being skipped, and the
+/// registered one stays applied.
+#[tokio::test]
+async fn rolling_back_past_an_unregistered_migration_is_an_error() {
+    struct Probe;
+    #[tideorm::async_trait::async_trait]
+    impl tideorm::migration::Migration for Probe {
+        fn version(&self) -> &str {
+            "001"
+        }
+        fn name(&self) -> &str {
+            "probe"
+        }
+        async fn up(&self, _: &mut tideorm::migration::Schema) -> tideorm::Result<()> {
+            Ok(())
+        }
+        async fn down(&self, _: &mut tideorm::migration::Schema) -> tideorm::Result<()> {
+            Ok(())
+        }
+    }
+
+    let _db = crate::fixtures::global_memory_database("").await;
+    let migrator = tideorm::migration::Migrator::new().add(Probe);
+    migrator.run().await.unwrap();
+    Database::execute("INSERT INTO _migrations (version, name) VALUES ('002', 'missing')")
+        .await
+        .unwrap();
+
+    let error = migrator.rollback().await.unwrap_err().to_string();
+    assert!(
+        error.contains("002") && error.contains("not registered"),
+        "{error}"
+    );
+    assert!(migrator.rollback_steps(2).await.is_err());
+    assert!(migrator.reset().await.is_err());
+    assert!(migrator.status().await.unwrap()[0].applied);
 }

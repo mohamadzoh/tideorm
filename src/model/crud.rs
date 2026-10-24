@@ -19,9 +19,10 @@ where
     for (index, model) in models.iter().enumerate() {
         if let Err(errors) = model.validate() {
             return Err(match Error::from(errors) {
-                Error::Validation { field, message } => {
-                    Error::validation(field, format!("{message} (model {index} of the batch)"))
-                }
+                Error::Validation { field, message } => Error::validation(
+                    field,
+                    format!("{message} (the batch's model at index {index})"),
+                ),
                 other => other,
             });
         }

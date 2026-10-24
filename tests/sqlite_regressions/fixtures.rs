@@ -18,8 +18,8 @@ pub async fn memory_database(schema: &str) -> Database {
     db
 }
 
-/// A path of its own under the target directory, whose file and migration
-/// lock file are removed when this drops.
+/// A path of its own under the target directory, whose file and its migration
+/// and seed lock files are removed when this drops.
 pub struct TempFile(std::path::PathBuf);
 
 impl TempFile {
@@ -87,8 +87,8 @@ impl Drop for GlobalCache {
     }
 }
 
-/// The slowest statement the timing tests run: a recursive count to
-/// `limit`, as an expression.
+/// An expression slow enough to keep a statement running while a timing test
+/// acts on it: a recursive count to `limit`.
 pub fn slow_count(limit: u32) -> String {
     format!(
         "(WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < {limit}) \
@@ -143,9 +143,6 @@ pub fn encrypted_error<T: std::fmt::Debug>(result: tideorm::Result<T>) {
     let error = result.unwrap_err().to_string();
     assert!(error.contains("encrypted"), "{error}");
 }
-
-/// `review_users` holding one [`User`], named `old`.
-pub const OLD_USER: &str = "CREATE TABLE review_users(id INTEGER PRIMARY KEY, name TEXT, active BOOLEAN);      INSERT INTO review_users VALUES(1, 'old', 1)";
 
 #[tideorm::model(table = "review_users")]
 pub struct User {

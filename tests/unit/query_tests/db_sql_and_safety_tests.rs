@@ -272,38 +272,66 @@ fn test_json_path_not_exists_negates_the_path_test_and_binds_the_path() {
     ));
 }
 
+/// A list of no elements leaves each predicate what it means for no
+/// elements: containment holds for every array, an overlap never holds, and
+/// only an empty array is contained; a NULL column matches neither. Nothing
+/// renders `ARRAY[]`, which PostgreSQL rejects for want of an element type.
 #[test]
 fn test_empty_array_predicates_are_valid_and_consistent() {
     let empty: Vec<&str> = Vec::new();
+    let text = |value: &str| Value::String(Some(value.to_string()));
+    let mysql_family = (
+        "(JSON_TYPE(`tags`) = 'ARRAY' AND (JSON_CONTAINS(`tags`, ?)))",
+        vec![text("[]")],
+        "(JSON_TYPE(`tags`) = 'ARRAY' AND (JSON_CONTAINS(?, `tags`) AND JSON_TYPE(JSON_EXTRACT(`tags`, ?)) <> 'OBJECT'))",
+        vec![text("[]"), text("$")],
+    );
 
-    for db_type in [
-        DatabaseType::Postgres,
-        DatabaseType::MySQL,
-        DatabaseType::MariaDB,
-        DatabaseType::SQLite,
+    for (db_type, (contains, contains_params, contained_by, contained_by_params)) in [
+        (
+            DatabaseType::Postgres,
+            (
+                "\"tags\" IS NOT NULL",
+                vec![],
+                "(\"tags\" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM unnest(\"tags\") AS tideorm_array_element(element)))",
+                vec![],
+            ),
+        ),
+        (DatabaseType::MySQL, mysql_family.clone()),
+        (DatabaseType::MariaDB, mysql_family.clone()),
+        (
+            DatabaseType::SQLite,
+            (
+                "(json_type(\"tags\") = 'array' AND (\"tags\" IS NOT NULL))",
+                vec![],
+                "(json_type(\"tags\") = 'array' AND ((\"tags\" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM json_each(\"tags\") AS tideorm_element))))",
+                vec![],
+            ),
+        ),
     ] {
         let render = |query: QueryBuilder<QueryTestUser>| {
-            let (sql, _) = query.build_select_sql_with_params_for_db(db_type);
-            sql.split_once(" WHERE ")
+            let (sql, params) = query.build_select_sql_with_params_for_db(db_type);
+            let where_sql = sql
+                .split_once(" WHERE ")
                 .map(|(_, where_sql)| where_sql.to_string())
-                .unwrap_or_default()
+                .unwrap_or_default();
+            (where_sql, params)
         };
 
-        // An empty "contains all" is vacuously satisfied.
-        let contains = render(QueryBuilder::new().where_array_contains("tags", empty.clone()));
-        assert!(!contains.contains("ARRAY[]"), "{db_type:?}: {contains}");
-        assert!(!contains.contains("()"), "{db_type:?}: {contains}");
-
-        // An empty "contains any" can never match.
-        let overlaps = render(QueryBuilder::new().where_array_overlaps("tags", empty.clone()));
-        assert_eq!(overlaps, "0 = 1", "{db_type:?}");
-
-        // An empty "contained by" only holds for an empty column.
-        let contained_by =
-            render(QueryBuilder::new().where_array_contained_by("tags", empty.clone()));
-        assert!(
-            !contained_by.contains("ARRAY[]"),
-            "{db_type:?}: {contained_by}"
+        assert_eq!(
+            render(QueryBuilder::new().where_array_contains("tags", empty.clone())),
+            (contains.to_string(), contains_params),
+            "{db_type:?} contains"
+        );
+        assert_eq!(
+            render(QueryBuilder::new().where_array_overlaps("tags", empty.clone())),
+            ("0 = 1".to_string(), vec![]),
+            "{db_type:?} overlaps"
+        );
+        assert_eq!(
+            render(QueryBuilder::new().where_array_contained_by("tags", empty.clone())),
+            (contained_by.to_string(), contained_by_params),
+            "{db_type:?} contained by"
         );
     }
 }
@@ -353,162 +381,177 @@ fn test_placeholders_follow_the_backend_marker() {
 }
 
 #[test]
-fn test_inline_parameters_writes_values_the_way_the_backend_spells_them() {
-    let params = vec![
+fn test_inline_parameters() {
+    let two = vec![
         Value::String(Some("it's".to_string())),
         Value::BigInt(Some(7)),
     ];
+    let one = vec![Value::BigInt(Some(1))];
 
-    assert_eq!(
-        db_sql::inline_parameters(
+    for (db_type, sql, params, expected) in [
+        // Values are written the way the backend spells them.
+        (
             DatabaseType::SQLite,
             "SELECT 1 WHERE name = ? AND id = ?",
-            &params
+            &two,
+            "SELECT 1 WHERE name = 'it''s' AND id = 7",
         ),
-        "SELECT 1 WHERE name = 'it''s' AND id = 7"
-    );
-    assert_eq!(
-        db_sql::inline_parameters(
+        (
             DatabaseType::Postgres,
             "SELECT 1 WHERE id = $2 AND name = $1",
-            &params
+            &two,
+            "SELECT 1 WHERE id = 7 AND name = E'it\\'s'",
         ),
-        "SELECT 1 WHERE id = 7 AND name = E'it\\'s'"
-    );
-}
-
-#[test]
-fn test_inline_parameters_leaves_unbound_placeholders_alone() {
-    // A raw fragment can carry a placeholder with no value behind it;
-    // sea-query's inliner would index past the values and panic.
-    let one = vec![Value::BigInt(Some(1))];
-
-    for (db_type, sql) in [
-        (DatabaseType::MySQL, "SELECT 1 WHERE a = ? AND b = ?"),
-        (DatabaseType::SQLite, "SELECT 1 WHERE a = ? AND b = ?"),
-        (DatabaseType::Postgres, "SELECT 1 WHERE a = $1 AND b = $2"),
-        (DatabaseType::Postgres, "SELECT 1 WHERE a = $0"),
+        // A `?` inside a literal is no placeholder.
+        (
+            DatabaseType::MySQL,
+            "SELECT '?' WHERE a = ?",
+            &one,
+            "SELECT '?' WHERE a = 1",
+        ),
+        // A raw fragment can carry a placeholder with no value behind it, and
+        // sea-query's inliner would index past the values and panic: a
+        // statement whose placeholders and values do not pair up, either way,
+        // is shown as it is.
+        (
+            DatabaseType::MySQL,
+            "SELECT 1 WHERE a = ? AND b = ?",
+            &one,
+            "SELECT 1 WHERE a = ? AND b = ?",
+        ),
+        (
+            DatabaseType::SQLite,
+            "SELECT 1 WHERE a = ? AND b = ?",
+            &one,
+            "SELECT 1 WHERE a = ? AND b = ?",
+        ),
+        (
+            DatabaseType::Postgres,
+            "SELECT 1 WHERE a = $1 AND b = $2",
+            &one,
+            "SELECT 1 WHERE a = $1 AND b = $2",
+        ),
+        (
+            DatabaseType::Postgres,
+            "SELECT 1 WHERE a = $0",
+            &one,
+            "SELECT 1 WHERE a = $0",
+        ),
+        (DatabaseType::Postgres, "SELECT 1", &one, "SELECT 1"),
+        // The backends disagree on whether `\'` ends a literal, so a statement
+        // that contains a backslash is shown with its placeholders.
+        (
+            DatabaseType::Postgres,
+            r"SELECT 1 WHERE note = 'C:\' AND a = $1",
+            &one,
+            r"SELECT 1 WHERE note = 'C:\' AND a = $1",
+        ),
     ] {
-        assert_eq!(db_sql::inline_parameters(db_type, sql, &one), sql);
+        assert_eq!(
+            db_sql::inline_parameters(db_type, sql, params),
+            expected,
+            "{db_type:?}: {sql}"
+        );
     }
-
-    // Every value has to be placed, too.
-    assert_eq!(
-        db_sql::inline_parameters(DatabaseType::Postgres, "SELECT 1", &one),
-        "SELECT 1"
-    );
 }
 
+/// Only real `$n` markers move: one inside a single-quoted, escape-string or
+/// dollar-quoted literal, or inside a comment, is text.
 #[test]
-fn test_inline_parameters_keeps_placeholders_inside_quotes() {
-    let one = vec![Value::BigInt(Some(1))];
-
-    assert_eq!(
-        db_sql::inline_parameters(DatabaseType::MySQL, "SELECT '?' WHERE a = ?", &one),
-        "SELECT '?' WHERE a = 1"
-    );
+fn test_rebase_placeholders_skips_quoted_text_and_comments() {
+    for (sql, offset, expected) in [
+        (
+            "name = 'price is $5' AND id = $1 AND note = 'it''s still $2'",
+            3,
+            "name = 'price is $5' AND id = $4 AND note = 'it''s still $2'",
+        ),
+        (
+            "note = E'price isn\\'t $5' AND id = $1 AND raw = e'keep \\$2 here'",
+            4,
+            "note = E'price isn\\'t $5' AND id = $5 AND raw = e'keep \\$2 here'",
+        ),
+        (
+            concat!(
+                "note = $$literal $1$$ AND id = $2 ",
+                "/* keep $3 */ ",
+                "-- keep $4\n",
+                "AND body = $tag$still $5$tag$"
+            ),
+            2,
+            concat!(
+                "note = $$literal $1$$ AND id = $4 ",
+                "/* keep $3 */ ",
+                "-- keep $4\n",
+                "AND body = $tag$still $5$tag$"
+            ),
+        ),
+        // A `$1` inside an identifier is no parameter, and PostgreSQL comments
+        // nest.
+        (
+            "a$1 + $1 /* outer /* $2 */ $3 */ + $2",
+            1,
+            "a$1 + $2 /* outer /* $2 */ $3 */ + $3",
+        ),
+    ] {
+        assert_eq!(
+            db_sql::rebase_placeholders(DatabaseType::Postgres, sql, offset),
+            expected,
+            "{sql}"
+        );
+    }
 }
 
+/// `format_column` quotes anything that is not a plain `column` or
+/// `table.column` as one identifier; the trusted-expression variant passes
+/// such text through, for slots validated before they render.
 #[test]
-fn test_inline_parameters_does_not_guess_around_backslashes() {
-    // The backends disagree on whether `\'` ends a literal, so a statement
-    // that contains a backslash is shown with its placeholders instead.
-    let one = vec![Value::BigInt(Some(1))];
-    let sql = r"SELECT 1 WHERE note = 'C:\' AND a = $1";
-
-    assert_eq!(
-        db_sql::inline_parameters(DatabaseType::Postgres, sql, &one),
-        sql
-    );
-}
-
-#[test]
-fn test_rebase_placeholders_skips_single_quoted_literals() {
-    let sql = "name = 'price is $5' AND id = $1 AND note = 'it''s still $2'";
-
-    assert_eq!(
-        db_sql::rebase_placeholders(DatabaseType::Postgres, sql, 3),
-        "name = 'price is $5' AND id = $4 AND note = 'it''s still $2'"
-    );
-}
-
-#[test]
-fn test_rebase_placeholders_skips_dollar_quotes_and_comments() {
-    let sql = concat!(
-        "note = $$literal $1$$ AND id = $2 ",
-        "/* keep $3 */ ",
-        "-- keep $4\n",
-        "AND body = $tag$still $5$tag$"
-    );
-
-    assert_eq!(
-        db_sql::rebase_placeholders(DatabaseType::Postgres, sql, 2),
-        concat!(
-            "note = $$literal $1$$ AND id = $4 ",
-            "/* keep $3 */ ",
-            "-- keep $4\n",
-            "AND body = $tag$still $5$tag$"
-        )
-    );
-}
-
-#[test]
-fn test_rebase_placeholders_skips_escape_string_literals() {
-    let sql = "note = E'price isn\\'t $5' AND id = $1 AND raw = e'keep \\$2 here'";
-
-    assert_eq!(
-        db_sql::rebase_placeholders(DatabaseType::Postgres, sql, 4),
-        "note = E'price isn\\'t $5' AND id = $5 AND raw = e'keep \\$2 here'"
-    );
-}
-
-#[test]
-fn test_format_column_simple() {
-    assert_eq!(
-        db_sql::format_column(DatabaseType::Postgres, "name"),
-        "\"name\""
-    );
-    assert_eq!(db_sql::format_column(DatabaseType::MySQL, "name"), "`name`");
-    assert_eq!(
-        db_sql::format_column(DatabaseType::MariaDB, "name"),
-        "`name`"
-    );
-}
-
-#[test]
-fn test_format_column_dotted() {
-    assert_eq!(
-        db_sql::format_column(DatabaseType::Postgres, "users.name"),
-        "\"users\".\"name\""
-    );
-    assert_eq!(
-        db_sql::format_column(DatabaseType::MySQL, "users.name"),
-        "`users`.`name`"
-    );
-    assert_eq!(
-        db_sql::format_column(DatabaseType::MariaDB, "users.name"),
-        "`users`.`name`"
-    );
-}
-
-#[test]
-fn test_format_column_expression() {
-    assert_eq!(
-        db_sql::format_column_or_trusted_expression(DatabaseType::Postgres, "COUNT(*)"),
-        "COUNT(*)"
-    );
-}
-
-#[test]
-fn test_format_column_quotes_non_identifier_input() {
-    assert_eq!(
-        db_sql::format_column(DatabaseType::Postgres, "COUNT(*)"),
-        "\"COUNT(*)\""
-    );
-    assert_eq!(
-        db_sql::format_column(DatabaseType::Postgres, "name\" OR 1=1 --"),
-        "\"name\"\" OR 1=1 --\""
-    );
+fn test_format_column() {
+    for (db_type, input, column, trusted) in [
+        (DatabaseType::Postgres, "name", "\"name\"", "\"name\""),
+        (DatabaseType::MySQL, "name", "`name`", "`name`"),
+        (DatabaseType::MariaDB, "name", "`name`", "`name`"),
+        (
+            DatabaseType::Postgres,
+            "users.name",
+            "\"users\".\"name\"",
+            "\"users\".\"name\"",
+        ),
+        (
+            DatabaseType::MySQL,
+            "users.name",
+            "`users`.`name`",
+            "`users`.`name`",
+        ),
+        (
+            DatabaseType::MariaDB,
+            "users.name",
+            "`users`.`name`",
+            "`users`.`name`",
+        ),
+        (
+            DatabaseType::Postgres,
+            "COUNT(*)",
+            "\"COUNT(*)\"",
+            "COUNT(*)",
+        ),
+        (
+            DatabaseType::Postgres,
+            "name\" OR 1=1 --",
+            "\"name\"\" OR 1=1 --\"",
+            "name\" OR 1=1 --",
+        ),
+    ] {
+        assert_eq!(
+            db_sql::format_column(db_type, input),
+            column,
+            "{db_type:?}: {input}"
+        );
+        assert_eq!(
+            db_sql::format_column_or_trusted_expression(db_type, input),
+            trusted,
+            "{db_type:?}: {input}"
+        );
+    }
 }
 
 #[test]
@@ -566,68 +609,17 @@ fn test_raw_sql_fragment_validation_rejects_mysql_hash_comment() {
 }
 
 #[test]
-fn test_raw_sql_fragment_validation_is_string_literal_aware() {
-    db_sql::validate_raw_sql_fragment("WHERE raw SQL", "\"note\" = 'issue #42 -- urgent'")
-        .expect("comment introducers inside a string literal are just characters");
-
-    let unterminated =
-        db_sql::validate_raw_sql_fragment("WHERE raw SQL", "\"note\" = 'oops").unwrap_err();
-    assert!(
-        unterminated.contains("unsafe WHERE raw SQL"),
-        "{unterminated}"
-    );
-}
-
-#[test]
-fn test_having_validation_rejects_subquery_like_payload() {
-    let err = db_sql::validate_having_sql_fragment(
-        "HAVING raw SQL",
-        "1 = 1 OR (SELECT password FROM users LIMIT 1)::text = 'x'",
-    )
-    .unwrap_err();
-
-    assert!(err.contains("unsafe HAVING raw SQL"));
-}
-
-#[test]
-fn test_having_validation_allows_basic_aggregate_predicates() {
-    db_sql::validate_having_sql_fragment("HAVING raw SQL", "COUNT(*) > 1")
-        .expect("COUNT(*) predicate should be allowed");
-    db_sql::validate_having_sql_fragment(
-        "HAVING raw SQL",
+fn test_having_validation_allows_aggregate_predicates_and_expression_syntax() {
+    for sql in [
+        "COUNT(*) > 1",
         "SUM(\"amount\") >= 10 AND AVG(\"amount\") < 20",
-    )
-    .expect("aggregate predicates over quoted identifiers should be allowed");
-}
-
-#[test]
-fn test_having_validation_allows_custom_functions_and_from_based_expressions() {
-    db_sql::validate_having_sql_fragment("HAVING raw SQL", "STDDEV(\"amount\") > 0")
-        .expect("custom aggregate functions should be allowed");
-    db_sql::validate_having_sql_fragment(
-        "HAVING raw SQL",
+        "STDDEV(\"amount\") > 0",
         "EXTRACT(YEAR FROM \"created_at\") >= 2024",
-    )
-    .expect("FROM-based expression syntax should be allowed");
-    db_sql::validate_having_sql_fragment(
-        "HAVING raw SQL",
         "\"status\" IS DISTINCT FROM 'archived'",
-    )
-    .expect("IS DISTINCT FROM predicates should be allowed");
-}
-
-#[test]
-fn test_subquery_validation_rejects_non_select_sql() {
-    let err = db_sql::validate_subquery_sql("DELETE FROM users").unwrap_err();
-    assert!(err.contains("unsafe subquery"));
-}
-
-#[test]
-fn test_subquery_validation_rejects_top_level_compound_queries() {
-    let err =
-        db_sql::validate_subquery_sql("SELECT id FROM users UNION SELECT password FROM users")
-            .unwrap_err();
-    assert!(err.contains("top-level 'union' queries are not allowed here"));
+    ] {
+        db_sql::validate_having_sql_fragment("HAVING raw SQL", sql)
+            .unwrap_or_else(|error| panic!("{sql}: {error}"));
+    }
 }
 
 #[test]
@@ -649,32 +641,17 @@ fn test_subquery_validation_tells_a_function_from_a_statement() {
     assert!(db_sql::validate_having_sql_fragment("HAVING", "COUNT(*) > 1 LEFT JOIN x").is_err());
 }
 
+/// A template's `?` is a placeholder only outside quoted text and comments: a
+/// string literal, a quoted identifier, a dollar-quoted string, a comment, or
+/// the brackets the engine reads as quoted and never binds a `?` inside.
 #[test]
-fn test_compound_subquery_validation_allows_recursive_cte_shape() {
-    db_sql::validate_compound_subquery_sql("SELECT 1 UNION ALL SELECT 2")
-        .expect("recursive CTE bodies should allow top-level UNION ALL");
-}
+fn test_template_placeholders_skip_quoted_text() {
+    const NESTED_TEMPLATE: &str = "? /* ? /* ? */ ? */ + '?' + $$?$$ + \"?\" -- ?\n + ?";
 
-#[test]
-fn test_a_question_mark_in_quotes_is_no_placeholder() {
-    assert_eq!(
-        db_sql::count_template_placeholders("MAX(note) LIKE '%?%'"),
-        0
-    );
-    assert_eq!(
-        db_sql::count_template_placeholders("SUM(\"a?\") > ? AND b = '?'"),
-        1
-    );
-    assert_eq!(
-        db_sql::map_template_placeholders("x = ? AND y LIKE 'it''s ?' AND z = ?", || "$"
-            .to_string()),
-        "x = $ AND y LIKE 'it''s ?' AND z = $"
-    );
-}
-
-#[test]
-fn a_question_mark_in_a_dollar_quoted_string_is_no_placeholder() {
     for (template, count) in [
+        ("MAX(note) LIKE '%?%'", 0),
+        ("SUM(\"a?\") > ? AND b = '?'", 1),
+        ("tags && ARRAY[?] AND id = ?", 1),
         ("name = $$?$$ AND id = ?", 1),
         ("name = $tag$ it's ? $tag$ AND id = ?", 1),
         // A tag closes only on the same tag.
@@ -684,6 +661,8 @@ fn a_question_mark_in_a_dollar_quoted_string_is_no_placeholder() {
         ("a = $$ ? AND b = ?", 2),
         ("a = $1 AND b = ?", 1),
         ("price$$ = ? AND b$$ = ?", 2),
+        // Nested comments, quoted identifiers and line comments hide a `?` too.
+        (NESTED_TEMPLATE, 2),
     ] {
         assert_eq!(
             db_sql::count_template_placeholders(template),
@@ -691,8 +670,22 @@ fn a_question_mark_in_a_dollar_quoted_string_is_no_placeholder() {
             "{template}"
         );
     }
+
+    for (template, expected) in [
+        (
+            "x = ? AND y LIKE 'it''s ?' AND z = ?",
+            "x = $ AND y LIKE 'it''s ?' AND z = $",
+        ),
+        ("name = $$?$$ AND id = ?", "name = $$?$$ AND id = $"),
+    ] {
+        assert_eq!(
+            db_sql::map_template_placeholders(template, || "$".to_string()),
+            expected,
+            "{template}"
+        );
+    }
     assert_eq!(
-        db_sql::map_template_placeholders("name = $$?$$ AND id = ?", || "$1".to_string()),
-        "name = $$?$$ AND id = $1"
+        db_sql::render_template(DatabaseType::Postgres, NESTED_TEMPLATE, 1),
+        "$1 /* ? /* ? */ ? */ + '?' + $$?$$ + \"?\" -- ?\n + $2"
     );
 }

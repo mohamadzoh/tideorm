@@ -2,55 +2,25 @@ mod logging_operation_detection {
     use tideorm::logging::QueryOperation;
 
     #[test]
-    fn test_all_operations_detected_correctly() {
-        assert_eq!(
-            QueryOperation::from_sql("SELECT * FROM users"),
-            QueryOperation::Select
-        );
-        assert_eq!(
-            QueryOperation::from_sql("INSERT INTO users VALUES (1)"),
-            QueryOperation::Insert
-        );
-        assert_eq!(
-            QueryOperation::from_sql("UPDATE users SET name = 'x'"),
-            QueryOperation::Update
-        );
-        assert_eq!(
-            QueryOperation::from_sql("DELETE FROM users WHERE id = 1"),
-            QueryOperation::Delete
-        );
-        assert_eq!(
-            QueryOperation::from_sql("BEGIN"),
-            QueryOperation::Transaction
-        );
-        assert_eq!(
-            QueryOperation::from_sql("COMMIT"),
-            QueryOperation::Transaction
-        );
-        assert_eq!(
-            QueryOperation::from_sql("ROLLBACK"),
-            QueryOperation::Transaction
-        );
-        assert_eq!(
-            QueryOperation::from_sql("CREATE TABLE foo (id INT)"),
-            QueryOperation::Unknown
-        );
+    fn test_operation_comes_from_the_leading_keyword() {
+        for (sql, operation) in [
+            ("SELECT * FROM users", QueryOperation::Select),
+            ("  select * from users", QueryOperation::Select),
+            ("INSERT INTO users VALUES (1)", QueryOperation::Insert),
+            ("  insert into users", QueryOperation::Insert),
+            ("UPDATE users SET name = 'x'", QueryOperation::Update),
+            ("DELETE FROM users WHERE id = 1", QueryOperation::Delete),
+            ("BEGIN", QueryOperation::Transaction),
+            ("COMMIT", QueryOperation::Transaction),
+            ("ROLLBACK", QueryOperation::Transaction),
+            ("CREATE TABLE foo (id INT)", QueryOperation::Unknown),
+        ] {
+            assert_eq!(QueryOperation::from_sql(sql), operation, "{sql:?}");
+        }
     }
 
     #[test]
-    fn test_operation_case_insensitive() {
-        assert_eq!(
-            QueryOperation::from_sql("  select * from users"),
-            QueryOperation::Select
-        );
-        assert_eq!(
-            QueryOperation::from_sql("  insert into users"),
-            QueryOperation::Insert
-        );
-    }
-
-    #[test]
-    fn test_operation_as_str_roundtrip() {
+    fn test_operation_display_matches_as_str() {
         for op in [
             QueryOperation::Select,
             QueryOperation::Insert,
@@ -71,18 +41,16 @@ mod logging_entry_formatting {
     use tideorm::logging::QueryLogEntry;
 
     #[test]
-    fn test_log_entry_is_slow_with_various_thresholds() {
+    fn test_log_entry_is_slow_at_or_past_the_threshold() {
         let entry = QueryLogEntry::new("SELECT 1").with_duration(Duration::from_millis(150));
 
         assert!(entry.is_slow(100));
         assert!(entry.is_slow(150));
         assert!(!entry.is_slow(200));
-    }
-
-    #[test]
-    fn test_log_entry_no_duration_is_not_slow() {
-        let entry = QueryLogEntry::new("SELECT 1");
-        assert!(!entry.is_slow(0));
+        assert!(
+            !QueryLogEntry::new("SELECT 1").is_slow(0),
+            "an entry with no duration is never slow"
+        );
     }
 
     #[test]
@@ -142,29 +110,30 @@ mod logging_level_parsing {
     use tideorm::logging::LogLevel;
 
     #[test]
-    fn test_log_level_parse_all_variants() {
-        assert_eq!(LogLevel::parse_str("off"), LogLevel::Off);
-        assert_eq!(LogLevel::parse_str("none"), LogLevel::Off);
-        assert_eq!(LogLevel::parse_str("0"), LogLevel::Off);
-        assert_eq!(LogLevel::parse_str("error"), LogLevel::Error);
-        assert_eq!(LogLevel::parse_str("1"), LogLevel::Error);
-        assert_eq!(LogLevel::parse_str("warn"), LogLevel::Warn);
-        assert_eq!(LogLevel::parse_str("warning"), LogLevel::Warn);
-        assert_eq!(LogLevel::parse_str("2"), LogLevel::Warn);
-        assert_eq!(LogLevel::parse_str("info"), LogLevel::Info);
-        assert_eq!(LogLevel::parse_str("3"), LogLevel::Info);
-        assert_eq!(LogLevel::parse_str("debug"), LogLevel::Debug);
-        assert_eq!(LogLevel::parse_str("4"), LogLevel::Debug);
-        assert_eq!(LogLevel::parse_str("trace"), LogLevel::Trace);
-        assert_eq!(LogLevel::parse_str("all"), LogLevel::Trace);
-        assert_eq!(LogLevel::parse_str("5"), LogLevel::Trace);
-    }
-
-    #[test]
-    fn test_log_level_parse_unknown_defaults_to_off() {
-        assert_eq!(LogLevel::parse_str("verbose"), LogLevel::Off);
-        assert_eq!(LogLevel::parse_str(""), LogLevel::Off);
-        assert_eq!(LogLevel::parse_str("garbage"), LogLevel::Off);
+    fn test_log_level_parse_names_and_numbers() {
+        for (text, level) in [
+            ("off", LogLevel::Off),
+            ("none", LogLevel::Off),
+            ("0", LogLevel::Off),
+            ("error", LogLevel::Error),
+            ("1", LogLevel::Error),
+            ("warn", LogLevel::Warn),
+            ("warning", LogLevel::Warn),
+            ("2", LogLevel::Warn),
+            ("info", LogLevel::Info),
+            ("3", LogLevel::Info),
+            ("debug", LogLevel::Debug),
+            ("4", LogLevel::Debug),
+            ("trace", LogLevel::Trace),
+            ("all", LogLevel::Trace),
+            ("5", LogLevel::Trace),
+            // Anything else turns logging off.
+            ("verbose", LogLevel::Off),
+            ("", LogLevel::Off),
+            ("garbage", LogLevel::Off),
+        ] {
+            assert_eq!(LogLevel::parse_str(text), level, "{text:?}");
+        }
     }
 
     #[test]
@@ -183,24 +152,18 @@ mod logging_query_timer {
 
     #[test]
     fn test_query_timer_finish_measures_elapsed_time() {
-        let timer = QueryTimer::start("SELECT 1");
+        let timer = QueryTimer::start("INSERT INTO users VALUES (1)").with_table("users");
         std::thread::sleep(Duration::from_millis(10));
         let entry = timer.finish();
+        assert_eq!(entry.table, Some("users".to_string()));
+        assert!(entry.success);
         assert!(
             entry
                 .duration
-                .is_some_and(|duration| duration >= Duration::from_millis(5))
+                .is_some_and(|duration| duration >= Duration::from_millis(5)),
+            "{:?}",
+            entry.duration
         );
-    }
-
-    #[test]
-    fn test_query_timer_finish_creates_entry() {
-        let timer = QueryTimer::start("INSERT INTO users VALUES (1)").with_table("users");
-        std::thread::sleep(Duration::from_millis(5));
-        let entry = timer.finish();
-        assert_eq!(entry.table, Some("users".to_string()));
-        assert!(entry.duration.is_some());
-        assert!(entry.success);
     }
 
     #[test]

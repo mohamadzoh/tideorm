@@ -1,8 +1,9 @@
 //! Regressions found by code reviews and behavioral audits, reproduced on SQLite.
 //!
-//! Each test owns an in-memory database, so tests share no rows. The modules
-//! follow the area under test; models and databases that several of them use
-//! live in `fixtures`. Run the whole suite with every module feature:
+//! Each test owns its database, in memory or in a file of its own under the
+//! target directory, so tests share no rows. The modules follow the area under
+//! test; models and databases that several of them use live in `fixtures`.
+//! Run the whole suite with every module feature:
 //!
 //! ```text
 //! cargo test --test sqlite_regressions --no-default-features --features "sqlite,runtime-tokio,attachments,translations,fulltext,entity-manager,dirty-tracking,encrypted-fields"

@@ -5,6 +5,7 @@ use super::*;
 #[test]
 fn report_select_star_uses_sql_tokens_like_the_analyzer() {
     for (sql, expected) in [
+        ("SELECT * FROM users", true),
         ("SELECT 'SELECT *' AS label", false),
         ("SELECT id /* SELECT * */ FROM users", false),
         ("SELECT\n /* columns */ * FROM users", true),
@@ -64,13 +65,6 @@ fn report_n_plus_one_counts_database_reads_only() {
 }
 
 #[test]
-fn test_query_analyzer() {
-    let suggestions = QueryAnalyzer::analyze("SELECT * FROM users");
-    assert!(!suggestions.is_empty());
-    assert!(suggestions.iter().any(|s| s.title.contains("SELECT *")));
-}
-
-#[test]
 fn test_query_complexity() {
     let simple = QueryAnalyzer::estimate_complexity("SELECT id FROM users WHERE id = 1");
     assert_eq!(simple, QueryComplexity::Simple);
@@ -100,17 +94,6 @@ async fn test_profile_future_records_enabled_queries() {
 
     GlobalProfiler::disable();
     GlobalProfiler::reset();
-}
-
-#[tokio::test]
-async fn test_profile_future_does_not_record_when_disabled() {
-    GlobalProfiler::disable();
-    GlobalProfiler::reset();
-
-    let value = __profile_future(async { 7_u64 }).await;
-
-    assert_eq!(value, 7);
-    assert_eq!(GlobalProfiler::stats().total_queries, 0);
 }
 
 #[tokio::test]

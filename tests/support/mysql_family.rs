@@ -1,14 +1,16 @@
-//! Scenarios for MySQL and MariaDB only, which both of their targets run: how
-//! raw SQL rows decode, and JSON functions the other backends lack.
+//! Scenarios for MySQL and MariaDB only, which both of their targets run:
+//! `change_column`, how raw SQL rows decode, the session-scoped migration
+//! lock, seeding on a one-connection pool, and how a pool tells the two
+//! servers apart.
 //!
-//! The including target supplies `mod backend` with `DATABASE_TYPE` and
-//! `async fn connect() -> bool`, and the shared scenarios as `mod parity`.
+//! The including target supplies `mod backend` with `DATABASE_TYPE`,
+//! `database_url()` and `async fn connect() -> bool`.
 
 use tideorm::Database;
 use tideorm::config::DatabaseType;
 use tideorm::prelude::*;
 
-use super::{backend, parity};
+use super::backend;
 
 /// `change_column` keeps what MySQL's `MODIFY COLUMN` would drop — NOT NULL,
 /// the default, AUTO_INCREMENT, the comment — as PostgreSQL's `ALTER TYPE`
@@ -185,7 +187,8 @@ async fn raw_time_values_keep_their_sign_and_hours() {
         })]
     );
 
-    // A model's `TIME` column, which the driver reads without its sign.
+    // A model's `TIME` column, which the driver's own decoding reads without
+    // its sign, plucks with it.
     #[tideorm::model(table = "test_time_spans")]
     struct TimeSpan {
         #[tideorm(primary_key)]
@@ -210,33 +213,6 @@ async fn raw_time_values_keep_their_sign_and_hours() {
     Database::execute("DROP TABLE `test_time_spans`")
         .await
         .expect("failed to drop test_time_spans");
-}
-
-#[tokio::test]
-async fn json_extract_filters_on_a_json_column() {
-    if !parity::setup().await {
-        return;
-    }
-
-    for (name, brand) in [("Laptop", "TechCorp"), ("Phone", "MobileCo")] {
-        parity::TestProduct {
-            id: 0,
-            name: name.to_string(),
-            category: "Electronics".to_string(),
-            price: 100,
-            metadata: Some(serde_json::json!({ "brand": brand })),
-        }
-        .save()
-        .await
-        .expect("Failed to save product");
-    }
-
-    let rows = Database::raw_json(
-        "SELECT `name` FROM `test_products` WHERE JSON_UNQUOTE(JSON_EXTRACT(`metadata`, '$.brand')) = 'TechCorp'",
-    )
-    .await
-    .expect("JSON_EXTRACT query should run");
-    assert_eq!(rows, vec![serde_json::json!({ "name": "Laptop" })]);
 }
 
 /// A migrator cancelled while it holds the migration lock frees the lock. The
@@ -331,21 +307,6 @@ async fn a_cancelled_migration_run_frees_the_migration_lock() {
         .expect("failed to drop the ledger");
 }
 
-/// A database opened with `Database::connect`, which reads no configuration,
-/// knows whether it reached MariaDB, as `TideConfig::connect` does: it
-/// rendered MySQL's SQL for MariaDB, such as `CAST(? AS JSON)`, which MariaDB
-/// lacks.
-#[tokio::test]
-async fn a_database_opened_directly_knows_its_server() {
-    if !backend::connect().await {
-        return;
-    }
-    let db = Database::connect(backend::database_url())
-        .await
-        .expect("connect failed");
-    assert_eq!(db.backend(), backend::DATABASE_TYPE);
-}
-
 /// A seeder inside a transaction that holds the pool's only connection finds
 /// its ledger on that connection. The ledger was created, `IF NOT EXISTS`,
 /// on a second pooled connection every time, which never came, so the seeder
@@ -384,10 +345,13 @@ pub struct DialectDocument {
     pub data: serde_json::Value,
 }
 
-/// The SQL a statement renders follows the pool it runs on, which asked the
-/// server what it is when it opened, never the configured backend: inside a
-/// transaction on a pool that is not the global one, and under a
-/// configuration naming the other server.
+/// A pool knows which server it reached, even one opened with
+/// `Database::connect`, which reads no configuration, and the SQL a statement
+/// renders follows the pool it runs on, never the configured backend: inside
+/// a transaction on a pool that is not the global one, and under a
+/// configuration naming the other server. A pool opened directly used to
+/// render MySQL's SQL for MariaDB, such as `CAST(? AS JSON)`, which MariaDB
+/// lacks.
 #[tokio::test]
 async fn json_equality_follows_the_pool_not_the_configuration() {
     if !backend::connect().await {
@@ -420,6 +384,11 @@ async fn json_equality_follows_the_pool_not_the_configuration() {
             Some(database_type) => config.database_type(database_type).apply(),
             None => config.apply(),
         }
+        assert_eq!(
+            pool.backend(),
+            backend::DATABASE_TYPE,
+            "configured {configured:?}"
+        );
         let in_transaction = pool
             .transaction(|_| Box::pin(async move { matching().get().await }))
             .await

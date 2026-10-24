@@ -178,14 +178,53 @@ fn skipped_flattened_relations_leave_public_fields_serializable() {
     );
 }
 
+#[tideorm::model(table = "serialization_text_params")]
+struct TextParamsModel {
+    #[tideorm(primary_key)]
+    id: i64,
+    params: String,
+    enabled: bool,
+}
+
+#[tideorm::model(table = "serialization_structured_params")]
+struct StructuredParamsModel {
+    #[tideorm(primary_key)]
+    id: i64,
+    params: serde_json::Value,
+    title: String,
+}
+
+/// `to_hash_map` writes every field as text, except a `params` field holding
+/// a JSON object or array, which it leaves out.
 #[test]
-fn hash_map_output_key_hides_structured_params() {
+fn to_hash_map_leaves_out_only_a_structured_params_field() {
+    use crate::model::Model;
+
+    let map = TextParamsModel {
+        id: 7,
+        params: "keep me".to_string(),
+        enabled: true,
+    }
+    .to_hash_map();
+    assert_eq!(map.get("id").map(String::as_str), Some("7"));
+    assert_eq!(map.get("params").map(String::as_str), Some("keep me"));
+    assert_eq!(map.get("enabled").map(String::as_str), Some("true"));
+
+    let map = StructuredParamsModel {
+        id: 8,
+        params: json!({"view": "minimal", "locale": "en"}),
+        title: "Structured Output".to_string(),
+    }
+    .to_hash_map();
+    assert_eq!(map.get("id").map(String::as_str), Some("8"));
     assert_eq!(
-        hash_map_output_key("params", &json!({"view": "minimal"})),
-        None
+        map.get("title").map(String::as_str),
+        Some("Structured Output")
     );
+    assert_eq!(map.get("params"), None);
+    assert_eq!(map.get("_params"), None);
+
     assert_eq!(hash_map_output_key("params", &json!(["minimal"])), None);
-    assert_eq!(hash_map_output_key("title", &json!("title")), Some("title"));
 }
 
 // Three models wired into a two-hop chain (post -> author -> profile) so the
@@ -256,9 +295,20 @@ fn serialization_test_post() -> SerializationPost {
 }
 
 #[test]
-fn to_json_filters_a_relation_payload_with_the_target_models_hidden_list() {
+fn to_json_filters_each_relation_payload_with_its_own_models_hidden_list() {
+    let profile = SerializationProfile {
+        id: 3,
+        author_id: 7,
+        bio: "Writes things".to_string(),
+        secret_token: "tok_live".to_string(),
+    }
+    .with_relations();
+
+    let mut author = serialization_test_author();
+    author.profile.set_cached(Some(profile));
+
     let mut post = serialization_test_post();
-    post.author.set_cached(Some(serialization_test_author()));
+    post.author.set_cached(Some(author));
 
     let value = to_json(&post, None);
 
@@ -278,30 +328,10 @@ fn to_json_filters_a_relation_payload_with_the_target_models_hidden_list() {
         Some(&json!("author notes")),
         "the post's hidden list must not be applied to the author payload"
     );
-}
 
-#[test]
-fn to_json_filters_relation_payloads_at_every_depth() {
-    let profile = SerializationProfile {
-        id: 3,
-        author_id: 7,
-        bio: "Writes things".to_string(),
-        secret_token: "tok_live".to_string(),
-    }
-    .with_relations();
-
-    let mut author = serialization_test_author();
-    author.profile.set_cached(Some(profile));
-
-    let mut post = serialization_test_post();
-    post.author.set_cached(Some(author));
-
-    let value = to_json(&post, None);
-    let profile = value
-        .get("author")
-        .and_then(|author| author.get("profile"))
+    let profile = author
+        .get("profile")
         .expect("the nested profile should be serialized");
-
     assert_eq!(
         profile.get("secret_token"),
         None,
@@ -373,17 +403,21 @@ struct HiddenAttachmentModel {
     files: Option<serde_json::Value>,
 }
 
+/// A model holding a hidden `avatar` and a visible `cover`.
+#[cfg(feature = "attachments")]
+fn with_avatar_and_cover(id: i64) -> HiddenAttachmentModel {
+    let attachment =
+        |key: &str| json!({"key": key, "filename": key, "created_at": "2026-01-01T00:00:00Z"});
+    HiddenAttachmentModel {
+        id,
+        files: Some(json!({"avatar": attachment("a.png"), "cover": attachment("c.png")})),
+    }
+}
+
 #[cfg(feature = "attachments")]
 #[test]
 fn to_json_keeps_a_hidden_attachment_hidden() {
-    let attachment =
-        |key: &str| json!({"key": key, "filename": key, "created_at": "2026-01-01T00:00:00Z"});
-    let model = HiddenAttachmentModel {
-        id: 1,
-        files: Some(json!({"avatar": attachment("a.png"), "cover": attachment("c.png")})),
-    };
-
-    let payload = to_json(&model, None);
+    let payload = to_json(&with_avatar_and_cover(1), None);
 
     assert!(payload.get("avatar").is_none(), "{payload}");
     assert!(payload.get("cover").is_some(), "{payload}");
@@ -433,50 +467,6 @@ fn hidden_fields_default_to_the_soft_delete_field_and_resolve_column_names() {
         None,
     );
     assert!(payload.get("secret").is_none(), "{payload}");
-}
-
-#[tideorm::model(table = "serialization_test_indexed")]
-#[index("display_name")]
-struct IndexedByFieldModel {
-    #[tideorm(primary_key)]
-    id: i64,
-    #[tideorm(column = "display")]
-    display_name: String,
-}
-
-#[test]
-fn an_index_naming_a_field_indexes_its_column() {
-    use crate::model::ModelMeta;
-
-    let indexes = IndexedByFieldModel::indexes();
-    assert_eq!(indexes.len(), 1);
-    assert_eq!(indexes[0].columns, ["display"]);
-}
-
-#[tideorm::model(table = "serialization_test_field_indexed")]
-struct FieldIndexedModel {
-    #[tideorm(primary_key)]
-    id: i64,
-    #[index]
-    name: String,
-    #[unique_index]
-    #[tideorm(column = "mail")]
-    email: String,
-}
-
-/// `#[index]` and `#[unique_index]` on a field index its column; they were
-/// accepted there and ignored.
-#[test]
-fn a_field_index_attribute_indexes_the_fields_column() {
-    use crate::model::ModelMeta;
-
-    let indexes = FieldIndexedModel::indexes();
-    assert_eq!(indexes.len(), 1);
-    assert_eq!(indexes[0].columns, ["name"]);
-    let unique = FieldIndexedModel::unique_indexes();
-    assert_eq!(unique.len(), 1);
-    assert_eq!(unique[0].columns, ["mail"]);
-    assert!(unique[0].unique);
 }
 
 #[tideorm::model(table = "serialization_test_sequence_owners")]
@@ -687,17 +677,12 @@ struct AttachmentParent {
 #[cfg(feature = "attachments")]
 #[test]
 fn a_nested_payload_drops_a_hidden_attachment() {
-    let attachment =
-        |key: &str| json!({"key": key, "filename": key, "created_at": "2026-01-01T00:00:00Z"});
     let mut parent = AttachmentParent {
         id: 1,
         child_id: 2,
         ..Default::default()
     };
-    parent.child.set_cached(Some(HiddenAttachmentModel {
-        id: 2,
-        files: Some(json!({"avatar": attachment("a.png"), "cover": attachment("c.png")})),
-    }));
+    parent.child.set_cached(Some(with_avatar_and_cover(2)));
 
     let payload = to_json(&parent, None);
     let files = &payload["child"]["files"];

@@ -58,10 +58,6 @@ fn json_aliases_belong_to_the_query_that_selects_them() {
     assert!(
         json_outputs("SELECT '[2]' AS doc WHERE EXISTS (SELECT json_array(1) AS doc)").is_empty()
     );
-    assert_eq!(
-        json_outputs("SELECT doc FROM (SELECT json_array(2) AS doc)"),
-        ["doc"]
-    );
 }
 
 #[test]

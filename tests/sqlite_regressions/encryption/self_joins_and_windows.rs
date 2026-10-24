@@ -1,9 +1,8 @@
 //! Self-join aliases and window functions over encrypted columns.
 
-use crate::fixtures::items_database;
+use crate::fixtures::{encrypted_error, global_memory_database};
 use tideorm::prelude::*;
 
-#[cfg(feature = "encrypted-fields")]
 #[tideorm::model(table = "behavior_secrets", encrypted = "secret")]
 struct Secret {
     #[tideorm(primary_key)]
@@ -11,16 +10,13 @@ struct Secret {
     secret: String,
 }
 
-#[cfg(feature = "encrypted-fields")]
-#[tokio::test]
-async fn encrypted_windows_reject_ciphertext_comparisons() {
-    let db = items_database().await;
+/// `behavior_secrets` holding `rows`, encrypted, as the global database.
+async fn database(rows: &[(i64, &str)]) -> Database {
     tideorm::tokenization::TokenConfig::set_encryption_key("behavior-audit-key");
-    db.exec_raw("CREATE TABLE behavior_secrets(id INTEGER PRIMARY KEY,secret TEXT)")
-        .await
-        .unwrap();
-    Database::set_global(db.clone()).unwrap();
-    for (id, secret) in [(1, "z"), (2, "a")] {
+    let db =
+        global_memory_database("CREATE TABLE behavior_secrets(id INTEGER PRIMARY KEY,secret TEXT)")
+            .await;
+    for &(id, secret) in rows {
         Secret::create(Secret {
             id,
             secret: secret.into(),
@@ -28,12 +24,26 @@ async fn encrypted_windows_reject_ciphertext_comparisons() {
         .await
         .unwrap();
     }
-    assert!(
-        Secret::query_with(&db)
-            .min::<String>("secret")
-            .await
-            .is_err()
-    );
+    db
+}
+
+/// The table joined to itself as `other`.
+fn self_joined(db: &Database) -> QueryBuilder<Secret> {
+    Secret::query_with(db).inner_join_as(
+        "behavior_secrets",
+        "other",
+        "behavior_secrets.id",
+        "other.id",
+    )
+}
+
+/// Comparing ciphertext is refused through a self-join alias as through the
+/// table's own name: in windows, distinct counts, MIN and MAX, DISTINCT and
+/// GROUP BY.
+#[tokio::test]
+async fn self_join_aliases_cannot_compare_ciphertext() {
+    let db = database(&[(1, "z"), (2, "a")]).await;
+    encrypted_error(Secret::query_with(&db).min::<String>("secret").await);
     for column in ["secret", "behavior_secrets.secret", "other.secret"] {
         for window in [
             WindowFunction::new(WindowFunctionType::Min(column.into()), "val"),
@@ -41,34 +51,31 @@ async fn encrypted_windows_reject_ciphertext_comparisons() {
             WindowFunction::new(WindowFunctionType::RowNumber, "val").partition_by(column),
             WindowFunction::new(WindowFunctionType::RowNumber, "val").order_by(column, Order::Asc),
         ] {
-            let error = Secret::query_with(&db)
-                .inner_join_as(
-                    "behavior_secrets",
-                    "other",
-                    "behavior_secrets.id",
-                    "other.id",
-                )
-                .window(window)
-                .get_json()
-                .await
-                .unwrap_err();
-            assert!(error.to_string().contains("encrypted"), "{error}");
+            encrypted_error(self_joined(&db).window(window).get_json().await);
         }
     }
     // A SELECT alias must not hide the encrypted physical window input.
-    assert!(
+    encrypted_error(
         Secret::query_with(&db)
             .select(vec!["id AS secret"])
             .distinct()
             .window(WindowFunction::new(
                 WindowFunctionType::Min("secret".into()),
-                "val"
+                "val",
             ))
             .get_json()
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("encrypted")
+            .await,
+    );
+    encrypted_error(self_joined(&db).count_distinct("other.secret").await);
+    encrypted_error(self_joined(&db).min::<String>("other.secret").await);
+    encrypted_error(self_joined(&db).max::<String>("other.secret").await);
+    let copied = || self_joined(&db).select(vec!["other.secret AS copied"]);
+    encrypted_error(copied().distinct().get_json().await);
+    encrypted_error(copied().group_by("other.secret").get_json().await);
+
+    assert_eq!(
+        self_joined(&db).count_distinct("other.id").await.unwrap(),
+        2
     );
     let rows = Secret::query_with(&db)
         .window(WindowFunction::new(
@@ -81,21 +88,9 @@ async fn encrypted_windows_reject_ciphertext_comparisons() {
     assert_eq!(rows[0]["val"], 1);
 }
 
-#[cfg(feature = "encrypted-fields")]
 #[tokio::test]
 async fn encrypted_self_join_alias_must_return_plaintext() {
-    let db = items_database().await;
-    tideorm::tokenization::TokenConfig::set_encryption_key("behavior-audit-key");
-    db.exec_raw("CREATE TABLE behavior_secrets(id INTEGER PRIMARY KEY,secret TEXT)")
-        .await
-        .unwrap();
-    Database::set_global(db.clone()).unwrap();
-    Secret::create(Secret {
-        id: 1,
-        secret: "hello".into(),
-    })
-    .await
-    .unwrap();
+    let db = database(&[(1, "hello")]).await;
     assert_eq!(
         Secret::query_with(&db)
             .select(vec!["secret AS copied"])
@@ -104,14 +99,7 @@ async fn encrypted_self_join_alias_must_return_plaintext() {
             .unwrap()[0]["copied"],
         "hello"
     );
-    let query = Secret::query_with(&db)
-        .inner_join_as(
-            "behavior_secrets",
-            "other",
-            "behavior_secrets.id",
-            "other.id",
-        )
-        .select(vec!["other.secret AS copied"]);
+    let query = self_joined(&db).select(vec!["other.secret AS copied"]);
     let rows = query.clone().get_json().await.unwrap();
     assert_eq!(rows[0]["copied"], "hello");
     assert_eq!(
@@ -132,13 +120,7 @@ async fn encrypted_self_join_alias_must_return_plaintext() {
         copied: String,
     }
     assert_eq!(query.get_as::<Output>().await.unwrap()[0].copied, "hello");
-    let rows = Secret::query_with(&db)
-        .inner_join_as(
-            "behavior_secrets",
-            "other",
-            "behavior_secrets.id",
-            "other.id",
-        )
+    let rows = self_joined(&db)
         .select(vec!["id"])
         .window(
             WindowFunction::new(
@@ -160,85 +142,4 @@ async fn encrypted_self_join_alias_must_return_plaintext() {
         .await
         .unwrap();
     assert_eq!(rows[0]["copied"], "plain");
-}
-
-#[cfg(feature = "encrypted-fields")]
-#[tokio::test]
-async fn encrypted_self_join_alias_must_not_bypass_distinct_guard() {
-    let db = items_database().await;
-    tideorm::tokenization::TokenConfig::set_encryption_key("behavior-audit-key");
-    db.exec_raw("CREATE TABLE behavior_secrets(id INTEGER PRIMARY KEY,secret TEXT)")
-        .await
-        .unwrap();
-    Database::set_global(db.clone()).unwrap();
-    for id in 1..=2 {
-        Secret::create(Secret {
-            id,
-            secret: "same".into(),
-        })
-        .await
-        .unwrap();
-    }
-    assert!(
-        Secret::query_with(&db)
-            .count_distinct("secret")
-            .await
-            .is_err()
-    );
-    let query = Secret::query_with(&db).inner_join_as(
-        "behavior_secrets",
-        "other",
-        "behavior_secrets.id",
-        "other.id",
-    );
-    assert!(
-        query
-            .clone()
-            .count_distinct("other.secret")
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("encrypted")
-    );
-    assert!(
-        query
-            .clone()
-            .min::<String>("other.secret")
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("encrypted")
-    );
-    assert!(
-        query
-            .clone()
-            .max::<String>("other.secret")
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("encrypted")
-    );
-    assert!(
-        query
-            .clone()
-            .select(vec!["other.secret AS copied"])
-            .distinct()
-            .get_json()
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("encrypted")
-    );
-    assert!(
-        query
-            .clone()
-            .select(vec!["other.secret AS copied"])
-            .group_by("other.secret")
-            .get_json()
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("encrypted")
-    );
-    assert_eq!(query.count_distinct("other.id").await.unwrap(), 2);
 }

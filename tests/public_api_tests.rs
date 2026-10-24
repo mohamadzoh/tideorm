@@ -2,12 +2,12 @@
 //!
 //! Black-box: these live in a normal integration-test target and reach the crate
 //! only through its public API, without needing a database connection.
-//! Run with: `cargo test --test public_api_tests`
+//! Run with: `cargo test --test public_api_tests`; the attachment and
+//! translation tests need `--features attachments,translations`.
 //!
 //! Not to be confused with `tests/unit/`, which is white-box — those files are
 //! `#[path]`-included straight into `src/`, can see private items, and run as part
 //! of `cargo test --lib`.
-#![allow(clippy::approx_constant)]
 
 #[path = "public_api_tests/core.rs"]
 mod core;

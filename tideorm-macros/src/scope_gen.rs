@@ -260,7 +260,7 @@ fn generate_scope_method(
 
     if method.sig.asyncness.is_some()
         || method.sig.constness.is_some()
-        || method.sig.unsafety.is_some()
+        || !matches!(method.sig.safety, syn::Safety::Default)
         || method.sig.abi.is_some()
     {
         return Err(syn::Error::new_spanned(
@@ -432,7 +432,10 @@ fn replace_self(tokens: TokenStream2, model_ty: &Type) -> TokenStream2 {
 }
 
 fn model_ident(model_ty: &Type) -> syn::Result<&syn::Ident> {
-    let Type::Path(TypePath { qself: None, path }) = model_ty else {
+    let Type::Path(TypePath {
+        qself: None, path, ..
+    }) = model_ty
+    else {
         return Err(syn::Error::new_spanned(
             model_ty,
             "#[tideorm::scopes] requires a concrete model type",
@@ -451,7 +454,10 @@ fn model_ident(model_ty: &Type) -> syn::Result<&syn::Ident> {
 }
 
 fn is_query_builder_type(ty: &Type, model_ty: &Type) -> bool {
-    let Type::Path(TypePath { qself: None, path }) = ty else {
+    let Type::Path(TypePath {
+        qself: None, path, ..
+    }) = ty
+    else {
         return false;
     };
 
@@ -475,7 +481,7 @@ fn is_query_builder_type(ty: &Type, model_ty: &Type) -> bool {
 }
 
 fn same_model_type(lhs: &Type, rhs: &Type) -> bool {
-    if matches!(lhs, Type::Path(TypePath { qself: None, path }) if path.is_ident("Self")) {
+    if matches!(lhs, Type::Path(TypePath { qself: None, path, .. }) if path.is_ident("Self")) {
         return true;
     }
 

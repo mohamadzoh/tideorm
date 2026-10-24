@@ -105,8 +105,5 @@ mod crud_and_key_tests;
 #[path = "sqlite_ci_smoke_test/eager_soft_delete_tests.rs"]
 mod eager_soft_delete_tests;
 
-#[path = "sqlite_ci_smoke_test/transaction_and_helpers_tests.rs"]
-mod transaction_and_helpers_tests;
-
 #[path = "sqlite_ci_smoke_test/query_context_tests.rs"]
 mod query_context_tests;

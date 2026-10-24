@@ -110,8 +110,8 @@ fn a_decoder_override_reads_the_tokens_the_model_mints() {
 
 /// A `v2.` token stripped of its prefix, an empty or garbled one, and an
 /// unknown version stay invalid tokens, and without a key the unprefixed form
-/// is a configuration error as a whole token is; tampered tokens and the
-/// missing key in general are covered by the tokenization targets.
+/// is a configuration error as a whole token is; `tests/tokenization_tests.rs`
+/// covers tampered tokens, and the tokenization unit tests the missing key.
 #[test]
 fn tampered_tokens_are_invalid_and_a_missing_key_is_a_configuration_error() {
     configure_key();

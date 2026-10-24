@@ -25,22 +25,13 @@ impl Seed for TestSeed {
     }
 }
 
-#[test]
-fn test_seed_result_new() {
-    let result = SeedResult::default();
-    assert!(result.executed.is_empty());
-    assert!(result.skipped.is_empty());
-    assert!(result.rolled_back.is_empty());
-    assert!(!result.has_executed());
-}
-
-#[test]
-fn test_seed_result_has_executed() {
-    let mut result = SeedResult::default();
-    result.executed.push(SeedInfo {
-        name: "test_seed".to_string(),
-    });
-    assert!(result.has_executed());
+fn sorted_names(seeder: &Seeder) -> Vec<String> {
+    seeder
+        .sort_seeds_by_priority_and_deps()
+        .unwrap()
+        .into_iter()
+        .map(|seed| seed.name().to_string())
+        .collect()
 }
 
 #[test]
@@ -52,6 +43,7 @@ fn test_seed_result_display() {
     result.skipped.push(SeedInfo {
         name: "category_seeder".to_string(),
     });
+    assert!(result.has_executed());
 
     let display = format!("{}", result);
     assert!(display.contains("user_seeder"));
@@ -62,33 +54,17 @@ fn test_seed_result_display() {
 
 #[test]
 fn test_seed_status_display() {
-    let status = SeedStatus {
-        name: "user_seeder".to_string(),
-        executed: true,
-        priority: 100,
-    };
-    let display = format!("{}", status);
-    assert!(display.contains("[✓]"));
-    assert!(display.contains("user_seeder"));
-    assert!(display.contains("priority: 100"));
-}
-
-#[test]
-fn test_seed_status_not_executed() {
-    let status = SeedStatus {
-        name: "product_seeder".to_string(),
-        executed: false,
-        priority: 50,
-    };
-    let display = format!("{}", status);
-    assert!(display.contains("[○]"));
-    assert!(display.contains("product_seeder"));
-}
-
-#[test]
-fn test_seeder_default() {
-    let seeder = Seeder::default();
-    assert!(seeder.seeds.is_empty());
+    for (executed, expected) in [
+        (true, "[✓] user_seeder (priority: 100)"),
+        (false, "[○] user_seeder (priority: 100)"),
+    ] {
+        let status = SeedStatus {
+            name: "user_seeder".to_string(),
+            executed,
+            priority: 100,
+        };
+        assert_eq!(status.to_string(), expected);
+    }
 }
 
 #[test]
@@ -101,14 +77,6 @@ fn names_lists_the_seeds_in_registration_order() {
     };
     let seeder = Seeder::new().add(seed("users")).add(seed("posts"));
     assert_eq!(seeder.names().collect::<Vec<_>>(), ["users", "posts"]);
-}
-
-#[test]
-fn test_seed_info() {
-    let info = SeedInfo {
-        name: "test_seed".to_string(),
-    };
-    assert_eq!(info.name, "test_seed");
 }
 
 #[test]
@@ -157,109 +125,10 @@ fn test_sort_seeds_by_priority_and_deps_orders_dependencies_before_priority() {
             dependencies: vec!["parent"],
         });
 
-    let ordered = seeder
-        .sort_seeds_by_priority_and_deps()
-        .unwrap()
-        .into_iter()
-        .map(|seed| seed.name().to_string())
-        .collect::<Vec<_>>();
-
-    assert_eq!(ordered, vec!["independent", "parent", "child"]);
-}
-
-fn sorted_names(seeder: &Seeder) -> Vec<String> {
-    seeder
-        .sort_seeds_by_priority_and_deps()
-        .unwrap()
-        .into_iter()
-        .map(|seed| seed.name().to_string())
-        .collect()
-}
-
-/// A seed and its ledger entry are one transaction, so a seed that fails part
-/// way can be fixed and run again without duplicating what it had written.
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-#[tokio::test]
-async fn a_seed_that_fails_part_way_leaves_nothing_behind() {
-    /// Writes a row, then fails.
-    struct HalfDoneSeed;
-
-    #[async_trait]
-    impl Seed for HalfDoneSeed {
-        fn name(&self) -> &str {
-            "half_done"
-        }
-
-        async fn run(&self, db: &Database) -> Result<()> {
-            db.exec_raw("INSERT INTO seeded_rows (id) VALUES (1)")
-                .await?;
-            Err(Error::configuration("the second step failed"))
-        }
-    }
-
-    Database::reset_global();
-    let db = Database::builder()
-        .url("sqlite::memory:")
-        .max_connections(1)
-        .build()
-        .await
-        .expect("sqlite in-memory connection should succeed");
-    Database::set_global(db.clone()).expect("setting global database should succeed");
-    db.exec_raw("CREATE TABLE seeded_rows (id INTEGER PRIMARY KEY)")
-        .await
-        .expect("creating the table should succeed");
-
-    let seeder = Seeder::new().add(HalfDoneSeed);
-    assert!(seeder.run().await.is_err());
-
-    let rows = db
-        .query_raw_json("SELECT COUNT(*) AS n FROM seeded_rows")
-        .await
-        .expect("counting should succeed");
-    assert_eq!(rows[0]["n"], 0, "the failed seed kept its rows");
-    let status = seeder.status().await.expect("status should load");
-    assert!(!status[0].executed, "the failed seed was recorded as run");
-
-    Database::reset_global();
-}
-
-/// Inside a transaction the seeder reads and creates its ledger on that
-/// transaction: on a one-connection pool, asking the pool for another
-/// connection never returned, and a run again in the same transaction saw
-/// nothing its first run had recorded.
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-#[tokio::test]
-async fn seeding_inside_a_transaction_uses_that_transaction() {
-    Database::reset_global();
-    let db = Database::builder()
-        .url("sqlite::memory:")
-        .max_connections(1)
-        .acquire_timeout(std::time::Duration::from_secs(2))
-        .build()
-        .await
-        .expect("sqlite in-memory connection should succeed");
-    Database::set_global(db.clone()).expect("setting global database should succeed");
-
-    let (first, second) = db
-        .transaction(|_| {
-            Box::pin(async move {
-                let seeder = Seeder::new().add(TestSeed {
-                    name: "once",
-                    priority: 0,
-                    dependencies: Vec::new(),
-                });
-                let first = seeder.run().await?;
-                let second = seeder.run().await?;
-                Ok((first, second))
-            })
-        })
-        .await
-        .expect("seeding inside a transaction should succeed");
-    assert_eq!(first.executed.len(), 1);
-    assert_eq!(second.executed.len(), 0);
-    assert_eq!(second.skipped.len(), 1);
-
-    Database::reset_global();
+    assert_eq!(
+        sorted_names(&seeder),
+        vec!["independent", "parent", "child"]
+    );
 }
 
 #[test]
@@ -314,4 +183,44 @@ fn test_equal_priorities_keep_registration_order() {
         sorted_names(&seeder),
         vec!["first", "unlocked", "second", "third"]
     );
+}
+
+/// Inside a transaction the seeder reads and creates its ledger on that
+/// transaction: on a one-connection pool, asking the pool for another
+/// connection never returned, and a run again in the same transaction saw
+/// nothing its first run had recorded.
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn seeding_inside_a_transaction_uses_that_transaction() {
+    let _guard = crate::test_support::global_db_lock().lock().await;
+    Database::reset_global();
+    let db = Database::builder()
+        .url("sqlite::memory:")
+        .max_connections(1)
+        .acquire_timeout(std::time::Duration::from_secs(2))
+        .build()
+        .await
+        .expect("sqlite in-memory connection should succeed");
+    Database::set_global(db.clone()).expect("setting global database should succeed");
+
+    let (first, second) = db
+        .transaction(|_| {
+            Box::pin(async move {
+                let seeder = Seeder::new().add(TestSeed {
+                    name: "once",
+                    priority: 0,
+                    dependencies: Vec::new(),
+                });
+                let first = seeder.run().await?;
+                let second = seeder.run().await?;
+                Ok((first, second))
+            })
+        })
+        .await
+        .expect("seeding inside a transaction should succeed");
+    assert_eq!(first.executed.len(), 1);
+    assert_eq!(second.executed.len(), 0);
+    assert_eq!(second.skipped.len(), 1);
+
+    Database::reset_global();
 }

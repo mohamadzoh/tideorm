@@ -1,9 +1,6 @@
 use crate::model::Model as ModelTrait;
 use crate::tokenization::Tokenizable as _;
 
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-use crate::Database;
-
 #[tideorm::model(table = "model_test_users")]
 struct AutoIncrementModel {
     #[tideorm(primary_key, auto_increment)]
@@ -47,36 +44,6 @@ struct TokenizedUuidKeyModel {
     id: uuid::Uuid,
 }
 
-#[tideorm::model(table = "model_test_serialization")]
-struct SerializationModel {
-    #[tideorm(primary_key)]
-    id: i64,
-    params: String,
-    enabled: bool,
-}
-
-#[tideorm::model(table = "model_test_structured_params")]
-struct StructuredParamsModel {
-    #[tideorm(primary_key)]
-    id: i64,
-    params: serde_json::Value,
-    title: String,
-}
-
-#[cfg(feature = "encrypted-fields")]
-#[tideorm::model(
-    table = "model_test_encrypted_contacts",
-    encrypted = "customer_phone_number, backup_phone"
-)]
-struct EncryptedFieldModel {
-    #[tideorm(primary_key, auto_increment)]
-    id: i64,
-    name: String,
-    #[tideorm(column = "customer_phone_number")]
-    phone_number: String,
-    backup_phone: Option<String>,
-}
-
 #[tideorm::model(table = "model_test_custom_pk_column")]
 struct CustomPrimaryKeyColumnModel {
     #[tideorm(primary_key, column = "user_id")]
@@ -113,120 +80,15 @@ struct ArchivedPostModel {
     archived_on: std::option::Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-async fn setup_model_cache_test_db() -> Database {
-    let db = crate::test_support::install_sqlite_global(&[
-        "CREATE TABLE model_test_users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
-    ])
-    .await;
-    crate::test_support::set_query_cache(true);
-    db
-}
-
-fn init_model_tokenization_test_key() {
-    crate::tokenization::TokenConfig::set_encryption_key("model-tokenization-test-key-32chars");
-}
-
-#[cfg(feature = "translations")]
-#[tideorm::model(table = "model_test_translation_profiles")]
-struct TranslationRelationProfile {
-    #[tideorm(primary_key)]
-    id: i64,
-    user_id: i64,
-    bio: String,
-}
-
-#[cfg(feature = "translations")]
-#[tideorm::model(table = "model_test_translation_posts")]
-struct TranslationRelationPost {
-    #[tideorm(primary_key)]
-    id: i64,
-    user_id: i64,
-    title: String,
-
-    #[tideorm(belongs_to = "TranslationRelationUser", foreign_key = "user_id")]
-    author: crate::relations::BelongsTo<TranslationRelationUser>,
-}
-
-#[cfg(feature = "translations")]
-#[tideorm::model(table = "model_test_translation_roles")]
-struct TranslationRelationRole {
-    #[tideorm(primary_key)]
-    id: i64,
-    name: String,
-}
-
-#[cfg(feature = "translations")]
-#[tideorm::model(table = "model_test_translation_user_roles")]
-struct TranslationRelationUserRole {
-    #[tideorm(primary_key)]
-    id: i64,
-    user_id: i64,
-    role_id: i64,
-}
-
-#[cfg(feature = "translations")]
-#[tideorm::model(table = "model_test_translation_users", translatable = "title")]
-struct TranslationRelationUser {
-    #[tideorm(primary_key)]
-    id: i64,
-    title: String,
-    translations: Option<serde_json::Value>,
-
-    #[tideorm(has_one = "TranslationRelationProfile", foreign_key = "user_id")]
-    profile: crate::relations::HasOne<TranslationRelationProfile>,
-
-    #[tideorm(has_many = "TranslationRelationPost", foreign_key = "user_id")]
-    posts: crate::relations::HasMany<TranslationRelationPost>,
-
-    #[tideorm(
-        has_many_through = "TranslationRelationRole",
-        pivot = "model_test_translation_user_roles",
-        foreign_key = "user_id",
-        related_key = "role_id"
-    )]
-    roles: crate::relations::HasManyThrough<TranslationRelationRole, TranslationRelationUserRole>,
-}
-
-#[cfg(feature = "attachments")]
-#[tideorm::model(table = "model_test_attachment_users")]
-struct AttachmentRelationUser {
-    #[tideorm(primary_key)]
-    id: i64,
-    name: String,
-}
-
-#[cfg(feature = "attachments")]
-#[tideorm::model(table = "model_test_attachment_posts", has_one_files = "thumbnail")]
-struct AttachmentRelationPost {
-    #[tideorm(primary_key)]
-    id: i64,
-    user_id: i64,
-    files: Option<serde_json::Value>,
-
-    #[tideorm(belongs_to = "AttachmentRelationUser", foreign_key = "user_id")]
-    author: crate::relations::BelongsTo<AttachmentRelationUser>,
-}
-
 #[path = "model_tests/basic_model_tests.rs"]
 mod basic_model_tests;
 
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[path = "model_tests/cache_tests.rs"]
 mod cache_tests;
 
-#[cfg(feature = "encrypted-fields")]
-#[path = "model_tests/encrypted_field_tests.rs"]
-mod encrypted_field_tests;
-
-#[cfg(feature = "dirty-tracking")]
-#[path = "model_tests/dirty_tracking_tests.rs"]
-mod dirty_tracking_tests;
-
-#[path = "model_tests/translation_tests.rs"]
-mod translation_tests;
-
-#[path = "model_tests/attachment_tests.rs"]
-mod attachment_tests;
+#[path = "model_tests/relation_wrapper_tests.rs"]
+mod relation_wrapper_tests;
 
 /// A raw-identifier field is named `type` wherever a name is a string, and a
 /// `#[validate]` on it compiles (it used to expand to `self.type`).

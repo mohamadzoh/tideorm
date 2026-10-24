@@ -1,13 +1,9 @@
 use crate::config::DatabaseType;
 use crate::internal::InternalConnection;
-use crate::internal::Value;
 use crate::model::Model;
 use crate::query::{
-    ConditionValue, FrameBound, FrameType, Operator, Order, QueryBuilder, WhereCondition,
-    WindowFunction, WindowFunctionType,
+    FrameBound, FrameType, Order, QueryBuilder, WindowFunction, WindowFunctionType,
 };
-use std::collections::hash_map::DefaultHasher;
-use std::hash::Hasher;
 use std::sync::Arc;
 
 #[tideorm::model(table = "cache_key_test_users")]
@@ -34,54 +30,31 @@ struct CacheKeyTestSoftDeleteUser {
 
 #[test]
 fn test_generate_cache_key_is_stable_for_equivalent_structured_queries() {
-    let query_one = CacheKeyTestUser::query()
-        .where_in("status", vec!["active", "pending"])
-        .or_where(|group| {
-            group
-                .where_eq("role", "admin")
-                .nested_and(|inner| inner.where_gt("score", 10).where_lt("score", 20))
-        })
-        .window(
-            WindowFunction::new(
-                WindowFunctionType::Lag("score".to_string(), Some(1), Some("0".to_string())),
-                "previous_score",
+    let build = || {
+        CacheKeyTestUser::query()
+            .where_in("status", vec!["active", "pending"])
+            .or_where(|group| {
+                group
+                    .where_eq("role", "admin")
+                    .nested_and(|inner| inner.where_gt("score", 10).where_lt("score", 20))
+            })
+            .window(
+                WindowFunction::new(
+                    WindowFunctionType::Lag("score".to_string(), Some(1), Some("0".to_string())),
+                    "previous_score",
+                )
+                .partition_by("team")
+                .order_by("score", Order::Desc)
+                .frame(
+                    FrameType::Rows,
+                    FrameBound::UnboundedPreceding,
+                    FrameBound::CurrentRow,
+                ),
             )
-            .partition_by("team")
-            .order_by("score", Order::Desc)
-            .frame(
-                FrameType::Rows,
-                FrameBound::UnboundedPreceding,
-                FrameBound::CurrentRow,
-            ),
-        )
-        .limit(10);
+            .limit(10)
+    };
 
-    let query_two = CacheKeyTestUser::query()
-        .where_in("status", vec!["active", "pending"])
-        .or_where(|group| {
-            group
-                .where_eq("role", "admin")
-                .nested_and(|inner| inner.where_gt("score", 10).where_lt("score", 20))
-        })
-        .window(
-            WindowFunction::new(
-                WindowFunctionType::Lag("score".to_string(), Some(1), Some("0".to_string())),
-                "previous_score",
-            )
-            .partition_by("team")
-            .order_by("score", Order::Desc)
-            .frame(
-                FrameType::Rows,
-                FrameBound::UnboundedPreceding,
-                FrameBound::CurrentRow,
-            ),
-        )
-        .limit(10);
-
-    assert_eq!(
-        query_one.generate_cache_key(),
-        query_two.generate_cache_key()
-    );
+    assert_eq!(build().generate_cache_key(), build().generate_cache_key());
 }
 
 #[test]
@@ -109,6 +82,54 @@ fn test_explicit_cache_key_is_namespaced_per_model() {
     );
 }
 
+/// A parameterized operand renders the same SQL whatever value it binds, so
+/// its values have to reach the cache key, or two queries differing only in
+/// one would share a cache entry.
+#[test]
+fn test_operand_bound_values_participate_in_the_cache_key() {
+    let tenant = |id: i64| {
+        CacheKeyTestUser::query()
+            .select(vec!["id"])
+            .where_eq("id", id)
+    };
+
+    for (operand, one, two) in [
+        (
+            "union",
+            CacheKeyTestPost::query().union(tenant(1)),
+            CacheKeyTestPost::query().union(tenant(2)),
+        ),
+        (
+            "CTE",
+            CacheKeyTestPost::query().with_query("tenant_users", tenant(1)),
+            CacheKeyTestPost::query().with_query("tenant_users", tenant(2)),
+        ),
+        (
+            "scalar subquery",
+            CacheKeyTestPost::query().select_subquery(tenant(1), "owner"),
+            CacheKeyTestPost::query().select_subquery(tenant(2), "owner"),
+        ),
+        (
+            "EXISTS subquery",
+            CacheKeyTestPost::query().where_exists(tenant(1)),
+            CacheKeyTestPost::query().where_exists(tenant(2)),
+        ),
+    ] {
+        assert_eq!(
+            one.build_select_sql_with_params_for_db(DatabaseType::Postgres)
+                .0,
+            two.build_select_sql_with_params_for_db(DatabaseType::Postgres)
+                .0,
+            "{operand}"
+        );
+        assert_ne!(
+            one.generate_cache_key(),
+            two.generate_cache_key(),
+            "{operand}"
+        );
+    }
+}
+
 #[test]
 fn test_rendered_filter_guard_rejects_constant_true_bodies() {
     type Guard = QueryBuilder<CacheKeyTestUser>;
@@ -126,177 +147,69 @@ fn test_rendered_filter_guard_rejects_constant_true_bodies() {
     assert!(restrictive.is_ok());
 }
 
+/// A write to any table a query reads must evict its cached result, so the
+/// cache tags cover joined tables and union operands' tables too.
 #[test]
-fn test_empty_negative_list_does_not_count_as_an_explicit_filter() {
-    // An empty candidate set for a negative membership test renders
-    // constant-true, so it must not satisfy the explicit-filter requirement.
-    // Reaching this by accident is easy -- a filter list that came back empty
-    // from a form -- and the rendered-SQL check cannot catch it: sea-query
-    // emits an empty `NOT IN` as the bound pair `? = ?`, and a soft-delete
-    // model appends `deleted_at IS NULL` to whatever the caller declared.
-    for query in [
-        CacheKeyTestUser::query().where_not_in("id", Vec::<i64>::new()),
-        CacheKeyTestUser::query().where_not_in("name", Vec::<&str>::new()),
-        CacheKeyTestUser::query()
-            .where_not_in("name", Vec::<&str>::new())
-            .where_not_in("id", Vec::<i64>::new()),
-    ] {
-        let err = query
-            .ensure_mutation_has_explicit_filters("delete")
-            .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("unfiltered bulk mutations are blocked"),
-            "vacuous filter was accepted: {err}"
-        );
-    }
-}
-
-#[test]
-fn test_a_real_filter_still_counts_alongside_a_vacuous_one() {
-    // The guard rejects only queries where *every* declared filter is
-    // vacuous; one real predicate is enough, and it still applies.
-    assert!(
-        CacheKeyTestUser::query()
-            .where_eq("name", "alice")
-            .where_not_in("id", Vec::<i64>::new())
-            .ensure_mutation_has_explicit_filters("delete")
-            .is_ok()
-    );
-
-    // A non-empty candidate set is a real filter on its own.
-    assert!(
-        CacheKeyTestUser::query()
-            .where_not_in("id", vec![1i64])
-            .ensure_mutation_has_explicit_filters("delete")
-            .is_ok()
-    );
-
-    // The positive duals render constant-FALSE, which matches nothing and is
-    // safe for a mutation, so they are deliberately still accepted.
-    assert!(
-        CacheKeyTestUser::query()
-            .where_in("id", Vec::<i64>::new())
-            .ensure_mutation_has_explicit_filters("delete")
-            .is_ok()
-    );
-}
-
-#[test]
-fn test_cache_tags_cover_joined_tables() {
-    let tables = CacheKeyTestPost::query()
-        .inner_join(
-            "cache_key_test_users",
-            "cache_key_test_posts.id",
-            "cache_key_test_users.id",
-        )
-        .cache_tables();
-
-    assert_eq!(
-        tables,
-        vec![
-            "cache_key_test_posts".to_string(),
-            "cache_key_test_users".to_string()
-        ]
-    );
-}
-
-#[test]
-fn test_write_to_joined_table_evicts_cached_join_result() {
-    let cache = crate::cache::QueryCache::new();
-    cache.enable();
+fn test_cache_tags_cover_joined_and_union_operand_tables() {
+    let posts = "cache_key_test_posts".to_string();
+    let users = "cache_key_test_users".to_string();
 
     let joined = CacheKeyTestPost::query().inner_join(
         "cache_key_test_users",
         "cache_key_test_posts.id",
         "cache_key_test_users.id",
     );
-    let joined_key = joined.generate_cache_key();
-    cache
-        .set_tagged(&joined_key, &["row"], None, &joined.cache_tables())
-        .unwrap();
+    assert_eq!(joined.cache_tables(), vec![posts.clone(), users.clone()]);
 
-    let posts_only = CacheKeyTestPost::query();
-    let posts_only_key = posts_only.generate_cache_key();
-    cache
-        .set_tagged(&posts_only_key, &["row"], None, &posts_only.cache_tables())
-        .unwrap();
-
-    assert!(cache.contains(&joined_key));
-    assert!(cache.contains(&posts_only_key));
-
-    cache.invalidate_model("cache_key_test_users");
-
-    assert!(
-        !cache.contains(&joined_key),
-        "a write to a joined table must evict the cached join result"
-    );
-    assert!(
-        cache.contains(&posts_only_key),
-        "invalidation must stay targeted at the tables a query actually reads"
-    );
+    for composed in [
+        CacheKeyTestPost::query().union(CacheKeyTestUser::query()),
+        CacheKeyTestPost::query().union_all(CacheKeyTestUser::query()),
+    ] {
+        assert!(composed.clauses.dependencies.contains(&users));
+        assert!(composed.cache_tables().contains(&users));
+    }
 }
 
 #[test]
-fn test_cache_tags_cover_union_operand_tables() {
-    let tables = CacheKeyTestPost::query()
-        .union(CacheKeyTestUser::query())
-        .cache_tables();
-
-    assert!(
-        tables.contains(&"cache_key_test_users".to_string()),
-        "a union operand's table must be tagged for invalidation: {tables:?}"
-    );
-}
-
-#[test]
-fn test_collect_tables_from_sql_reads_from_and_join_targets() {
-    let mut tables = Vec::new();
-    super::collect_tables_from_sql(
-        "SELECT * FROM \"orders\" INNER JOIN `line_items` ON a = b \
-         WHERE id IN (SELECT id FROM public.archived_orders)",
-        &mut tables,
-    );
-
-    assert_eq!(
-        tables,
-        vec![
-            "orders".to_string(),
-            "line_items".to_string(),
-            "archived_orders".to_string()
-        ]
-    );
-}
-
-#[test]
-fn test_collect_tables_from_sql_reads_every_table_of_a_from_list() {
-    let mut tables = Vec::new();
-    super::collect_tables_from_sql(
-        "SELECT * FROM a, b AS bee, (SELECT 1 FROM c) d, e \
-         WHERE x IN (SELECT y FROM f, g) AND z = 'from h, i'",
-        &mut tables,
-    );
-
-    assert_eq!(tables, ["a", "b", "c", "e", "f", "g"]);
-}
-
-#[test]
-fn test_collect_tables_from_sql_reads_the_table_after_only() {
-    let mut tables = Vec::new();
-    super::collect_tables_from_sql(
-        "SELECT * FROM ONLY posts WHERE id IN (SELECT post_id FROM ONLY \"comments\")",
-        &mut tables,
-    );
-
-    assert_eq!(tables, ["posts", "comments"]);
-}
-
-#[test]
-fn test_collect_tables_from_sql_skips_derived_table_keywords() {
-    let mut tables = Vec::new();
-    super::collect_tables_from_sql("SELECT * FROM (SELECT * FROM \"users\") t", &mut tables);
-
-    assert_eq!(tables, vec!["users".to_string()]);
+fn test_collect_tables_from_sql_reads_every_table_a_statement_names() {
+    for (sql, expected) in [
+        (
+            "SELECT * FROM \"orders\" INNER JOIN `line_items` ON a = b \
+             WHERE id IN (SELECT id FROM public.archived_orders)",
+            &["orders", "line_items", "archived_orders"][..],
+        ),
+        // Every table of a FROM list, but not words in a literal.
+        (
+            "SELECT * FROM a, b AS bee, (SELECT 1 FROM c) d, e \
+             WHERE x IN (SELECT y FROM f, g) AND z = 'from h, i'",
+            &["a", "b", "c", "e", "f", "g"],
+        ),
+        (
+            "SELECT * FROM ONLY posts WHERE id IN (SELECT post_id FROM ONLY \"comments\")",
+            &["posts", "comments"],
+        ),
+        ("SELECT * FROM (SELECT * FROM \"users\") t", &["users"]),
+        // A quoted name is kept whole, and a comment is not read.
+        ("SELECT * FROM \"group by\" /* FROM fake */", &["group by"]),
+        // A comma after a join continues the FROM list; one inside an
+        // expression or an ORDER BY does not.
+        (
+            "SELECT * FROM a JOIN b ON a.id=b.id, c WHERE coalesce(c.id, 0)>0 ORDER BY a.id, ignored",
+            &["a", "b", "c"],
+        ),
+        (
+            "SELECT * FROM a LEFT JOIN b USING(id), c WHERE coalesce(c.id, 0)>0 ORDER BY a.id, ignored",
+            &["a", "b", "c"],
+        ),
+        (
+            "SELECT * FROM a CROSS JOIN b, c WHERE coalesce(c.id, 0)>0 ORDER BY a.id, ignored",
+            &["a", "b", "c"],
+        ),
+    ] {
+        let mut tables = Vec::new();
+        super::collect_tables_from_sql(sql, &mut tables);
+        assert_eq!(tables, expected, "{sql}");
+    }
 }
 
 #[test]
@@ -348,40 +261,6 @@ fn test_count_decoding_reports_missing_and_undecodable_values() {
     );
 }
 
-#[test]
-fn test_union_bound_values_participate_in_the_cache_key() {
-    let tenant_one = CacheKeyTestPost::query().union(CacheKeyTestUser::query().where_eq("id", 1));
-    let tenant_two = CacheKeyTestPost::query().union(CacheKeyTestUser::query().where_eq("id", 2));
-
-    assert_eq!(
-        tenant_one.clauses.unions[0].query_sql, tenant_two.clauses.unions[0].query_sql,
-        "a parameterized union operand renders the same SQL for either bound value"
-    );
-    assert_ne!(
-        tenant_one.generate_cache_key(),
-        tenant_two.generate_cache_key(),
-        "two unions differing only in a bound value must not share a cache entry"
-    );
-}
-
-#[test]
-fn test_cte_bound_values_participate_in_the_cache_key() {
-    let tenant_one = CacheKeyTestPost::query()
-        .with_query("tenant_users", CacheKeyTestUser::query().where_eq("id", 1));
-    let tenant_two = CacheKeyTestPost::query()
-        .with_query("tenant_users", CacheKeyTestUser::query().where_eq("id", 2));
-
-    assert_eq!(
-        tenant_one.clauses.ctes[0].query_sql, tenant_two.clauses.ctes[0].query_sql,
-        "a parameterized CTE body renders the same SQL for either bound value"
-    );
-    assert_ne!(
-        tenant_one.generate_cache_key(),
-        tenant_two.generate_cache_key(),
-        "two CTE bodies differing only in a bound value must not share a cache entry"
-    );
-}
-
 /// A connection that never dialled anything, for identity bookkeeping only.
 fn disconnected_connection() -> Arc<InternalConnection> {
     Arc::new(InternalConnection::new(Default::default()))
@@ -425,12 +304,29 @@ fn test_connection_identity_is_never_inherited_from_a_recycled_address() {
     }
 }
 
-/// The soft-delete stamp is a literal, so it has to be spelled the way the
-/// backend the statement is heading for spells it. Rendering it for the
-/// ambient backend instead put an RFC3339 literal — `T` separator, UTC
-/// offset — into statements bound for MySQL, which rejects both.
+/// The soft-delete stamp is a UTC literal rather than the database clock, so
+/// it has to be spelled the way the backend the statement is heading for
+/// spells it. Rendering it for the ambient backend instead put an RFC3339
+/// literal — `T` separator, UTC offset — into statements bound for MySQL,
+/// which rejects both.
 #[test]
 fn test_soft_delete_stamp_renders_for_the_statement_backend() {
+    let timestamp = chrono::DateTime::parse_from_rfc3339("2026-07-25T12:34:56.123456Z")
+        .expect("fixture is valid rfc3339")
+        .with_timezone(&chrono::Utc);
+    for (db_type, expected) in [
+        (DatabaseType::Postgres, "'2026-07-25T12:34:56.123456+00:00'"),
+        (DatabaseType::SQLite, "'2026-07-25T12:34:56.123456+00:00'"),
+        (DatabaseType::MySQL, "'2026-07-25 12:34:56.123456'"),
+        (DatabaseType::MariaDB, "'2026-07-25 12:34:56.123456'"),
+    ] {
+        assert_eq!(
+            QueryBuilder::<CacheKeyTestSoftDeleteUser>::utc_timestamp_literal(db_type, timestamp),
+            expected,
+            "{db_type:?}"
+        );
+    }
+
     // The stamp is the only quoted token in the statement: every filter
     // value travels beside it as a bound parameter.
     fn stamp_of(sql: &str) -> &str {
@@ -462,99 +358,6 @@ fn test_soft_delete_stamp_renders_for_the_statement_backend() {
     );
 }
 
-#[test]
-fn test_unrepresentable_condition_is_rejected_instead_of_dropped() {
-    let mut query = CacheKeyTestUser::query();
-    query.clauses.conditions.push(WhereCondition {
-        column: "id".to_string(),
-        operator: Operator::Between,
-        value: ConditionValue::Single(serde_json::json!(1)),
-    });
-
-    let err = query.ensure_conditions_are_representable().unwrap_err();
-    assert!(err.to_string().contains("cannot be rendered as SQL"));
-}
-
-fn condition_hash(condition: &WhereCondition) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    super::hash_where_condition(condition, &mut hasher);
-    hasher.finish()
-}
-
-fn bound_subquery_condition(bound: &str) -> WhereCondition {
-    WhereCondition {
-        column: String::new(),
-        operator: Operator::Raw,
-        value: ConditionValue::RawExprWithValues {
-            sql: "EXISTS (SELECT 1 FROM \"posts\" WHERE \"title\" = $1)".to_string(),
-            values: vec![Value::String(Some(bound.to_string()))],
-        },
-    }
-}
-
-#[test]
-fn test_bound_subquery_values_participate_in_the_cache_key() {
-    assert_ne!(
-        condition_hash(&bound_subquery_condition("alice")),
-        condition_hash(&bound_subquery_condition("bob")),
-        "two subqueries differing only in a bound value render identical SQL and must not share a cache entry"
-    );
-    assert_eq!(
-        condition_hash(&bound_subquery_condition("alice")),
-        condition_hash(&bound_subquery_condition("alice"))
-    );
-}
-
-#[test]
-fn test_select_subquery_bound_values_participate_in_the_cache_key() {
-    let tenant_one = CacheKeyTestPost::query().select_subquery(
-        CacheKeyTestUser::query()
-            .select(vec!["id"])
-            .where_eq("id", 1),
-        "owner",
-    );
-    let tenant_two = CacheKeyTestPost::query().select_subquery(
-        CacheKeyTestUser::query()
-            .select(vec!["id"])
-            .where_eq("id", 2),
-        "owner",
-    );
-
-    assert_eq!(
-        tenant_one.clauses.subquery_select_expressions[0].query_sql,
-        tenant_two.clauses.subquery_select_expressions[0].query_sql,
-        "a parameterized scalar subquery renders the same SQL for either bound value"
-    );
-    assert_ne!(
-        tenant_one.generate_cache_key(),
-        tenant_two.generate_cache_key(),
-        "two scalar subqueries differing only in a bound value must not share a cache entry"
-    );
-}
-
-#[test]
-fn a_negative_list_of_nulls_does_not_count_as_an_explicit_filter() {
-    // `NOT IN (NULL)` renders `IS NOT NULL`, which keeps every row of a
-    // `NOT NULL` key, so a list that came back as nothing but NULLs must not
-    // turn a delete into a whole-table one.
-    let err = CacheKeyTestUser::query()
-        .where_not_in("id", vec![None::<i64>, None])
-        .ensure_mutation_has_explicit_filters("delete")
-        .unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("unfiltered bulk mutations are blocked"),
-        "{err}"
-    );
-
-    assert!(
-        CacheKeyTestUser::query()
-            .where_not_in("id", vec![None, Some(1i64)])
-            .ensure_mutation_has_explicit_filters("delete")
-            .is_ok()
-    );
-}
-
 #[tokio::test]
 async fn only_trashed_is_refused_for_a_force_delete_without_soft_delete() {
     // The model has no trash, so the scope would be dropped and the delete
@@ -578,46 +381,4 @@ fn a_distinct_aggregate_runs_over_the_distinct_rows() {
         })
         .expect("aggregate sql");
     assert!(sql.contains("FROM (SELECT DISTINCT"), "{sql}");
-}
-
-#[test]
-fn cache_dependencies_preserve_quoted_identifiers() {
-    let mut tables = Vec::new();
-    super::collect_tables_from_sql("SELECT * FROM \"group by\" /* FROM fake */", &mut tables);
-    assert_eq!(tables, vec!["group by"]);
-    let composed = CacheKeyTestUser::query().union_all(CacheKeyTestPost::query());
-    assert!(
-        composed
-            .clauses
-            .dependencies
-            .contains(&"cache_key_test_posts".to_string())
-    );
-    assert!(
-        composed
-            .cache_tables()
-            .contains(&"cache_key_test_posts".to_string())
-    );
-}
-
-#[test]
-fn mixed_joins_keep_comma_dependencies_without_reading_expression_commas() {
-    for join in [
-        "JOIN b ON a.id=b.id",
-        "LEFT JOIN b USING(id)",
-        "CROSS JOIN b",
-    ] {
-        let mut tables = Vec::new();
-        super::collect_tables_from_sql(
-            &format!("SELECT * FROM a {join}, c WHERE coalesce(c.id, 0)>0 ORDER BY a.id, ignored"),
-            &mut tables,
-        );
-        assert!(tables.iter().any(|table| table == "a"));
-        assert!(tables.iter().any(|table| table == "b"));
-        assert!(tables.iter().any(|table| table == "c"));
-        assert!(
-            !tables
-                .iter()
-                .any(|table| table == "ignored" || table == "0")
-        );
-    }
 }

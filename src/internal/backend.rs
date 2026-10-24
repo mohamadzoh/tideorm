@@ -88,7 +88,3 @@ pub(crate) fn build_statement_with_values(
 ) -> OrmStatement {
     OrmStatement::from_sql_and_values(backend.into(), sql, params)
 }
-
-#[cfg(test)]
-#[path = "../../tests/unit/internal_backend_tests.rs"]
-mod tests;

@@ -1,14 +1,15 @@
-//! Concurrent lookups share one managed identity, and rolled-back reads leave none.
+//! Concurrent lookups share one managed identity, and a rolled-back transaction
+//! leaves no entry it read behind and brings back none a `clear()` dropped.
 
-use crate::fixtures::{Number, User, global_memory_database, users_and_posts};
+use crate::fixtures::{Number, User, global_memory_database, memory_database, users_and_posts};
+use std::sync::Arc;
+use tideorm::entity_manager::EntityManager;
 use tideorm::prelude::*;
 
 #[tokio::test]
 async fn clear_survives_outer_rollback_even_after_refilling_the_map() {
-    use std::sync::Arc;
-    use tideorm::entity_manager::EntityManager;
     for refill in [false, true] {
-        let db = crate::fixtures::memory_database(
+        let db = memory_database(
             "CREATE TABLE audit_numbers(id INTEGER PRIMARY KEY,value INTEGER); \
              INSERT INTO audit_numbers VALUES(1,10)",
         )
@@ -39,8 +40,7 @@ async fn clear_survives_outer_rollback_even_after_refilling_the_map() {
 
 #[tokio::test]
 async fn concurrent_persist_and_merge_share_one_identity() {
-    use std::sync::{Arc, Barrier};
-    use tideorm::entity_manager::EntityManager;
+    use std::sync::Barrier;
     let db =
         global_memory_database("CREATE TABLE audit_numbers(id INTEGER PRIMARY KEY,value INTEGER)")
             .await;
@@ -87,8 +87,6 @@ async fn concurrent_persist_and_merge_share_one_identity() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_managed_lookups_share_one_identity() {
-    use std::sync::Arc;
-    use tideorm::entity_manager::EntityManager;
     let db=global_memory_database("CREATE TABLE audit_numbers(id INTEGER PRIMARY KEY,value INTEGER); INSERT INTO audit_numbers VALUES(1,10)").await;
     for _ in 0..12 {
         let manager = EntityManager::new(Arc::new(db.clone()));
@@ -113,11 +111,10 @@ async fn concurrent_managed_lookups_share_one_identity() {
     }
 }
 
-#[cfg(feature = "entity-manager")]
 #[tokio::test]
 async fn rolled_back_reads_leave_no_entity_manager_phantoms() {
     let db = users_and_posts("committed", 10).await;
-    let manager = tideorm::entity_manager::EntityManager::new(std::sync::Arc::new(db.clone()));
+    let manager = EntityManager::new(Arc::new(db.clone()));
     manager.find::<User>(1).await.unwrap().unwrap();
     let inside = manager.clone();
     let nested = db.clone();

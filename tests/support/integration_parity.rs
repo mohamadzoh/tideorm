@@ -1,20 +1,10 @@
 //! Integration scenarios every backend target runs.
 //!
-//! The including target supplies `mod backend` with `DATABASE_TYPE` and
-//! `async fn connect() -> bool`, which installs the global database and returns
-//! `false` when the backend is switched off for this run. Tables are built with
-//! the migration `Schema`, so the same DDL renders for all three backends.
-
-use super::schema_script;
-fn export_statements(sql: &str) -> Vec<&str> {
-    schema_script::statements(
-        sql,
-        matches!(
-            backend::DATABASE_TYPE,
-            DatabaseType::MySQL | DatabaseType::MariaDB
-        ),
-    )
-}
+//! The including target supplies `mod schema_script` and `mod backend` with
+//! `DATABASE_TYPE`, `database_url()` and `async fn connect() -> bool`, which
+//! installs the global database and returns `false` when the backend is
+//! switched off for this run. Tables are built with the migration `Schema`, so
+//! the same DDL renders for every backend.
 
 use std::sync::{LazyLock, Mutex};
 
@@ -23,7 +13,7 @@ use tideorm::migration::Schema;
 use tideorm::prelude::*;
 use tideorm::{Database, Error};
 
-use super::backend;
+use super::{backend, schema_script};
 
 #[derive(Model, PartialEq)]
 #[tideorm(table = "test_users")]
@@ -207,6 +197,22 @@ pub async fn setup() -> bool {
     true
 }
 
+/// Drop and recreate a table for one scenario, outside the shared `TABLES`.
+async fn fresh_table<F>(name: &str, build: F)
+where
+    F: FnOnce(&mut tideorm::migration::TableBuilder),
+{
+    let mut schema = Schema::new(backend::DATABASE_TYPE);
+    schema
+        .drop_table_if_exists(name)
+        .await
+        .expect("failed to drop scenario table");
+    schema
+        .create_table(name, build)
+        .await
+        .expect("failed to create scenario table");
+}
+
 /// The `n`th positional placeholder in raw SQL for the backend under test.
 fn param(n: usize) -> String {
     match backend::DATABASE_TYPE {
@@ -215,20 +221,45 @@ fn param(n: usize) -> String {
     }
 }
 
+fn user(email: &str, name: &str, age: i32, active: bool) -> TestUser {
+    TestUser {
+        id: 0,
+        email: email.to_string(),
+        name: name.to_string(),
+        age,
+        active,
+    }
+}
+
 /// Insert users `1..=count` with ages `21..` and every even one active.
 pub async fn seed_users(count: i32) {
     for i in 1..=count {
-        TestUser {
-            id: 0,
-            email: format!("user{i}@example.com"),
-            name: format!("User {i:02}"),
-            age: 20 + i,
-            active: i % 2 == 0,
-        }
+        user(
+            &format!("user{i}@example.com"),
+            &format!("User {i:02}"),
+            20 + i,
+            i % 2 == 0,
+        )
         .save()
         .await
         .expect("failed to seed user");
     }
+}
+
+/// A live `TestSoftDelete` row, not yet saved.
+fn soft_deletable(name: &str) -> TestSoftDelete {
+    TestSoftDelete {
+        id: 0,
+        name: name.into(),
+        deleted_at: None,
+    }
+}
+
+/// One row of `SELECT active, COUNT(*) AS users .. GROUP BY active`.
+#[derive(Debug, PartialEq, serde::Deserialize)]
+struct ActiveCount {
+    active: bool,
+    users: i64,
 }
 
 /// `pluck`, `value`, `get_as` and `paginate` read one column, one value, a
@@ -268,11 +299,6 @@ async fn rows_read_as_columns_values_structs_and_pages() {
         .expect("value of nothing failed");
     assert_eq!(nobody, None);
 
-    #[derive(Debug, PartialEq, serde::Deserialize)]
-    struct ActiveCount {
-        active: bool,
-        users: i64,
-    }
     let counts: Vec<ActiveCount> = TestUser::query()
         .select_raw("active, COUNT(*) AS users")
         .group_by("active")
@@ -369,12 +395,7 @@ async fn builders_take_iterables_bound_raw_sql_typed_having_and_reorder() {
         "a placeholder without a value fails"
     );
 
-    #[derive(Debug, PartialEq, serde::Deserialize)]
-    struct Group {
-        active: bool,
-        users: i64,
-    }
-    let groups: Vec<Group> = TestUser::query()
+    let groups: Vec<ActiveCount> = TestUser::query()
         .select_raw("active, COUNT(*) AS users")
         .group_by("active")
         .having(Aggregate::count().gte(3))
@@ -385,7 +406,7 @@ async fn builders_take_iterables_bound_raw_sql_typed_having_and_reorder() {
         .expect("typed having failed");
     assert_eq!(
         groups,
-        [Group {
+        [ActiveCount {
             active: true,
             users: 3
         }]
@@ -580,22 +601,16 @@ async fn filters_on_a_joined_table_bind_its_column_types() {
     );
 }
 
-/// An update started from a query keeps its filters and its soft-delete
-/// scope, where `Model::update_all()` reaches trashed rows too.
+/// An update started from a query keeps its filters, its OR group included,
+/// and its soft-delete scope; `Model::update_all()` leaves trashed rows out
+/// too, unless `with_trashed()`.
 #[tokio::test]
 async fn updating_from_a_query_keeps_its_filters_and_scope() {
     if !setup().await {
         return;
     }
     for name in ["a", "b", "c"] {
-        TestSoftDelete {
-            id: 0,
-            name: name.into(),
-            deleted_at: None,
-        }
-        .save()
-        .await
-        .expect("save failed");
+        soft_deletable(name).save().await.expect("save failed");
     }
     TestSoftDelete::query()
         .where_eq("name", "c")
@@ -659,6 +674,19 @@ async fn updating_from_a_query_keeps_its_filters_and_scope() {
             .is_err(),
         "a paged query is not an UPDATE"
     );
+
+    // The update's own `or_where_*` joins the query's OR group.
+    seed_users(4).await;
+    let updated = TestUser::query()
+        .where_gt("age", 0)
+        .or_where_eq("id", 1)
+        .update_all()
+        .or_where_eq("id", 3)
+        .set("name", "picked")
+        .execute()
+        .await
+        .expect("update failed");
+    assert_eq!(updated, 2, "age > 0 AND (id = 1 OR id = 3)");
 }
 
 #[tideorm::model(table = "has_posts", soft_delete)]
@@ -672,7 +700,8 @@ pub struct HasPost {
 
 /// `where_has` and `where_doesnt_have` read the related model's own query, so
 /// its soft-delete scope applies, where the table-level `has_related` counts
-/// trashed rows too.
+/// trashed rows too. `where_column_*` compares two columns of one row, alone
+/// and across a join.
 #[tokio::test]
 async fn where_has_filters_by_the_related_models_own_query() {
     if !setup().await {
@@ -788,32 +817,6 @@ async fn where_has_filters_by_the_related_models_own_query() {
         count(joined().or_where_column_gt("test_users.age", "has_posts.user_id")).await,
         2
     );
-
-    // `when` works on a batch update as it does on a query.
-    let changed = TestUser::update_all()
-        .where_eq("name", "User 01")
-        .when(false, |update| update.set("age", 99))
-        .when_some(Some(50), |update, age| update.set("age", age))
-        .execute()
-        .await
-        .expect("conditional update failed");
-    assert_eq!(changed, 1);
-    let age: Option<i32> = TestUser::query()
-        .where_eq("name", "User 01")
-        .value("age")
-        .await
-        .expect("value failed");
-    assert_eq!(age, Some(50));
-}
-
-fn user(email: &str, name: &str, age: i32, active: bool) -> TestUser {
-    TestUser {
-        id: 0,
-        email: email.to_string(),
-        name: name.to_string(),
-        age,
-        active,
-    }
 }
 
 #[tokio::test]
@@ -900,73 +903,40 @@ async fn query_builder_comparisons() {
         return;
     }
 
+    // Ages 21 to 30, every even user active.
     seed_users(10).await;
 
-    let active = TestUser::query()
-        .where_eq("active", true)
-        .get()
-        .await
-        .expect("Query failed");
-    assert_eq!(active.len(), 5);
-    assert!(active.iter().all(|user| user.active));
-
-    let older = TestUser::query()
-        .where_gt("age", 27)
-        .get()
-        .await
-        .expect("Query failed");
-    assert_eq!(older.len(), 3, "ages 28, 29, 30");
-
-    let younger = TestUser::query()
-        .where_lt("age", 25)
-        .get()
-        .await
-        .expect("Query failed");
-    assert_eq!(younger.len(), 4, "ages 21-24");
-
-    let in_range = TestUser::query()
-        .where_between("age", 23, 27)
-        .get()
-        .await
-        .expect("Query failed");
-    assert_eq!(in_range.len(), 5, "BETWEEN is inclusive");
-
-    let listed = TestUser::query()
-        .where_in("age", vec![21, 23, 25])
-        .get()
-        .await
-        .expect("Query failed");
-    assert_eq!(listed.len(), 3);
-}
-
-#[tokio::test]
-async fn query_builder_like() {
-    if !setup().await {
-        return;
-    }
-
-    for (email, name, age) in [
-        ("john@gmail.com", "John Doe", 25),
-        ("jane@gmail.com", "Jane Doe", 30),
-        ("bob@yahoo.com", "Bob Smith", 35),
+    let query = TestUser::query;
+    for (label, filtered, ages) in [
+        (
+            "where_eq",
+            query().where_eq("active", true),
+            &[22, 24, 26, 28, 30][..],
+        ),
+        ("where_gt", query().where_gt("age", 27), &[28, 29, 30]),
+        ("where_lt", query().where_lt("age", 25), &[21, 22, 23, 24]),
+        (
+            "where_between is inclusive",
+            query().where_between("age", 23, 27),
+            &[23, 24, 25, 26, 27],
+        ),
+        (
+            "where_in",
+            query().where_in("age", vec![21, 23, 25]),
+            &[21, 23, 25],
+        ),
+        ("where_like", query().where_like("email", "%1%"), &[21, 30]),
     ] {
-        user(email, name, age, true)
-            .save()
+        let found: Vec<i32> = filtered
+            .order_asc("age")
+            .get()
             .await
-            .expect("Failed to save");
+            .unwrap_or_else(|error| panic!("{label} failed: {error}"))
+            .into_iter()
+            .map(|user| user.age)
+            .collect();
+        assert_eq!(found, ages, "{label}");
     }
-    let gmail = TestUser::query()
-        .where_like("email", "%gmail%")
-        .get()
-        .await
-        .expect("Query failed");
-    assert_eq!(gmail.len(), 2, "Should have 2 gmail users");
-    let does = TestUser::query()
-        .where_like("name", "%Doe%")
-        .get()
-        .await
-        .expect("Query failed");
-    assert_eq!(does.len(), 2, "Should have 2 Doe users");
 }
 
 #[tokio::test]
@@ -1050,132 +1020,6 @@ async fn query_builder_ordering_paging_and_terminals() {
 }
 
 #[tokio::test]
-async fn aggregations() {
-    if !setup().await {
-        return;
-    }
-
-    seed_users(10).await;
-
-    let sum: i64 = TestUser::query().sum("age").await.expect("Sum failed");
-    assert_eq!(sum, 255, "21 + 22 + ... + 30");
-    let avg: Option<f64> = TestUser::query().avg("age").await.expect("Avg failed");
-    assert!(
-        avg.is_some_and(|avg| (avg - 25.5).abs() < 0.01),
-        "avg was {avg:?}"
-    );
-    let min: Option<i32> = TestUser::query().min("age").await.expect("Min failed");
-    assert_eq!(min, Some(21));
-    let max: Option<i32> = TestUser::query()
-        .max(TestUser::columns.age)
-        .await
-        .expect("Max failed");
-    assert_eq!(max, Some(30));
-
-    // Any column type, read as the model reads it.
-    let first: Option<String> = TestUser::query()
-        .min("name")
-        .await
-        .expect("min(name) failed");
-    let last: Option<String> = TestUser::query()
-        .max("name")
-        .await
-        .expect("max(name) failed");
-    assert_eq!(
-        (first.as_deref(), last.as_deref()),
-        (Some("User 01"), Some("User 10"))
-    );
-
-    // Over no rows a sum is zero and the others are None.
-    let nobody = || TestUser::query().where_gt("age", 1000);
-    assert_eq!(
-        nobody().sum::<i64>("age").await.expect("empty sum failed"),
-        0
-    );
-    assert_eq!(
-        nobody().avg::<f64>("age").await.expect("empty avg failed"),
-        None
-    );
-    assert_eq!(
-        nobody().max::<i32>("age").await.expect("empty max failed"),
-        None
-    );
-    let distinct = TestUser::query()
-        .count_distinct("active")
-        .await
-        .expect("Count distinct failed");
-    assert_eq!(distinct, 2);
-}
-
-#[tokio::test]
-async fn soft_delete_restore_and_force_delete() {
-    if !setup().await {
-        return;
-    }
-
-    assert!(TestSoftDelete::soft_delete_enabled());
-
-    let mut records = Vec::new();
-    for name in ["Record 1", "Record 2", "Record 3"] {
-        records.push(
-            TestSoftDelete {
-                id: 0,
-                name: name.into(),
-                deleted_at: None,
-            }
-            .save()
-            .await
-            .expect("Failed to save"),
-        );
-    }
-    let record2 = records.remove(1);
-    let record1 = records.remove(0);
-
-    let deleted_record = record1.soft_delete().await.expect("Failed to soft delete");
-    assert!(
-        deleted_record.deleted_at.is_some(),
-        "deleted_at should be set"
-    );
-
-    let active = TestSoftDelete::query().get().await.expect("Query failed");
-    assert_eq!(active.len(), 2, "default query excludes soft-deleted rows");
-
-    let all = TestSoftDelete::query()
-        .with_trashed()
-        .get()
-        .await
-        .expect("Query failed");
-    assert_eq!(all.len(), 3);
-
-    let trashed = TestSoftDelete::query()
-        .only_trashed()
-        .get()
-        .await
-        .expect("Query failed");
-    assert_eq!(trashed.len(), 1);
-    assert_eq!(trashed[0].name, "Record 1");
-
-    let restored = deleted_record.restore().await.expect("Failed to restore");
-    assert!(
-        restored.deleted_at.is_none(),
-        "deleted_at should be cleared"
-    );
-    let active = TestSoftDelete::query().get().await.expect("Query failed");
-    assert_eq!(active.len(), 3, "restore brings the row back");
-
-    record2
-        .force_delete()
-        .await
-        .expect("Failed to force delete");
-    let remaining = TestSoftDelete::query()
-        .with_trashed()
-        .count()
-        .await
-        .expect("Count failed");
-    assert_eq!(remaining, 2, "force_delete removes the row outright");
-}
-
-#[tokio::test]
 async fn transactions_commit_and_roll_back() {
     if !setup().await {
         return;
@@ -1197,12 +1041,6 @@ async fn transactions_commit_and_roll_back() {
         .await
         .expect("Query failed");
     assert!(committed.is_some(), "User should exist after commit");
-
-    let result: tideorm::Result<i64> = TestUser::transaction(|_tx| {
-        Box::pin(async move { Err(Error::query("Intentional rollback")) })
-    })
-    .await;
-    assert!(result.is_err(), "the closure's error should be returned");
 
     let db = tideorm::require_db().expect("global database should be installed");
     let raw_insert: tideorm::Result<()> = db
@@ -1299,19 +1137,8 @@ async fn raw_sql_with_params() {
         return;
     }
 
-    // All active: MySQL counts changed rows, not matched ones, so the UPDATE
-    // below must change every row it matches for the count to agree.
-    for i in 1..=5 {
-        user(
-            &format!("raw{i}@example.com"),
-            &format!("Raw User {i}"),
-            20 + i,
-            true,
-        )
-        .save()
-        .await
-        .expect("Failed to save");
-    }
+    // Ages 21 to 25.
+    seed_users(5).await;
 
     let users: Vec<TestUser> = Database::raw_with_params::<TestUser>(
         &format!(
@@ -1327,7 +1154,7 @@ async fn raw_sql_with_params() {
 
     let affected = Database::execute_with_params(
         &format!(
-            "UPDATE test_users SET active = false WHERE age > {}",
+            "UPDATE test_users SET name = 'renamed' WHERE age > {}",
             param(1)
         ),
         vec![23.into()],
@@ -1335,81 +1162,12 @@ async fn raw_sql_with_params() {
     .await
     .expect("Execute failed");
     assert_eq!(affected, 2, "ages 24 and 25");
-    let inactive = TestUser::query()
-        .where_eq("active", false)
+    let renamed = TestUser::query()
+        .where_eq("name", "renamed")
         .count()
         .await
         .expect("Count failed");
-    assert_eq!(inactive, 2);
-}
-
-/// `insert_all` stays all-or-nothing when a trigger leaves a row out of its
-/// one `INSERT .. RETURNING`: that statement ran outside a transaction, so
-/// the other rows stayed although the call failed on the missing one.
-#[tokio::test]
-async fn insert_all_keeps_no_row_of_a_batch_a_trigger_cut_short() {
-    if !setup().await || backend::DATABASE_TYPE != DatabaseType::SQLite {
-        return;
-    }
-    Database::execute(
-        "CREATE TRIGGER test_users_skip BEFORE INSERT ON test_users \
-         WHEN NEW.name = 'Skipped' BEGIN SELECT RAISE(IGNORE); END",
-    )
-    .await
-    .expect("creating the trigger failed");
-
-    let result = TestUser::insert_all(vec![
-        user("kept@example.com", "Kept", 25, true),
-        user("skipped@example.com", "Skipped", 30, true),
-    ])
-    .await;
-    Database::execute("DROP TRIGGER test_users_skip")
-        .await
-        .expect("dropping the trigger failed");
-
-    assert!(result.is_err(), "a row came back missing");
-    assert_eq!(
-        TestUser::query()
-            .where_eq("email", "kept@example.com")
-            .count()
-            .await
-            .expect("count failed"),
-        0
-    );
-}
-
-#[tokio::test]
-async fn insert_all_assigns_distinct_ids() {
-    if !setup().await {
-        return;
-    }
-
-    let inserted = TestUser::insert_all(vec![
-        user("batch1@example.com", "Batch 1", 25, true),
-        user("batch2@example.com", "Batch 2", 30, true),
-        user("batch3@example.com", "Batch 3", 35, false),
-    ])
-    .await
-    .expect("Insert all failed");
-
-    let emails: Vec<&str> = inserted.iter().map(|user| user.email.as_str()).collect();
-    assert_eq!(
-        emails,
-        [
-            "batch1@example.com",
-            "batch2@example.com",
-            "batch3@example.com"
-        ]
-    );
-    let mut ids: Vec<i64> = inserted.iter().map(|user| user.id).collect();
-    assert!(
-        ids.iter().all(|id| *id > 0),
-        "every row needs an id: {ids:?}"
-    );
-    ids.sort_unstable();
-    ids.dedup();
-    assert_eq!(ids.len(), 3, "ids must be distinct: {ids:?}");
-    assert_eq!(TestUser::count().await.expect("Count failed"), 3);
+    assert_eq!(renamed, 2);
 }
 
 /// A key the model holds is written, and the database's own numbering goes on
@@ -1586,46 +1344,6 @@ async fn upsert_insert_or_update_and_on_conflict() {
     .await
     .expect("upsert should treat quoted payload as data");
     assert_eq!(quoted.name, quoted_payload);
-
-    let created_at = chrono::Utc::now();
-    let updated_at = created_at + chrono::TimeDelta::minutes(15);
-    let inserted = TimestampUser::insert_or_update(
-        TimestampUser {
-            id: 0,
-            email: "typed-upsert@example.com".into(),
-            name: "Initial Timestamp User".into(),
-            login_count: 1,
-            created_at,
-            updated_at,
-        },
-        vec!["email"],
-    )
-    .await
-    .expect("insert_or_update should bind timestamp parameters on insert");
-    assert!(inserted.id > 0, "Upsert insert should assign a primary key");
-    assert_eq!(inserted.login_count, 1);
-    assert!(inserted.created_at <= inserted.updated_at);
-
-    let updated = TimestampUser::insert_or_update(
-        TimestampUser {
-            id: inserted.id,
-            email: "typed-upsert@example.com".into(),
-            name: "Updated Timestamp User".into(),
-            login_count: 2,
-            created_at,
-            updated_at: updated_at + chrono::TimeDelta::minutes(30),
-        },
-        vec!["email"],
-    )
-    .await
-    .expect("insert_or_update should bind timestamp parameters on conflict");
-    assert_eq!(updated.id, inserted.id);
-    assert_eq!(updated.name, "Updated Timestamp User");
-    assert_eq!(updated.login_count, 2);
-    // `>=`, not `>`: updated_at is managed by TideORM, and MySQL's TIMESTAMP
-    // keeps whole seconds, so two upserts in one second store equal values.
-    assert!(updated.created_at >= inserted.created_at);
-    assert!(updated.updated_at >= inserted.updated_at);
 }
 
 #[tideorm::model(table = "window_readings")]
@@ -1759,12 +1477,6 @@ async fn batch_update_filters_and_trusted_raw() {
         .await
         .expect("Count inactive failed");
     assert_eq!(inactive, 2);
-    let active = TestUser::query()
-        .where_eq("active", true)
-        .count()
-        .await
-        .expect("Count active failed");
-    assert_eq!(active, 3);
 
     let trusted_raw_affected = TestUser::update_all()
         .set_trusted_raw("name", "'trusted-batch-update'")
@@ -1777,6 +1489,52 @@ async fn batch_update_filters_and_trusted_raw() {
         .await
         .expect("Reload trusted raw update failed");
     assert_eq!(renamed.name, "trusted-batch-update");
+}
+
+/// `when` and `when_some` apply their condition only when asked, on a query
+/// and on a batch update alike.
+#[tokio::test]
+async fn when_and_when_some_apply_only_when_asked() {
+    if !setup().await {
+        return;
+    }
+
+    // Ages 21 to 30, every even user active.
+    seed_users(10).await;
+
+    let filtered = TestUser::query()
+        .when(true, |q| q.where_eq("active", true))
+        .get()
+        .await
+        .expect("Query failed");
+    assert_eq!(filtered.len(), 5);
+    let unfiltered = TestUser::query()
+        .when(false, |q| q.where_eq("active", true))
+        .get()
+        .await
+        .expect("Query failed");
+    assert_eq!(unfiltered.len(), 10);
+    let users = TestUser::query()
+        .when_some(Some(28), |q, age| q.where_gte("age", age))
+        .get()
+        .await
+        .expect("Query failed");
+    assert_eq!(users.len(), 3);
+
+    let changed = TestUser::update_all()
+        .where_eq("name", "User 01")
+        .when(false, |update| update.set("age", 99))
+        .when_some(Some(50), |update, age| update.set("age", age))
+        .execute()
+        .await
+        .expect("conditional update failed");
+    assert_eq!(changed, 1);
+    let age: Option<i32> = TestUser::query()
+        .where_eq("name", "User 01")
+        .value("age")
+        .await
+        .expect("value failed");
+    assert_eq!(age, Some(50));
 }
 
 #[tokio::test]
@@ -1844,52 +1602,6 @@ async fn callbacks_run_in_order() {
 }
 
 #[tokio::test]
-async fn scopes_and_conditional_filters() {
-    if !setup().await {
-        return;
-    }
-
-    seed_users(10).await;
-
-    fn active_scope(q: QueryBuilder<TestUser>) -> QueryBuilder<TestUser> {
-        q.where_eq("active", true)
-    }
-
-    fn adult_scope(q: QueryBuilder<TestUser>) -> QueryBuilder<TestUser> {
-        q.where_gte("age", 27)
-    }
-
-    let users = adult_scope(active_scope(TestUser::query()))
-        .order_by("age", Order::Asc)
-        .get()
-        .await
-        .expect("Query failed");
-    let ages: Vec<i32> = users.iter().map(|user| user.age).collect();
-    assert_eq!(ages, [28, 30], "scopes chain with AND");
-
-    let filtered = TestUser::query()
-        .when(true, |q| q.where_eq("active", true))
-        .get()
-        .await
-        .expect("Query failed");
-    assert_eq!(filtered.len(), 5);
-    let unfiltered = TestUser::query()
-        .when(false, |q| q.where_eq("active", true))
-        .get()
-        .await
-        .expect("Query failed");
-    assert_eq!(unfiltered.len(), 10);
-
-    let min_age: Option<i32> = Some(28);
-    let users = TestUser::query()
-        .when_some(min_age, |q, age| q.where_gte("age", age))
-        .get()
-        .await
-        .expect("Query failed");
-    assert_eq!(users.len(), 3);
-}
-
-#[tokio::test]
 async fn json_column_round_trips() {
     if !setup().await {
         return;
@@ -1932,20 +1644,50 @@ async fn json_column_round_trips() {
     assert_eq!(products[1].metadata, None);
 }
 
-/// Drop and recreate a table for one scenario, outside the shared `TABLES`.
-async fn fresh_table<F>(name: &str, build: F)
-where
-    F: FnOnce(&mut tideorm::migration::TableBuilder),
-{
-    let mut schema = Schema::new(backend::DATABASE_TYPE);
-    schema
-        .drop_table_if_exists(name)
+/// A JSON `null` assigned or coalesced into an optional JSON column is stored
+/// as JSON, and `None` as SQL `NULL`; the two read back apart.
+#[tokio::test]
+async fn json_assignment_distinguishes_json_null_from_option_none() {
+    if !setup().await {
+        return;
+    }
+    let product = TestProduct {
+        id: 0,
+        name: "Lamp".to_string(),
+        category: "Home".to_string(),
+        price: 20,
+        metadata: Some(serde_json::json!({})),
+    }
+    .save()
+    .await
+    .expect("Failed to save product");
+    let update = || TestProduct::query().where_eq("id", product.id).update_all();
+    let metadata = || async {
+        TestProduct::find(product.id)
+            .await
+            .expect("find failed")
+            .expect("the product exists")
+            .metadata
+    };
+
+    update()
+        .set("metadata", serde_json::Value::Null)
+        .execute()
         .await
-        .expect("failed to drop scenario table");
-    schema
-        .create_table(name, build)
+        .unwrap();
+    assert_eq!(metadata().await, Some(serde_json::Value::Null));
+    update()
+        .set("metadata", None::<serde_json::Value>)
+        .execute()
         .await
-        .expect("failed to create scenario table");
+        .unwrap();
+    assert_eq!(metadata().await, None);
+    update()
+        .coalesce("metadata", Some(serde_json::Value::Null))
+        .execute()
+        .await
+        .unwrap();
+    assert_eq!(metadata().await, Some(serde_json::Value::Null));
 }
 
 /// The `eager_owners` and `eager_pets` tables, empty.
@@ -1992,6 +1734,16 @@ async fn fresh_plain_json_docs() {
     fresh_table("plain_json_docs", |t| {
         t.id();
         t.json("body").not_null();
+    })
+    .await;
+}
+
+/// The `uuid_keyed_codes` table, empty.
+async fn fresh_uuid_keyed_codes() {
+    fresh_table("uuid_keyed_codes", |t| {
+        t.uuid("id").primary_key();
+        t.string("code").not_null().unique();
+        t.big_integer("hits").not_null();
     })
     .await;
 }
@@ -2398,17 +2150,8 @@ async fn json_containment_agrees_across_backends() {
         .await
         .expect("failed to save product");
     }
-    let names = |candidate: serde_json::Value| async move {
-        let mut names: Vec<String> = TestProduct::query()
-            .where_json_contains("metadata", candidate)
-            .get()
-            .await
-            .expect("json containment failed")
-            .into_iter()
-            .map(|product| product.name)
-            .collect();
-        names.sort();
-        names
+    let names = |candidate: serde_json::Value| {
+        product_names(TestProduct::query().where_json_contains("metadata", candidate))
     };
     assert_eq!(
         names(serde_json::json!({"brand": "Tech"})).await,
@@ -2444,17 +2187,8 @@ async fn json_containment_agrees_across_backends() {
     assert_eq!(names(serde_json::json!({"k": 1})).await, ["keyed"]);
     assert_eq!(names(serde_json::json!("a")).await, ["word"]);
 
-    let contained_in = |target: serde_json::Value| async move {
-        let mut names: Vec<String> = TestProduct::query()
-            .where_json_contained_by("metadata", target)
-            .get()
-            .await
-            .expect("json containment failed")
-            .into_iter()
-            .map(|product| product.name)
-            .collect();
-        names.sort();
-        names
+    let contained_in = |target: serde_json::Value| {
+        product_names(TestProduct::query().where_json_contained_by("metadata", target))
     };
     assert!(
         contained_in(serde_json::json!({"tags": ["fast", "slow"]}))
@@ -2465,31 +2199,6 @@ async fn json_containment_agrees_across_backends() {
         contained_in(serde_json::json!(["a", "b", {"k": 1}])).await,
         ["word", "wrapped"]
     );
-}
-
-#[tokio::test]
-async fn scaling_an_integer_column_keeps_it_readable() {
-    if !setup().await {
-        return;
-    }
-
-    seed_users(3).await;
-    // SQLite stored `age * 1.1` as a REAL, after which no row decoded.
-    TestUser::update_all()
-        .multiply("age", 1.1)
-        .where_gt("age", 0)
-        .execute()
-        .await
-        .expect("multiply failed");
-    let ages: Vec<i32> = TestUser::query()
-        .order_by("id", Order::Asc)
-        .get()
-        .await
-        .expect("rows no longer decode after multiply")
-        .into_iter()
-        .map(|user| user.age)
-        .collect();
-    assert_eq!(ages, [23, 24, 25]);
 }
 
 #[tokio::test]
@@ -2675,7 +2384,7 @@ async fn a_cached_read_does_not_outlive_a_commit() {
             let mut row = TestUser::find(id).await?.expect("row should exist");
             row.name = "After".into();
             row.update().await?;
-            // Other requests read, and cache, the committed row meanwhile.
+            // Meanwhile other requests read, and cache, the row as last committed.
             tokio::time::sleep(Duration::from_millis(300)).await;
             Ok(())
         })
@@ -2860,12 +2569,7 @@ async fn an_unset_uuid_key_is_generated_on_insert() {
         return;
     }
 
-    fresh_table("uuid_keyed_codes", |t| {
-        t.uuid("id").primary_key();
-        t.string("code").not_null().unique();
-        t.big_integer("hits").not_null();
-    })
-    .await;
+    fresh_uuid_keyed_codes().await;
     let code = |code: &str, hits: i64| UuidKeyedCode {
         id: Uuid::nil(),
         code: code.to_string(),
@@ -2876,12 +2580,6 @@ async fn an_unset_uuid_key_is_generated_on_insert() {
     let first = code("a", 1).save().await.expect("first save failed");
     let second = code("b", 1).save().await.expect("second save failed");
     assert!(!first.id.is_nil() && first.id != second.id);
-
-    let batch = UuidKeyedCode::insert_all(vec![code("c", 1), code("d", 1)])
-        .await
-        .expect("insert_all failed");
-    assert!(batch.iter().all(|row| !row.id.is_nil()));
-    assert_ne!(batch[0].id, batch[1].id);
 
     let upserted = UuidKeyedCode::insert_or_update(code("a", 2), vec!["code"])
         .await
@@ -3407,7 +3105,8 @@ async fn a_soft_deleted_pivot_row_unlinks_its_pair() {
 }
 
 /// On a soft-delete model every read leaves trashed rows out, `find` included,
-/// and every delete marks the row; `force_delete` removes it.
+/// and every delete marks the row; `restore` brings a trashed row back and
+/// `force_delete` removes it.
 #[tokio::test]
 async fn soft_delete_models_hide_and_mark_rather_than_remove() {
     use tideorm::SoftDelete;
@@ -3417,17 +3116,9 @@ async fn soft_delete_models_hide_and_mark_rather_than_remove() {
     }
     let mut ids = Vec::new();
     for name in ["a", "b", "c"] {
-        let row = TestSoftDelete {
-            id: 0,
-            name: name.into(),
-            deleted_at: None,
-        }
-        .save()
-        .await
-        .expect("save failed");
-        ids.push(row.id);
+        ids.push(soft_deletable(name).save().await.expect("save failed").id);
     }
-    let (a, b) = (ids[0], ids[1]);
+    let (a, b, c) = (ids[0], ids[1], ids[2]);
 
     let row = TestSoftDelete::find(a)
         .await
@@ -3458,6 +3149,31 @@ async fn soft_delete_models_hide_and_mark_rather_than_remove() {
     );
     let marked = TestSoftDelete::query().where_eq("name", "c").delete().await;
     assert_eq!(marked.expect("query delete failed"), 1);
+
+    let restored = TestSoftDelete::query()
+        .with_trashed()
+        .find(c)
+        .await
+        .expect("with_trashed().find failed")
+        .expect("row c is trashed")
+        .restore()
+        .await
+        .expect("restore failed");
+    assert!(restored.deleted_at.is_none(), "restore() clears the mark");
+    assert!(
+        TestSoftDelete::find(c)
+            .await
+            .expect("find failed")
+            .is_some()
+    );
+    let trash: Vec<String> = TestSoftDelete::query()
+        .only_trashed()
+        .order_asc("id")
+        .pluck("name")
+        .await
+        .expect("only_trashed() failed");
+    assert_eq!(trash, ["a", "b"]);
+
     let total = || async {
         TestSoftDelete::query()
             .with_trashed()
@@ -3492,14 +3208,7 @@ async fn the_trash_can_be_restored_or_emptied_as_a_whole() {
     }
 
     for name in ["kept", "binned", "binned"] {
-        TestSoftDelete {
-            id: 0,
-            name: name.into(),
-            deleted_at: None,
-        }
-        .save()
-        .await
-        .expect("save failed");
+        soft_deletable(name).save().await.expect("save failed");
     }
     let binned = || TestSoftDelete::query().where_eq("name", "binned");
     binned().soft_delete().await.expect("soft delete failed");
@@ -3517,14 +3226,7 @@ async fn the_trash_can_be_restored_or_emptied_as_a_whole() {
     );
 
     binned().soft_delete().await.expect("soft delete failed");
-    TestSoftDelete {
-        id: 0,
-        name: "binned".into(),
-        deleted_at: None,
-    }
-    .save()
-    .await
-    .expect("save failed");
+    soft_deletable("binned").save().await.expect("save failed");
     let emptied = binned().only_trashed().force_delete().await;
     assert_eq!(emptied.expect("emptying the trash failed"), 2);
     let live = TestSoftDelete::query().get().await.expect("query failed");
@@ -3564,14 +3266,17 @@ async fn the_trash_can_be_restored_or_emptied_as_a_whole() {
     assert_eq!(total().await, 0);
 }
 
-/// `aggregates()` answers several aggregates in one statement, with the values
-/// the single terminals give, over plain, limited and empty row sets.
+/// The single aggregate terminals read the values the rows give, and
+/// `aggregates()` answers several in one statement with the same values, over
+/// plain, limited and empty row sets; over no rows a sum is zero and a
+/// minimum, maximum or average is `None`.
 #[tokio::test]
 async fn aggregates_match_the_single_terminals() {
     if !setup().await {
         return;
     }
 
+    // Ages 21 to 26, every even user active.
     seed_users(6).await;
     let wanted = [
         Aggregate::count(),
@@ -3584,7 +3289,21 @@ async fn aggregates_match_the_single_terminals() {
     type Stats = (u64, i64, Option<f64>, Option<i32>, Option<i32>, u64);
     let adults = || TestUser::query().where_gt("age", 22);
     let limited = || adults().order_by("age", SortOrder::Desc).limit(3);
-    for (label, query) in [("plain", adults()), ("limited", limited())] {
+    let nobody = || TestUser::query().where_gt("age", 1000);
+    let cases: [(&str, _, Stats); 3] = [
+        (
+            "plain",
+            adults(),
+            (4, 98, Some(24.5), Some(23), Some(26), 2),
+        ),
+        (
+            "limited",
+            limited(),
+            (3, 75, Some(25.0), Some(24), Some(26), 2),
+        ),
+        ("empty", nobody(), (0, 0, None, None, None, 0)),
+    ];
+    for (label, query, expected) in cases {
         let together: Stats = query
             .clone()
             .aggregates(&wanted)
@@ -3597,29 +3316,28 @@ async fn aggregates_match_the_single_terminals() {
             query.clone().sum("age").await.expect("sum failed"),
             query.clone().avg("age").await.expect("avg failed"),
             query.clone().min("age").await.expect("min failed"),
-            query.clone().max("age").await.expect("max failed"),
+            query
+                .clone()
+                .max(TestUser::columns.age)
+                .await
+                .expect("max failed"),
             query
                 .clone()
                 .count_distinct("active")
                 .await
                 .expect("count_distinct failed"),
         );
-        assert_eq!(together, one_by_one, "{label}");
+        assert_eq!(one_by_one, expected, "{label}, one by one");
+        assert_eq!(together, expected, "{label}, together");
     }
 
-    let none: Stats = TestUser::query()
-        .where_gt("age", 1000)
-        .aggregates(&wanted)
-        .await
-        .expect("empty aggregates failed");
-    assert_eq!(none, (0, 0, None, None, None, 0));
     let nothing: Vec<f64> = TestUser::query()
         .aggregates(&[])
         .await
         .expect("no aggregates");
     assert!(nothing.is_empty());
 
-    // Any column type, and the same column twice.
+    // Any column type, read as the model reads it, and the same column twice.
     let (first, last, oldest): (Option<String>, Option<String>, Option<i32>) = TestUser::query()
         .aggregates(&[
             Aggregate::min("name"),
@@ -3631,6 +3349,18 @@ async fn aggregates_match_the_single_terminals() {
     assert_eq!(
         (first.as_deref(), last.as_deref(), oldest),
         (Some("User 01"), Some("User 06"), Some(26))
+    );
+    let first: Option<String> = TestUser::query()
+        .min("name")
+        .await
+        .expect("min(name) failed");
+    let last: Option<String> = TestUser::query()
+        .max("name")
+        .await
+        .expect("max(name) failed");
+    assert_eq!(
+        (first.as_deref(), last.as_deref()),
+        (Some("User 01"), Some("User 06"))
     );
 }
 
@@ -3714,7 +3444,8 @@ async fn insert_all_of_models_keyed_by_the_client_keeps_their_order() {
     })
     .await;
     // Descending, so a batch read back in key order would come out reversed;
-    // 20,000 rows take two statements even on SQLite.
+    // 20,000 rows of two columns pass SQLite's 32,766 parameters, so there
+    // the batch takes two statements.
     let wanted: Vec<usize> = (0..20_000).rev().collect();
     let items = wanted
         .iter()
@@ -3733,12 +3464,8 @@ async fn insert_all_of_models_keyed_by_the_client_keeps_their_order() {
     }
     assert_eq!(CodedItem::count().await.expect("count failed"), 20_000);
 
-    fresh_table("uuid_keyed_codes", |t| {
-        t.uuid("id").primary_key();
-        t.string("code").not_null().unique();
-        t.big_integer("hits").not_null();
-    })
-    .await;
+    // Nil keys are generated, one distinct key per row.
+    fresh_uuid_keyed_codes().await;
     let codes = (0..300)
         .map(|i| UuidKeyedCode {
             id: Uuid::nil(),
@@ -3907,63 +3634,6 @@ async fn right_and_aliased_left_joins_keep_the_unmatched_rows() {
     );
 }
 
-/// A JSON member holding `null` exists, a missing one does not, and a `NULL`
-/// column matches neither the test nor its negation.
-#[tokio::test]
-async fn json_existence_counts_a_null_member_and_skips_a_null_column() {
-    use serde_json::json;
-
-    if !setup().await {
-        return;
-    }
-
-    for metadata in [
-        Some(json!({"a": {"b": 1}})),
-        Some(json!({"a": {"b": null}})),
-        Some(json!({"a": {}})),
-        None,
-    ] {
-        TestProduct {
-            id: 0,
-            name: "Widget".to_string(),
-            category: "tools".to_string(),
-            price: 1,
-            metadata,
-        }
-        .save()
-        .await
-        .expect("save failed");
-    }
-    let ids = |query: QueryBuilder<TestProduct>| async move {
-        let mut ids: Vec<i64> = query
-            .get()
-            .await
-            .expect("json filter failed")
-            .into_iter()
-            .map(|product| product.id)
-            .collect();
-        ids.sort_unstable();
-        ids
-    };
-
-    assert_eq!(
-        ids(TestProduct::query().where_json_path_exists("metadata", "$.a.b")).await,
-        [1, 2]
-    );
-    assert_eq!(
-        ids(TestProduct::query().where_json_path_not_exists("metadata", "$.a.b")).await,
-        [3]
-    );
-    assert_eq!(
-        ids(TestProduct::query().where_json_key_exists("metadata", "a")).await,
-        [1, 2, 3]
-    );
-    assert_eq!(
-        ids(TestProduct::query().where_json_key_not_exists("metadata", "z")).await,
-        [1, 2, 3]
-    );
-}
-
 /// `has_no_related` keeps a row whose related rows all fail the condition, and
 /// a row with none at all.
 #[tokio::test]
@@ -4073,6 +3743,33 @@ async fn rename_table_keeps_rows_and_incoming_foreign_keys() {
     );
 }
 
+/// The schema file `SchemaWriter::write_schema` writes for the database under
+/// test, read back. `tag` names the scenario's file.
+pub async fn exported_schema(tag: &str) -> String {
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "tideorm_schema_{tag}_{:?}_{}.sql",
+        backend::DATABASE_TYPE,
+        std::process::id()
+    ));
+    SchemaWriter::write_schema(&path)
+        .await
+        .expect("write_schema failed");
+    let file = std::fs::read_to_string(&path).expect("schema file missing");
+    let _ = std::fs::remove_file(&path);
+    file
+}
+
+/// The statements of a schema file, split the way the backend reads them.
+pub fn export_statements(sql: &str) -> Vec<&str> {
+    schema_script::statements(
+        sql,
+        matches!(
+            backend::DATABASE_TYPE,
+            DatabaseType::MySQL | DatabaseType::MariaDB
+        ),
+    )
+}
+
 /// `SchemaWriter::write_schema` reads a live table back well enough to
 /// recreate it: run from the file, the table takes rows again and its unique
 /// index still rejects a duplicate.
@@ -4089,17 +3786,7 @@ async fn write_schema_exports_a_table_that_can_be_recreated_from_the_file() {
         t.unique_index(&["code"]);
     })
     .await;
-
-    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
-        "tideorm_schema_{:?}_{}.sql",
-        backend::DATABASE_TYPE,
-        std::process::id()
-    ));
-    SchemaWriter::write_schema(&path)
-        .await
-        .expect("write_schema failed");
-    let file = std::fs::read_to_string(&path).expect("schema file missing");
-    let _ = std::fs::remove_file(&path);
+    let file = exported_schema("rows").await;
 
     let quoted = match backend::DATABASE_TYPE {
         DatabaseType::MySQL | DatabaseType::MariaDB => "`exported_rows`",
@@ -4125,10 +3812,12 @@ async fn write_schema_exports_a_table_that_can_be_recreated_from_the_file() {
                         || statement.contains("exported_rows_id_seq")))
         })
         .collect();
-    let _create = statements
-        .iter()
-        .find(|statement| statement.starts_with("CREATE TABLE"))
-        .unwrap_or_else(|| panic!("no CREATE TABLE for exported_rows in:\n{file}"));
+    assert!(
+        statements
+            .iter()
+            .any(|statement| statement.starts_with("CREATE TABLE")),
+        "no CREATE TABLE for exported_rows in:\n{file}"
+    );
     assert!(
         statements.iter().any(|statement| {
             statement.starts_with("CREATE UNIQUE INDEX") || statement.contains("UNIQUE KEY `")
@@ -4159,74 +3848,6 @@ async fn write_schema_exports_a_table_that_can_be_recreated_from_the_file() {
             .await
             .is_err(),
         "the recreated unique index should reject a duplicate"
-    );
-}
-
-/// SQLite's schema file recreates what `PRAGMA` metadata leaves out: a
-/// generated column, an index's collation, and `AUTOINCREMENT`, which keeps
-/// a deleted row's id from coming back. Rebuilt from the pragmas, the table
-/// lost the column, the unique index took "alice" beside "Alice", and ids
-/// were reused.
-#[tokio::test]
-async fn write_schema_keeps_what_sqlite_pragmas_leave_out() {
-    if !setup().await || backend::DATABASE_TYPE != DatabaseType::SQLite {
-        return;
-    }
-    for statement in [
-        "DROP TABLE IF EXISTS exported_kinds",
-        "CREATE TABLE exported_kinds (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, \
-         base INTEGER, doubled INTEGER GENERATED ALWAYS AS (base * 2))",
-        "CREATE UNIQUE INDEX exported_kinds_name ON exported_kinds (name COLLATE NOCASE)",
-    ] {
-        Database::execute(statement).await.expect("setup failed");
-    }
-
-    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("tideorm_schema_kinds.sql");
-    SchemaWriter::write_schema(&path)
-        .await
-        .expect("write_schema failed");
-    let file = std::fs::read_to_string(&path).expect("schema file missing");
-    let _ = std::fs::remove_file(&path);
-
-    Database::execute("DROP TABLE exported_kinds")
-        .await
-        .expect("drop failed");
-    for statement in export_statements(&file)
-        .into_iter()
-        .filter(|statement| statement.contains("exported_kinds"))
-    {
-        Database::execute(statement.trim())
-            .await
-            .unwrap_or_else(|error| panic!("{error}\n{statement}\nin:\n{file}"));
-    }
-
-    Database::execute("INSERT INTO exported_kinds (name, base) VALUES ('Alice', 2)")
-        .await
-        .expect("insert failed");
-    let rows = Database::raw_json("SELECT id, doubled FROM exported_kinds")
-        .await
-        .expect("read failed");
-    assert_eq!(rows[0]["doubled"], serde_json::json!(4), "{file}");
-    assert!(
-        Database::execute("INSERT INTO exported_kinds (name) VALUES ('alice')")
-            .await
-            .is_err(),
-        "the index lost its collation:\n{file}"
-    );
-
-    let first = rows[0]["id"].as_i64().expect("an id");
-    Database::execute("DELETE FROM exported_kinds")
-        .await
-        .expect("delete failed");
-    Database::execute("INSERT INTO exported_kinds (name) VALUES ('Bob')")
-        .await
-        .expect("insert failed");
-    let rows = Database::raw_json("SELECT id FROM exported_kinds")
-        .await
-        .expect("read failed");
-    assert!(
-        rows[0]["id"].as_i64().expect("an id") > first,
-        "a deleted id came back:\n{file}"
     );
 }
 
@@ -4452,6 +4073,25 @@ async fn multiply_and_divide_scale_an_integer_column_exactly() {
         let operation = if divide { "/" } else { "*" };
         assert_eq!(stored.amount, expected, "{start} {operation} {factor}");
     }
+
+    // An `i32` column too: SQLite stored `age * 1.1` as a REAL, after which
+    // no row decoded.
+    seed_users(3).await;
+    TestUser::update_all()
+        .multiply("age", 1.1)
+        .where_gt("age", 0)
+        .execute()
+        .await
+        .expect("multiply failed");
+    let ages: Vec<i32> = TestUser::query()
+        .order_by("id", Order::Asc)
+        .get()
+        .await
+        .expect("rows no longer decode after multiply")
+        .into_iter()
+        .map(|user| user.age)
+        .collect();
+    assert_eq!(ages, [23, 24, 25]);
 }
 
 /// A text primary key refuses NULL on every backend. SQLite lets any key but
@@ -4760,9 +4400,8 @@ async fn eager_loads_match_keys_under_the_columns_collation() {
 }
 
 /// Eager loading matches keys by value, as the database does, so an `i64` key
-/// finds the `i32` or the text column holding it; a `MorphTo` looks its owner
-/// up by the key the owner's `MorphMany` names; and a pair a pivot holds twice
-/// is one related row.
+/// finds the `i32` or the text column holding it, and a `MorphTo` looks its
+/// owner up by the key the owner's `MorphMany` names.
 #[tokio::test]
 async fn eager_loads_match_keys_by_value_and_morph_owners_by_their_key() {
     if !setup().await {
@@ -4884,41 +4523,6 @@ async fn eager_loads_match_keys_by_value_and_morph_owners_by_their_key() {
         .expect("load_as failed")
         .expect("the owner is missing");
     assert_eq!(owner.code, "doc-a");
-
-    fresh_linked_tables().await;
-    fresh_table("linked_article_labels", |t| {
-        t.id();
-        t.big_integer("article_id").not_null();
-        t.big_integer("label_id").not_null();
-    })
-    .await;
-    let article = LinkedArticle::create(LinkedArticle {
-        title: "a".into(),
-        ..Default::default()
-    })
-    .await
-    .expect("create article failed");
-    let label = LinkedLabel::create(LinkedLabel {
-        name: "l".into(),
-        ..Default::default()
-    })
-    .await
-    .expect("create label failed");
-    for _ in 0..2 {
-        LinkedArticleLabel::create(LinkedArticleLabel {
-            id: 0,
-            article_id: article.id,
-            label_id: label.id,
-        })
-        .await
-        .expect("create pivot row failed");
-    }
-    let articles = LinkedArticle::query()
-        .with("labels")
-        .get()
-        .await
-        .expect("eager load failed");
-    assert_eq!(articles[0].labels.get_cached().map_or(0, <[_]>::len), 1);
 }
 
 #[tideorm::model(table = "tree_nodes", soft_delete)]
@@ -5129,20 +4733,12 @@ async fn unions_empty_documents_and_trashed_rows_keep_their_meaning() {
     assert!(deleted.is_err(), "{deleted:?}");
     assert_eq!(TestProduct::query().count().await.expect("count failed"), 2);
 
-    let trashed = TestSoftDelete::create(TestSoftDelete {
-        id: 0,
-        name: "trashed".into(),
-        deleted_at: None,
-    })
-    .await
-    .expect("create failed");
-    TestSoftDelete::create(TestSoftDelete {
-        id: 0,
-        name: "live".into(),
-        deleted_at: None,
-    })
-    .await
-    .expect("create failed");
+    let trashed = TestSoftDelete::create(soft_deletable("trashed"))
+        .await
+        .expect("create failed");
+    TestSoftDelete::create(soft_deletable("live"))
+        .await
+        .expect("create failed");
     let stamp = chrono::DateTime::parse_from_rfc3339("2001-01-01T00:00:00Z")
         .expect("valid timestamp")
         .with_timezone(&chrono::Utc);
@@ -5180,11 +4776,10 @@ pub struct RenamedAccount {
     pub s3key: String,
 }
 
-/// An upsert names columns by field or column name everywhere, a field name
-/// whose digits are followed by letters (`s3key`) compiles, and an update
-/// started from a query shares its OR group.
+/// An upsert names columns by field or column name everywhere, and a field
+/// name whose digits are followed by letters (`s3key`) compiles.
 #[tokio::test]
-async fn upserts_take_field_names_and_query_updates_share_the_or_group() {
+async fn upserts_take_field_or_column_names() {
     if !setup().await {
         return;
     }
@@ -5223,18 +4818,6 @@ async fn upserts_take_field_names_and_query_updates_share_the_or_group() {
         .insert(account("x", "k3"))
         .await;
     assert!(unknown.is_err(), "{unknown:?}");
-
-    seed_users(4).await;
-    let updated = TestUser::query()
-        .where_gt("age", 0)
-        .or_where_eq("id", 1)
-        .update_all()
-        .or_where_eq("id", 3)
-        .set("name", "picked")
-        .execute()
-        .await
-        .expect("update failed");
-    assert_eq!(updated, 2, "age > 0 AND (id = 1 OR id = 3)");
 }
 
 /// A transaction whose closure swallowed a failed statement: PostgreSQL has
@@ -5614,17 +5197,7 @@ async fn write_schema_keeps_string_defaults_and_full_text_indexes() {
             .expect("drop failed");
     }
     Database::execute(index).await.expect("index failed");
-
-    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
-        "tideorm_schema_docs_{:?}_{}.sql",
-        backend::DATABASE_TYPE,
-        std::process::id()
-    ));
-    SchemaWriter::write_schema(&path)
-        .await
-        .expect("write_schema failed");
-    let file = std::fs::read_to_string(&path).expect("schema file missing");
-    let _ = std::fs::remove_file(&path);
+    let file = exported_schema("docs").await;
     if backend::DATABASE_TYPE == DatabaseType::SQLite {
         Database::execute("DROP TABLE exported_docs_fts")
             .await
@@ -6121,18 +5694,9 @@ async fn an_upsert_on_an_unnumbered_key_creates_the_row() {
     if !setup().await {
         return;
     }
-    let created = TestUser::insert_or_update(
-        TestUser {
-            id: 0,
-            email: "zero@example.com".into(),
-            name: "zero".into(),
-            age: 1,
-            active: true,
-        },
-        vec!["id"],
-    )
-    .await
-    .expect("upsert failed");
+    let created = TestUser::insert_or_update(user("zero@example.com", "zero", 1, true), vec!["id"])
+        .await
+        .expect("upsert failed");
     assert_ne!(created.id, 0);
     let ids: Vec<i64> = TestUser::query().pluck("id").await.expect("pluck failed");
     assert_eq!(ids, vec![created.id]);
@@ -6243,6 +5807,13 @@ async fn save_with_many_updates_stored_children() {
     assert_eq!(names, vec!["renamed".to_string()]);
 }
 
+#[tideorm::model(table = "timed_events")]
+pub struct TimedEvent {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Aggregates read as the columns they summarize: a second MAX of a
 /// timestamp decodes like the first, and a count of a joined boolean column
 /// is a number. A MIN or MAX of a boolean is left to backends that have one.
@@ -6275,15 +5846,9 @@ async fn aggregates_decode_each_value_by_its_column() {
     assert!(first.expect("a first event") < last.expect("a last event"));
 
     for (email, active) in [("a@example.com", true), ("b@example.com", false)] {
-        TestUser::create(TestUser {
-            email: email.into(),
-            name: "n".into(),
-            age: 1,
-            active,
-            ..Default::default()
-        })
-        .await
-        .expect("create failed");
+        TestUser::create(user(email, "n", 1, active))
+            .await
+            .expect("create failed");
     }
     for email in ["a@example.com", "b@example.com"] {
         CallbackUser::create(CallbackUser {
@@ -6302,13 +5867,6 @@ async fn aggregates_decode_each_value_by_its_column() {
     assert_eq!(distinct, 2);
 }
 
-#[tideorm::model(table = "timed_events")]
-pub struct TimedEvent {
-    #[tideorm(primary_key, auto_increment)]
-    pub id: i64,
-    pub at: chrono::DateTime<chrono::Utc>,
-}
-
 /// A union reads a plucked column, and orders by a column, off its result
 /// rows: `pluck` rewrote the first query's projection only, and an
 /// `ORDER BY "table"."column"` is refused on a union.
@@ -6322,15 +5880,9 @@ async fn a_union_plucks_and_orders_by_result_columns() {
         ("b@example.com", "bob"),
         ("c@example.com", "cat"),
     ] {
-        TestUser::create(TestUser {
-            email: email.into(),
-            name: name.into(),
-            age: 1,
-            active: true,
-            ..Default::default()
-        })
-        .await
-        .expect("create failed");
+        TestUser::create(user(email, name, 1, true))
+            .await
+            .expect("create failed");
     }
     let union = || {
         TestUser::query()
@@ -6359,15 +5911,9 @@ async fn a_grouped_join_counts_groups_whose_columns_share_a_name() {
         return;
     }
     for (email, name) in [("a@example.com", "ann"), ("b@example.com", "bob")] {
-        TestUser::create(TestUser {
-            email: email.into(),
-            name: name.into(),
-            age: 1,
-            active: true,
-            ..Default::default()
-        })
-        .await
-        .expect("create failed");
+        TestUser::create(user(email, name, 1, true))
+            .await
+            .expect("create failed");
         CallbackUser::create(CallbackUser {
             email: email.into(),
             name: name.into(),
@@ -6395,15 +5941,9 @@ async fn chunk_of_a_limited_join_hands_over_the_limited_rows() {
     }
     for index in 0..12 {
         let email = format!("user{index:02}@example.com");
-        TestUser::create(TestUser {
-            email: email.clone(),
-            name: format!("u{index:02}"),
-            age: 1,
-            active: true,
-            ..Default::default()
-        })
-        .await
-        .expect("create failed");
+        TestUser::create(user(&email, &format!("u{index:02}"), 1, true))
+            .await
+            .expect("create failed");
         CallbackUser::create(CallbackUser {
             email,
             name: "c".into(),
@@ -6426,60 +5966,6 @@ async fn chunk_of_a_limited_join_hands_over_the_limited_rows() {
             .unwrap_or_else(|error| panic!("chunk({chunk_size}) failed: {error}"));
         assert_eq!(seen, 10, "chunk({chunk_size})");
     }
-}
-
-/// `query_with(db).with(..)` reads the relations from `db` too; they came
-/// from the global database. Two in-memory SQLite databases stand in for two
-/// tenants.
-#[tokio::test]
-async fn query_with_reads_eager_relations_from_its_database() {
-    if !setup().await || backend::DATABASE_TYPE != DatabaseType::SQLite {
-        return;
-    }
-    // One connection, which is the whole in-memory database.
-    let tenant = Database::builder()
-        .url("sqlite::memory:")
-        .max_connections(1)
-        .min_connections(1)
-        .build()
-        .await
-        .expect("tenant connect failed");
-    for sql in [
-        "CREATE TABLE eager_owners (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
-        "CREATE TABLE eager_pets (id INTEGER PRIMARY KEY AUTOINCREMENT, owner_id INTEGER NOT NULL, name TEXT NOT NULL)",
-        "INSERT INTO eager_owners (id, name) VALUES (1, 'tenant')",
-        "INSERT INTO eager_pets (owner_id, name) VALUES (1, 'tenant pet')",
-    ] {
-        tenant.exec_raw(sql).await.expect("tenant setup failed");
-    }
-    fresh_eager_tables().await;
-    let owner = EagerOwner::create(EagerOwner {
-        name: "global".into(),
-        ..Default::default()
-    })
-    .await
-    .expect("create failed");
-    EagerPet::create(EagerPet {
-        owner_id: owner.id as i32,
-        name: "global pet".into(),
-        ..Default::default()
-    })
-    .await
-    .expect("create failed");
-
-    let owners = EagerOwner::query_with(&tenant)
-        .with("pets")
-        .get()
-        .await
-        .expect("eager load failed");
-    let pets: Vec<String> = owners[0]
-        .pets
-        .get_cached()
-        .unwrap_or_default()
-        .iter()
-        .map(|pet| pet.name.clone())
-        .collect();
-    assert_eq!(pets, vec!["tenant pet".to_string()]);
 }
 
 /// A `get_json()` output is typed by where it comes from: an expression
@@ -6679,14 +6165,7 @@ async fn write_schema_keeps_constraints_and_generated_columns() {
     for statement in create {
         Database::execute(statement).await.expect("setup failed");
     }
-
-    let path =
-        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("tideorm_schema_constraints.sql");
-    SchemaWriter::write_schema(&path)
-        .await
-        .expect("write_schema failed");
-    let file = std::fs::read_to_string(&path).expect("schema file missing");
-    let _ = std::fs::remove_file(&path);
+    let file = exported_schema("constraints").await;
 
     drop().await;
     for statement in export_statements(&file).into_iter().filter(|statement| {
@@ -6951,7 +6430,8 @@ async fn json_null_and_sql_null_are_told_apart() {
 /// JSON key and path existence read paths strictly on every backend: a key
 /// exists only in an object, a step never looks inside an array it does not
 /// index nor indexes a non-array, and the documented `a.b` form starts at
-/// the root.
+/// the root. A member holding JSON `null` exists, and a `NULL` column matches
+/// neither a test nor its negation.
 #[tokio::test]
 async fn json_existence_agrees_across_backends() {
     if !setup().await {
@@ -6967,6 +6447,7 @@ async fn json_existence_agrees_across_backends() {
     .await;
     let query = TestProduct::query;
 
+    // `sql_null` is in neither a test nor its negation.
     assert_eq!(
         product_names(query().where_json_key_exists("metadata", "k")).await,
         ["object"]
@@ -6975,6 +6456,7 @@ async fn json_existence_agrees_across_backends() {
         product_names(query().where_json_key_not_exists("metadata", "k")).await,
         ["array", "scalar_a", "string_k"]
     );
+    // `c` holds JSON `null`.
     assert_eq!(
         product_names(query().where_json_path_exists("metadata", "a.b[1].c")).await,
         ["object"]

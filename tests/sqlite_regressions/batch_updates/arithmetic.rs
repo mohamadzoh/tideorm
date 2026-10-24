@@ -462,15 +462,17 @@ struct Arithmetic {
     amount: Option<i64>,
 }
 
+/// `review_arithmetic` holding row 1 at 2^53 + 1, which no `f64` holds.
 async fn arithmetic_database() -> Database {
-    let db = Database::connect("sqlite::memory:").await.unwrap();
-    db.exec_raw("CREATE TABLE review_arithmetic(id INTEGER PRIMARY KEY, amount INTEGER)")
-        .await
-        .unwrap();
-    db.exec_raw("INSERT INTO review_arithmetic VALUES(1,9007199254740993)")
-        .await
-        .unwrap();
-    db
+    memory_database(
+        "CREATE TABLE review_arithmetic(id INTEGER PRIMARY KEY, amount INTEGER); \
+         INSERT INTO review_arithmetic VALUES(1,9007199254740993)",
+    )
+    .await
+}
+
+async fn amount(db: &Database, id: i64) -> Option<i64> {
+    Arithmetic::find_with(id, db).await.unwrap().unwrap().amount
 }
 
 #[tokio::test]
@@ -485,10 +487,7 @@ async fn nonfinite_bulk_arithmetic_never_writes() {
                 update.multiply("amount", factor)
             };
             assert!(update.execute().await.is_err());
-            assert_eq!(
-                Arithmetic::find_with(1, &db).await.unwrap().unwrap().amount,
-                Some(9007199254740993)
-            );
+            assert_eq!(amount(&db, 1).await, Some(9007199254740993));
         }
     }
     assert!(
@@ -514,10 +513,7 @@ async fn sqlite_integer_scale_refuses_inexact_fallback() {
         };
         let error = update.execute().await.unwrap_err();
         assert!(error.to_string().contains("exactly"), "{error}");
-        assert_eq!(
-            Arithmetic::find_with(1, &db).await.unwrap().unwrap().amount,
-            Some(9007199254740993)
-        );
+        assert_eq!(amount(&db, 1).await, Some(9007199254740993));
     }
     Arithmetic::query_with(&db)
         .where_eq("id", 1)
@@ -526,22 +522,33 @@ async fn sqlite_integer_scale_refuses_inexact_fallback() {
         .execute()
         .await
         .unwrap();
-    assert_eq!(
-        Arithmetic::find_with(1, &db).await.unwrap().unwrap().amount,
-        Some(4503599627370497)
-    );
+    assert_eq!(amount(&db, 1).await, Some(4503599627370497));
 }
 
+/// A result past `i64` fails the whole statement, so the row that would not
+/// overflow keeps its value too; a NULL stays NULL.
 #[tokio::test]
-async fn sqlite_scaling_overflow_aborts_the_whole_update() {
+async fn integer_overflow_aborts_the_whole_update() {
+    type Apply = fn(BatchUpdateBuilder<Arithmetic>) -> BatchUpdateBuilder<Arithmetic>;
     let db = arithmetic_database().await;
-    for (value, factor, divide) in [
-        (4611686018427387904_i64, 2.0, false),
-        (-4611686018427387905, 2.0, false),
-        (i64::MIN, -1.0, false),
-        (i64::MIN, -1.0, true),
-        (4611686018427387904, 0.5, true),
-    ] {
+    let cases: [(i64, &str, Apply); 9] = [
+        (i64::MAX, "+ 1", |update| update.increment("amount", 1)),
+        (i64::MIN, "- 1", |update| update.decrement("amount", 1)),
+        (i64::MAX, "- -1", |update| update.decrement("amount", -1)),
+        (i64::MIN, "+ -1", |update| update.increment("amount", -1)),
+        (4611686018427387904, "* 2", |update| {
+            update.multiply("amount", 2.0)
+        }),
+        (-4611686018427387905, "* 2", |update| {
+            update.multiply("amount", 2.0)
+        }),
+        (i64::MIN, "* -1", |update| update.multiply("amount", -1.0)),
+        (i64::MIN, "/ -1", |update| update.divide("amount", -1.0)),
+        (4611686018427387904, "/ 0.5", |update| {
+            update.divide("amount", 0.5)
+        }),
+    ];
+    for (value, operation, apply) in cases {
         db.exec_raw("DELETE FROM review_arithmetic").await.unwrap();
         db.exec_raw_with_params(
             "INSERT INTO review_arithmetic VALUES(1,2),(2,?)",
@@ -549,26 +556,10 @@ async fn sqlite_scaling_overflow_aborts_the_whole_update() {
         )
         .await
         .unwrap();
-        let update = Arithmetic::query_with(&db).where_gte("id", 1).update_all();
-        let result = if divide {
-            update.divide("amount", factor)
-        } else {
-            update.multiply("amount", factor)
-        }
-        .execute()
-        .await;
-        assert!(
-            result.is_err(),
-            "overflow unexpectedly succeeded: {value}, {factor}, {divide}"
-        );
-        assert_eq!(
-            Arithmetic::find_with(1, &db).await.unwrap().unwrap().amount,
-            Some(2)
-        );
-        assert_eq!(
-            Arithmetic::find_with(2, &db).await.unwrap().unwrap().amount,
-            Some(value)
-        );
+        let update = apply(Arithmetic::query_with(&db).where_gte("id", 1).update_all());
+        assert!(update.execute().await.is_err(), "{value} {operation}");
+        assert_eq!(amount(&db, 1).await, Some(2), "{value} {operation}");
+        assert_eq!(amount(&db, 2).await, Some(value), "{value} {operation}");
     }
     db.exec_raw("UPDATE review_arithmetic SET amount=NULL WHERE id=2")
         .await
@@ -580,52 +571,8 @@ async fn sqlite_scaling_overflow_aborts_the_whole_update() {
         .execute()
         .await
         .unwrap();
-    assert_eq!(
-        Arithmetic::find_with(1, &db).await.unwrap().unwrap().amount,
-        Some(4)
-    );
-    assert_eq!(
-        Arithmetic::find_with(2, &db).await.unwrap().unwrap().amount,
-        None
-    );
-}
-
-#[tokio::test]
-async fn integer_addition_and_subtraction_overflow_roll_back_all_rows() {
-    let db = arithmetic_database().await;
-    for (amount, increment, operand) in [
-        (i64::MAX, true, 1),
-        (i64::MIN, false, 1),
-        (i64::MAX, false, -1),
-        (i64::MIN, true, -1),
-    ] {
-        db.exec_raw("DELETE FROM review_arithmetic").await.unwrap();
-        db.exec_raw_with_params(
-            "INSERT INTO review_arithmetic(id,amount) VALUES(1,2),(2,?)",
-            vec![amount.into()],
-        )
-        .await
-        .unwrap();
-        let query = Arithmetic::query_with(&db).where_gte("id", 1).update_all();
-        assert!(
-            if increment {
-                query.increment("amount", operand)
-            } else {
-                query.decrement("amount", operand)
-            }
-            .execute()
-            .await
-            .is_err()
-        );
-        assert_eq!(
-            Arithmetic::find_with(1, &db).await.unwrap().unwrap().amount,
-            Some(2)
-        );
-        assert_eq!(
-            Arithmetic::find_with(2, &db).await.unwrap().unwrap().amount,
-            Some(amount)
-        );
-    }
+    assert_eq!(amount(&db, 1).await, Some(4));
+    assert_eq!(amount(&db, 2).await, None);
 }
 
 #[tideorm::model(table = "review_narrow_arithmetic")]
@@ -638,11 +585,11 @@ struct NarrowArithmetic {
 
 #[tokio::test]
 async fn sqlite_arithmetic_respects_model_integer_widths() {
-    let db = Database::connect("sqlite::memory:").await.unwrap();
-    db.exec_raw("CREATE TABLE review_narrow_arithmetic(id INTEGER PRIMARY KEY, signed INTEGER, unsigned INTEGER)").await.unwrap();
-    db.exec_raw("INSERT INTO review_narrow_arithmetic VALUES(1, 2, 2), (2, 2147483647, 0)")
-        .await
-        .unwrap();
+    let db = memory_database(
+        "CREATE TABLE review_narrow_arithmetic(id INTEGER PRIMARY KEY, signed INTEGER, unsigned INTEGER); \
+         INSERT INTO review_narrow_arithmetic VALUES(1, 2, 2), (2, 2147483647, 0)",
+    )
+    .await;
     for operation in 0..4 {
         let query = NarrowArithmetic::query_with(&db)
             .where_gte("id", 1)

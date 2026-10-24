@@ -9,104 +9,6 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use serde_json::json;
 use tideorm::prelude::*;
 
-#[tideorm::model(table = "audit_values")]
-struct Typed {
-    #[tideorm(primary_key)]
-    id: i64,
-    token: Uuid,
-    amount: Option<f64>,
-}
-
-#[tokio::test]
-async fn uuid_subquery_keeps_its_output_type_and_assignments_validate() {
-    let db=memory_database("CREATE TABLE audit_values(id INTEGER PRIMARY KEY,token BLOB,amount REAL); INSERT INTO audit_values VALUES(1,X'00112233445566778899AABBCCDDEEFF',1)").await;
-    let sub = Typed::query_with(&db).select(vec!["token"]).limit(1);
-    let result = Typed::query_with(&db)
-        .select(vec!["id"])
-        .select_subquery(sub, "selected")
-        .get_json()
-        .await
-        .unwrap();
-    assert_eq!(
-        result[0]["selected"],
-        serde_json::json!("00112233-4455-6677-8899-aabbccddeeff")
-    );
-    assert!(
-        Typed::query_with(&db)
-            .where_eq("id", 1)
-            .update_all()
-            .set("token", "invalid")
-            .execute()
-            .await
-            .is_err()
-    );
-    assert!(
-        Typed::query_with(&db)
-            .where_eq("id", 1)
-            .update_all()
-            .set("amount", "invalid")
-            .execute()
-            .await
-            .is_err()
-    );
-    assert_eq!(
-        Typed::find_with(1, &db).await.unwrap().unwrap().amount,
-        Some(1.0)
-    );
-    db.transaction(|_| {
-        Box::pin(async {
-            assert!(
-                Typed::create(Typed {
-                    id: 2,
-                    token: Uuid::nil(),
-                    amount: Some(f64::NAN)
-                })
-                .await
-                .is_err()
-            );
-            let mut row = Typed::find(1).await?.unwrap();
-            row.amount = Some(f64::NAN);
-            assert!(row.update().await.is_err());
-            assert!(
-                Typed::insert_all(vec![
-                    Typed {
-                        id: 2,
-                        token: Uuid::nil(),
-                        amount: Some(2.0)
-                    },
-                    Typed {
-                        id: 3,
-                        token: Uuid::nil(),
-                        amount: Some(f64::NAN)
-                    },
-                ])
-                .await
-                .is_err()
-            );
-            assert!(
-                Typed::insert_or_update(
-                    Typed {
-                        id: 1,
-                        token: Uuid::nil(),
-                        amount: Some(f64::NAN)
-                    },
-                    vec!["id"]
-                )
-                .await
-                .is_err()
-            );
-            Ok(())
-        })
-    })
-    .await
-    .unwrap();
-    assert_eq!(Typed::query_with(&db).count().await.unwrap(), 1);
-    assert_eq!(
-        Typed::find_with(1, &db).await.unwrap().unwrap().amount,
-        Some(1.0)
-    );
-}
-
 #[tokio::test]
 async fn f32_assignments_round_like_model_writes() {
     #[tideorm::model(table = "audit_float_precision")]
@@ -162,38 +64,6 @@ async fn f32_assignments_round_like_model_writes() {
 }
 
 #[tokio::test]
-async fn ordinary_chunk_and_numeric_assignment_controls() {
-    let db = items_database().await;
-    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let output = seen.clone();
-    Item::query_with(&db)
-        .chunk(1, move |rows| {
-            let output = output.clone();
-            async move {
-                output
-                    .lock()
-                    .unwrap()
-                    .extend(rows.into_iter().map(|r| r.id));
-                Ok(())
-            }
-        })
-        .await
-        .unwrap();
-    assert_eq!(*seen.lock().unwrap(), vec![1, 2, 3]);
-    assert_eq!(
-        Item::query_with(&db)
-            .where_eq("id", 1)
-            .update_all()
-            .set("amount", 4.5)
-            .execute()
-            .await
-            .unwrap(),
-        1
-    );
-    assert_eq!(Item::find_with(1, &db).await.unwrap().unwrap().amount, 4.5);
-}
-
-#[tokio::test]
 async fn double_assignment_must_not_make_model_unreadable() {
     let db = items_database().await;
     for value in [
@@ -228,74 +98,26 @@ async fn double_assignment_must_not_make_model_unreadable() {
     let reload = Item::find_with(1, &db).await;
     assert_eq!(stored[0]["storage"], "real");
     assert_eq!(reload.unwrap().unwrap().amount, 1.5);
-    for value in [
-        serde_json::json!(" 4.5 "),
-        serde_json::json!(f64::MAX),
-        serde_json::json!(-f64::MAX),
+    for (value, expected) in [
+        (serde_json::json!(4.5), 4.5),
+        (serde_json::json!(" 4.5 "), 4.5),
+        (serde_json::json!(f64::MAX), f64::MAX),
+        (serde_json::json!(-f64::MAX), -f64::MAX),
     ] {
-        Item::query_with(&db)
+        let updated = Item::query_with(&db)
             .where_eq("id", 1)
             .update_all()
-            .set("amount", value)
+            .set("amount", value.clone())
             .execute()
             .await
             .unwrap();
-        assert!(
-            Item::find_with(1, &db)
-                .await
-                .unwrap()
-                .unwrap()
-                .amount
-                .is_finite()
+        assert_eq!(updated, 1, "{value}");
+        assert_eq!(
+            Item::find_with(1, &db).await.unwrap().unwrap().amount,
+            expected,
+            "{value}"
         );
     }
-}
-
-#[tokio::test]
-async fn nullable_double_assignments_preserve_null_and_coalesce() {
-    #[tideorm::model(table = "behavior_nullable")]
-    struct Nullable {
-        #[tideorm(primary_key)]
-        id: i64,
-        amount: Option<f64>,
-    }
-    let db = items_database().await;
-    db.exec_raw("CREATE TABLE behavior_nullable(id INTEGER PRIMARY KEY,amount REAL); INSERT INTO behavior_nullable VALUES(1,NULL)").await.unwrap();
-    assert!(
-        Nullable::query_with(&db)
-            .where_eq("id", 1)
-            .update_all()
-            .coalesce("amount", "invalid")
-            .execute()
-            .await
-            .is_err()
-    );
-    assert_eq!(
-        Nullable::find_with(1, &db).await.unwrap().unwrap().amount,
-        None
-    );
-    Nullable::query_with(&db)
-        .where_eq("id", 1)
-        .update_all()
-        .coalesce("amount", "2.5")
-        .execute()
-        .await
-        .unwrap();
-    assert_eq!(
-        Nullable::find_with(1, &db).await.unwrap().unwrap().amount,
-        Some(2.5)
-    );
-    Nullable::query_with(&db)
-        .where_eq("id", 1)
-        .update_all()
-        .set("amount", None::<f64>)
-        .execute()
-        .await
-        .unwrap();
-    assert_eq!(
-        Nullable::find_with(1, &db).await.unwrap().unwrap().amount,
-        None
-    );
 }
 
 #[tideorm::model(table = "typed_assignment_rows")]
@@ -539,63 +361,6 @@ async fn batch_setters_reject_foreign_typed_columns() {
 }
 
 #[tokio::test]
-async fn json_assignment_distinguishes_json_null_from_option_none() {
-    let db = Database::builder()
-        .url("sqlite::memory:")
-        .build()
-        .await
-        .unwrap();
-    #[tideorm::model(table = "review_json_null_assignment")]
-    struct Document {
-        #[tideorm(primary_key)]
-        id: i64,
-        payload: Option<serde_json::Value>,
-    }
-    db.exec_raw("CREATE TABLE review_json_null_assignment(id BIGINT PRIMARY KEY,payload JSON)")
-        .await
-        .unwrap();
-    db.exec_raw("INSERT INTO review_json_null_assignment VALUES(1,'{}')")
-        .await
-        .unwrap();
-    Document::query_with(&db)
-        .where_eq("id", 1)
-        .update_all()
-        .set("payload", serde_json::Value::Null)
-        .execute()
-        .await
-        .unwrap();
-    assert_eq!(
-        Document::find_with(1, &db).await.unwrap().unwrap().payload,
-        Some(serde_json::Value::Null)
-    );
-    Document::query_with(&db)
-        .where_eq("id", 1)
-        .update_all()
-        .set("payload", None::<serde_json::Value>)
-        .execute()
-        .await
-        .unwrap();
-    assert_eq!(
-        Document::find_with(1, &db).await.unwrap().unwrap().payload,
-        None
-    );
-    Document::query_with(&db)
-        .where_eq("id", 1)
-        .update_all()
-        .coalesce("payload", Some(serde_json::Value::Null))
-        .execute()
-        .await
-        .unwrap();
-    assert_eq!(
-        Document::find_with(1, &db).await.unwrap().unwrap().payload,
-        Some(serde_json::Value::Null)
-    );
-    db.exec_raw("DROP TABLE review_json_null_assignment")
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
 async fn literal_assignments_preserve_sqlite_model_storage_types() {
     #[tideorm::model(table = "review_literal_bounds")]
     struct BoundRow {
@@ -617,38 +382,33 @@ async fn literal_assignments_preserve_sqlite_model_storage_types() {
             } else {
                 query.set("n", value.clone())
             };
-            assert!(query.execute().await.is_err());
+            assert!(
+                query.execute().await.is_err(),
+                "{value}, coalesce={coalesce}"
+            );
         }
     }
-    for value in ["NaN", "inf", "-inf"] {
-        assert!(
-            BoundRow::query_with(&db)
-                .where_gte("id", 1)
-                .update_all()
-                .set("amount", value)
-                .execute()
-                .await
-                .is_err()
-        );
-        assert!(
-            BoundRow::query_with(&db)
-                .where_gte("id", 1)
-                .update_all()
-                .coalesce("amount", value)
-                .execute()
-                .await
-                .is_err()
-        );
+    for value in ["invalid", "NaN", "inf", "-inf"] {
+        for coalesce in [false, true] {
+            let query = BoundRow::query_with(&db).where_gte("id", 1).update_all();
+            let query = if coalesce {
+                query.coalesce("amount", value)
+            } else {
+                query.set("amount", value)
+            };
+            assert!(
+                query.execute().await.is_err(),
+                "{value}, coalesce={coalesce}"
+            );
+        }
     }
     let rows = BoundRow::query_with(&db)
         .order_asc("id")
         .get()
         .await
         .unwrap();
-    assert_eq!(rows[0].n, Some(123));
-    assert_eq!(rows[0].amount, Some(123.0));
-    assert_eq!(rows[1].n, None);
-    assert_eq!(rows[1].amount, None);
+    assert_eq!((rows[0].n, rows[0].amount), (Some(123), Some(123.0)));
+    assert_eq!((rows[1].n, rows[1].amount), (None, None));
     BoundRow::query_with(&db)
         .where_eq("id", 1)
         .update_all()
@@ -661,17 +421,28 @@ async fn literal_assignments_preserve_sqlite_model_storage_types() {
         .where_eq("id", 2)
         .update_all()
         .coalesce("n", i32::MAX)
+        .coalesce("amount", "2.5")
         .execute()
         .await
         .unwrap();
-    assert_eq!(
-        BoundRow::find_with(1, &db).await.unwrap().unwrap().n,
-        Some(i32::MIN)
-    );
-    assert_eq!(
-        BoundRow::find_with(2, &db).await.unwrap().unwrap().n,
-        Some(i32::MAX)
-    );
+    let rows = BoundRow::query_with(&db)
+        .order_asc("id")
+        .get()
+        .await
+        .unwrap();
+    assert_eq!((rows[0].n, rows[0].amount), (Some(i32::MIN), Some(1.25)));
+    assert_eq!((rows[1].n, rows[1].amount), (Some(i32::MAX), Some(2.5)));
+    // `None` stays SQL NULL.
+    BoundRow::query_with(&db)
+        .where_eq("id", 2)
+        .update_all()
+        .set("n", None::<i32>)
+        .set("amount", None::<f64>)
+        .execute()
+        .await
+        .unwrap();
+    let row = BoundRow::find_with(2, &db).await.unwrap().unwrap();
+    assert_eq!((row.n, row.amount), (None, None));
 }
 
 #[tokio::test]

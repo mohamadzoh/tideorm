@@ -1,5 +1,6 @@
 //! Tables whose `rowid` is shadowed by a column.
 
+use super::install;
 use crate::fixtures::global_memory_database;
 use tideorm::fulltext::{FullTextIndex, FullTextSearch};
 use tideorm::prelude::*;
@@ -25,23 +26,12 @@ struct AliasArticle {
     body: String,
 }
 
-async fn database() -> Database {
-    global_memory_database("").await
-}
-
 fn shadow_error<T>(result: tideorm::Result<T>) {
     let error = match result {
         Ok(_) => panic!("shadowed rowid must be rejected"),
         Err(error) => error.to_string(),
     };
     assert!(error.contains("rowid is shadowed"), "{error}");
-}
-
-async fn install(db: &Database, index: &FullTextIndex) -> tideorm::Result<()> {
-    for sql in index.to_sqlite_sql() {
-        db.exec_raw(&sql).await?;
-    }
-    Ok(())
 }
 
 #[tokio::test]
@@ -55,10 +45,7 @@ async fn unsupported_rowid_schemas_fail_before_any_index_is_created() {
         "id INTEGER PRIMARY KEY,rowid INTEGER,_rowid_ INTEGER,oid INTEGER,body TEXT",
     ] {
         for schema in ["main", "tenant"] {
-            let db = database().await;
-            db.exec_raw("ATTACH DATABASE ':memory:' AS tenant")
-                .await
-                .unwrap();
+            let db = global_memory_database("ATTACH DATABASE ':memory:' AS tenant").await;
             db.exec_raw(&format!(
                 "CREATE TABLE {schema}.rowid_articles({definition})"
             ))
@@ -85,10 +72,7 @@ async fn unsupported_rowid_schemas_fail_before_any_index_is_created() {
 #[tokio::test]
 async fn legacy_indexes_and_unmodeled_shadow_columns_cannot_return_wrong_matches() {
     for schema in ["main", "tenant"] {
-        let db = database().await;
-        db.exec_raw("ATTACH DATABASE ':memory:' AS tenant")
-            .await
-            .unwrap();
+        let db = global_memory_database("ATTACH DATABASE ':memory:' AS tenant").await;
         db.exec_raw(&format!(
             "CREATE TABLE {schema}.rowid_articles(id INTEGER PRIMARY KEY,rowid INTEGER,body TEXT)"
         ))
@@ -100,7 +84,8 @@ async fn legacy_indexes_and_unmodeled_shadow_columns_cannot_return_wrong_matches
             vec!["body".into()],
         );
         // Recreate the pre-fix installation, whose CREATE and trigger definitions
-        // used the user column as FTS identity. Skip both guarded statements.
+        // used the user column as FTS identity: skip the two guarded statements,
+        // the first and the closing rebuild.
         let statements = index.to_sqlite_sql();
         for sql in &statements[1..6] {
             db.exec_raw(sql).await.unwrap();
@@ -135,10 +120,9 @@ async fn legacy_indexes_and_unmodeled_shadow_columns_cannot_return_wrong_matches
 
 #[tokio::test]
 async fn real_rowid_primary_key_alias_supports_search_and_maintenance() {
-    let db = database().await;
-    db.exec_raw("CREATE TABLE alias_articles(rowid INTEGER PRIMARY KEY,body TEXT)")
-        .await
-        .unwrap();
+    let db =
+        global_memory_database("CREATE TABLE alias_articles(rowid INTEGER PRIMARY KEY,body TEXT)")
+            .await;
     let index = FullTextIndex::new("search", "alias_articles", vec!["body".into()]);
     install(&db, &index).await.unwrap();
     AliasArticle {
@@ -191,8 +175,11 @@ async fn real_rowid_primary_key_alias_supports_search_and_maintenance() {
 
 #[tokio::test]
 async fn other_rowid_aliases_do_not_interfere_with_hidden_rowid() {
-    let db = database().await;
-    db.exec_raw("CREATE TABLE rowid_articles(id INTEGER PRIMARY KEY,_rowid_ INTEGER,oid INTEGER,body TEXT); INSERT INTO rowid_articles VALUES(1,7,7,'alpha'),(2,7,7,'beta')").await.unwrap();
+    let db = global_memory_database(
+        "CREATE TABLE rowid_articles(id INTEGER PRIMARY KEY,_rowid_ INTEGER,oid INTEGER,body TEXT); \
+         INSERT INTO rowid_articles VALUES(1,7,7,'alpha'),(2,7,7,'beta')",
+    )
+    .await;
     let index = FullTextIndex::new("search", "rowid_articles", vec!["body".into()]);
     install(&db, &index).await.unwrap();
     let rows = Article::search(&["body"], "beta").get().await.unwrap();

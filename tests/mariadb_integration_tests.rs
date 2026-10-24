@@ -1,6 +1,7 @@
-//! MariaDB integration tests: the shared scenarios in
-//! `support/integration_parity.rs` plus the MySQL-family ones in
-//! `support/mysql_family.rs`, against a MariaDB server reached through a
+//! MariaDB integration tests: the scenarios every backend runs, in
+//! `support/integration_parity.rs`; those of the server backends, in
+//! `support/review_backend.rs`; and the MySQL-family ones, in
+//! `support/mysql_family.rs`. They reach the MariaDB server through a
 //! `mysql://` URL, which `connect()` has to recognize.
 //!
 //! Opt-in: set `RUN_MARIADB_TESTS` or `MARIADB_DATABASE_URL`;

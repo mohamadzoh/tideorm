@@ -6,9 +6,6 @@ use crate::config::DatabaseType;
 use crate::internal::Value;
 use serde_json::json;
 
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-use crate::Database;
-
 #[tideorm::model(table = "relation_test_nodes")]
 struct RelationTestNode {
     #[tideorm(primary_key, auto_increment)]
@@ -71,11 +68,6 @@ struct CompositeTreeNode {
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-async fn setup_direct_relation_test_db() -> Database {
-    crate::test_support::install_sqlite_global(&[]).await
-}
-
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tideorm::model(table = "relation_test_users")]
 struct DirectRelationUser {
     #[tideorm(primary_key)]
@@ -116,6 +108,7 @@ mod macro_runtime;
 #[path = "relations_tests/cached_payloads.rs"]
 mod cached_payloads;
 
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[path = "relations_tests/sqlite_runtime.rs"]
 mod sqlite_runtime;
 

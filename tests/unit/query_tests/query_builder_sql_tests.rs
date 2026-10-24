@@ -28,23 +28,20 @@ fn test_where_sql_includes_or_groups() {
 
 #[test]
 fn test_where_sql_parenthesizes_raw_fragments() {
-    let query = QueryBuilder::<QueryTestUser>::new()
+    let anded = QueryBuilder::<QueryTestUser>::new()
         .where_eq("tenant_id", 5)
         .where_raw("a = 1 OR b = 2");
+    assert_eq!(
+        anded.where_preview(),
+        "\"tenant_id\" = 5 AND (a = 1 OR b = 2)"
+    );
 
-    let sql = query.where_preview();
-
-    assert_eq!(sql, "\"tenant_id\" = 5 AND (a = 1 OR b = 2)");
-}
-
-#[test]
-fn test_where_sql_parenthesizes_raw_fragments_inside_or_groups() {
-    let query = QueryBuilder::<QueryTestUser>::new()
+    let in_or_group = QueryBuilder::<QueryTestUser>::new()
         .or_where(|q| q.where_raw("a = 1 AND b = 2").where_eq("id", 7));
-
-    let sql = query.where_preview();
-
-    assert_eq!(sql, "(a = 1 AND b = 2) OR \"id\" = 7");
+    assert_eq!(
+        in_or_group.where_preview(),
+        "(a = 1 AND b = 2) OR \"id\" = 7"
+    );
 }
 
 #[test]
@@ -77,11 +74,14 @@ fn test_a_typed_column_of_another_model_keeps_its_table() {
         .where_eq(QueryProfile::columns.user_id, 7)
         .where_eq(QueryTestUser::columns.id, 7)
         .order_by(QueryProfile::columns.user_id, Order::Desc)
-        .where_preview();
+        .build_sql_preview_for_db(DatabaseType::Postgres);
 
-    assert_eq!(
-        sql,
-        "\"profiles\".\"user_id\" = 7 AND \"query_test_users\".\"id\" = 7"
+    assert!(
+        sql.ends_with(
+            "WHERE \"profiles\".\"user_id\" = 7 AND \"query_test_users\".\"id\" = 7 \
+             ORDER BY \"profiles\".\"user_id\" DESC"
+        ),
+        "{sql}"
     );
 }
 
@@ -108,13 +108,25 @@ fn test_where_sql_escapes_inner_quotes_in_column_names() {
 }
 
 #[test]
-fn test_has_related_quotes_identifiers_and_escapes_literals() {
-    let sql = QueryBuilder::<QueryTestUser>::new()
-        .has_related("posts", "user_id", "id", "status", "pub'lished")
-        .where_preview();
+fn test_has_related_binds_its_condition_value() {
+    let query = QueryBuilder::<QueryTestUser>::new().has_related(
+        "posts",
+        "user_id",
+        "id",
+        "status",
+        "pub'lished",
+    );
+
+    let (where_sql, params) =
+        query.build_where_clause_with_condition_for_db(DatabaseType::Postgres);
+    assert_eq!(
+        where_sql,
+        "EXISTS (SELECT 1 FROM \"posts\" WHERE \"posts\".\"user_id\" = \"query_test_users\".\"id\" AND \"posts\".\"status\" = $1)"
+    );
+    assert_eq!(params, vec![Value::String(Some("pub'lished".to_string()))]);
 
     assert_eq!(
-        sql,
+        query.where_preview(),
         "EXISTS (SELECT 1 FROM \"posts\" WHERE \"posts\".\"user_id\" = \"query_test_users\".\"id\" AND \"posts\".\"status\" = E'pub\\'lished')"
     );
 }
@@ -151,65 +163,51 @@ fn test_has_no_related_renders_not_exists_with_its_condition() {
 }
 
 #[test]
-fn test_has_no_related_rejects_unsafe_identifiers() {
-    let err = QueryBuilder::<QueryTestUser>::new()
-        .has_no_related("posts", "user_id", "id", "status\" = 1 OR \"1", "draft")
-        .ensure_query_is_valid()
-        .expect_err("an unsafe condition column should invalidate the query");
-
-    assert!(err.to_string().contains("has_no_related()"), "{err}");
-}
-
-#[test]
-fn test_has_related_binds_the_condition_value_on_the_executable_path() {
-    let query = QueryBuilder::<QueryTestUser>::new().has_related(
-        "posts",
-        "user_id",
-        "id",
-        "status",
-        "pub'lished",
-    );
-
-    let (where_sql, params) =
-        query.build_where_clause_with_condition_for_db(DatabaseType::Postgres);
-
-    assert!(
-        !where_sql.contains("pub''lished"),
-        "the condition value must be bound, not escaped inline: {where_sql}"
-    );
-    assert!(
-        where_sql.contains("\"posts\".\"status\" = $1"),
-        "expected a bound placeholder: {where_sql}"
-    );
-    assert!(matches!(params.first(), Some(Value::String(Some(value))) if value == "pub'lished"));
-    assert_eq!(params.len(), 1);
-}
-
-#[test]
-fn test_has_related_rejects_unsafe_identifiers() {
-    let err = QueryBuilder::<QueryTestUser>::new()
-        .has_related("posts\" WHERE 1 = 1 OR \"x", "user_id", "id", "status", 1)
-        .ensure_query_is_valid()
-        .expect_err("unsafe related table should invalidate the query");
-
-    let message = err.to_string();
-    assert!(
-        message.contains("has_related() related table"),
-        "expected related-table validation error, got: {message}"
+fn test_a_null_related_condition_tests_for_null() {
+    let sql = QueryBuilder::<QueryTestUser>::new()
+        .has_no_related("posts", "user_id", "id", "status", None::<String>)
+        .where_preview();
+    assert_eq!(
+        sql,
+        "NOT EXISTS (SELECT 1 FROM \"posts\" WHERE \"posts\".\"user_id\" = \"query_test_users\".\"id\" AND \"posts\".\"status\" IS NULL)"
     );
 }
 
 #[test]
-fn test_has_any_related_rejects_unsafe_foreign_key() {
-    let err = QueryBuilder::<QueryTestUser>::new()
-        .has_any_related("posts", "user_id\" = 1 OR \"1", "id")
-        .ensure_query_is_valid()
-        .expect_err("unsafe foreign key should invalidate the query");
-
-    assert!(
-        err.to_string().contains("has_any_related() foreign key"),
-        "expected foreign-key validation error, got: {err}"
-    );
+fn test_relation_filters_reject_unsafe_identifiers() {
+    for (query, expected) in [
+        (
+            QueryBuilder::<QueryTestUser>::new().has_related(
+                "posts\" WHERE 1 = 1 OR \"x",
+                "user_id",
+                "id",
+                "status",
+                "x",
+            ),
+            "has_related() related table",
+        ),
+        (
+            QueryBuilder::<QueryTestUser>::new().has_any_related(
+                "posts",
+                "user_id\" = 1 OR \"1",
+                "id",
+            ),
+            "has_any_related() foreign key",
+        ),
+        (
+            QueryBuilder::<QueryTestUser>::new().has_no_related(
+                "posts",
+                "user_id",
+                "id",
+                "status\" = 1 OR \"1",
+                "draft",
+            ),
+            "has_no_related()",
+        ),
+    ] {
+        let err = query.ensure_query_is_valid().expect_err(expected);
+        assert!(err.to_string().contains(expected), "{expected}: {err}");
+    }
 }
 
 #[test]
@@ -284,10 +282,9 @@ fn test_where_not_exists_preview_inlines_the_bound_value() {
 fn test_subquery_carrying_a_like_escape_clause_stays_parameterized() {
     // sea-query re-tokenizes a `cust_with_values` fragment to find placeholders,
     // and its tokenizer treats `\` as an escape inside a string literal. A
-    // backslash LIKE escape (`ESCAPE '\'`) therefore left the literal
-    // unterminated and swallowed every later marker, forcing a fallback to
-    // inline literals. Generated SQL now uses `ESCAPE '!'`, so the operand keeps
-    // its bound parameters.
+    // backslash LIKE escape (`ESCAPE '\'`) would leave the literal
+    // unterminated and swallow every later marker, forcing a fallback to
+    // inline literals, so generated SQL uses `ESCAPE '!'`.
     let subquery = QueryBuilder::<QueryTestUser>::new()
         .where_contains("name", "ali")
         .where_eq("id", 7);
@@ -338,103 +335,69 @@ fn test_bound_raw_expression_uses_question_mark_placeholders_on_mysql() {
 }
 
 #[test]
-fn test_query_validation_rejects_unknown_model_column_in_where() {
-    let err = QueryBuilder::<QueryTestUser>::new()
-        .where_eq("naem", "alice")
-        .ensure_query_is_valid()
-        .expect_err("unknown where column should invalidate query");
+fn test_query_validation_rejects_unknown_columns_and_qualifiers() {
+    let joined = || {
+        QueryBuilder::<QueryTestUser>::new().inner_join(
+            "profiles",
+            "query_test_users.id",
+            "profiles.user_id",
+        )
+    };
 
-    assert!(err.to_string().contains("unknown WHERE column 'naem'"));
-    assert!(err.to_string().contains("known columns: id, name"));
-}
+    for (query, expected) in [
+        (
+            QueryBuilder::<QueryTestUser>::new().where_eq("naem", "alice"),
+            &["unknown WHERE column 'naem'", "known columns: id, name"][..],
+        ),
+        (
+            QueryBuilder::<QueryTestUser>::new().where_eq("query_test_users.naem", "alice"),
+            &["unknown WHERE column 'query_test_users.naem'"],
+        ),
+        (
+            QueryBuilder::<QueryTestUser>::new().order_by("naem", Order::Asc),
+            &["unknown ORDER BY column 'naem'"],
+        ),
+        (
+            joined().where_eq("other_alias.foo", "bar"),
+            &[
+                "unknown WHERE column qualifier 'other_alias'",
+                "known table/alias qualifiers",
+            ],
+        ),
+        (
+            QueryBuilder::<QueryTestUser>::new().order_by("other_alias.foo", Order::Asc),
+            &["unknown ORDER BY column qualifier 'other_alias'"],
+        ),
+        // An aliased join hides the table's own name as a qualifier.
+        (
+            QueryBuilder::<QueryTestUser>::new()
+                .inner_join_as("profiles", "p", "query_test_users.id", "p.user_id")
+                .where_eq("profiles.active", true),
+            &["unknown WHERE column qualifier 'profiles'"],
+        ),
+    ] {
+        let message = query
+            .ensure_query_is_valid()
+            .expect_err("the query names a column it cannot have")
+            .to_string();
+        for expected in expected {
+            assert!(message.contains(expected), "{expected}: {message}");
+        }
+    }
 
-#[test]
-fn test_query_validation_rejects_unknown_self_qualified_column() {
-    let err = QueryBuilder::<QueryTestUser>::new()
-        .where_eq("query_test_users.naem", "alice")
-        .ensure_query_is_valid()
-        .expect_err("unknown self-qualified column should invalidate query");
-
-    assert!(
-        err.to_string()
-            .contains("unknown WHERE column 'query_test_users.naem'")
-    );
-}
-
-#[test]
-fn test_query_validation_allows_joined_table_column_references() {
-    QueryBuilder::<QueryTestUser>::new()
-        .inner_join("profiles", "query_test_users.id", "profiles.user_id")
-        .where_eq("profiles.active", true)
-        .order_by("profiles.created_at", Order::Desc)
-        .ensure_query_is_valid()
-        .expect("joined-table column references should remain allowed");
-}
-
-#[test]
-fn test_query_validation_rejects_unknown_qualifier_in_where() {
-    let err = QueryBuilder::<QueryTestUser>::new()
-        .inner_join("profiles", "query_test_users.id", "profiles.user_id")
-        .where_eq("other_alias.foo", "bar")
-        .ensure_query_is_valid()
-        .expect_err("unknown qualifier in WHERE should invalidate query");
-
-    let message = err.to_string();
-    assert!(
-        message.contains("unknown WHERE column qualifier 'other_alias'"),
-        "expected qualifier error, got: {message}"
-    );
-    assert!(
-        message.contains("known table/alias qualifiers"),
-        "expected known-qualifier hint, got: {message}"
-    );
-}
-
-#[test]
-fn test_query_validation_rejects_unknown_qualifier_in_order_by() {
-    let err = QueryBuilder::<QueryTestUser>::new()
-        .order_by("other_alias.foo", Order::Asc)
-        .ensure_query_is_valid()
-        .expect_err("unknown qualifier in ORDER BY should invalidate query");
-
-    assert!(
-        err.to_string()
-            .contains("unknown ORDER BY column qualifier 'other_alias'")
-    );
-}
-
-#[test]
-fn test_query_validation_accepts_join_alias_qualifier() {
-    QueryBuilder::<QueryTestUser>::new()
-        .inner_join_as("profiles", "p", "query_test_users.id", "p.user_id")
-        .where_eq("p.active", true)
-        .order_by("p.created_at", Order::Desc)
-        .ensure_query_is_valid()
-        .expect("join alias should be a valid qualifier");
-}
-
-#[test]
-fn test_query_validation_rejects_join_table_when_aliased() {
-    let err = QueryBuilder::<QueryTestUser>::new()
-        .inner_join_as("profiles", "p", "query_test_users.id", "p.user_id")
-        .where_eq("profiles.active", true)
-        .ensure_query_is_valid()
-        .expect_err("aliased join should hide the original table name as a qualifier");
-
-    assert!(
-        err.to_string()
-            .contains("unknown WHERE column qualifier 'profiles'")
-    );
-}
-
-#[test]
-fn test_query_validation_rejects_unknown_model_column_in_order_by() {
-    let err = QueryBuilder::<QueryTestUser>::new()
-        .order_by("naem", Order::Asc)
-        .ensure_query_is_valid()
-        .expect_err("unknown order-by column should invalidate query");
-
-    assert!(err.to_string().contains("unknown ORDER BY column 'naem'"));
+    for query in [
+        joined()
+            .where_eq("profiles.active", true)
+            .order_by("profiles.created_at", Order::Desc),
+        QueryBuilder::<QueryTestUser>::new()
+            .inner_join_as("profiles", "p", "query_test_users.id", "p.user_id")
+            .where_eq("p.active", true)
+            .order_by("p.created_at", Order::Desc),
+    ] {
+        query
+            .ensure_query_is_valid()
+            .expect("a joined table and a join alias are valid qualifiers");
+    }
 }
 
 #[test]
@@ -478,7 +441,9 @@ fn test_build_select_sql_with_params_parameterizes_postgres_array_predicates() {
     let query = QueryBuilder::<QueryTestUser>::new()
         .where_array_contains("tags", vec!["ops'", "core"])
         .where_array_contained_by("tags", vec!["ops'", "core"])
-        .where_array_overlaps("tags", vec!["ops'", "core"]);
+        .where_array_overlaps("tags", vec!["ops'", "core"])
+        .where_array_contains("scores", vec![5, 7])
+        .where_array_overlaps("scores", vec![3, 5]);
 
     let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::Postgres);
 
@@ -498,55 +463,19 @@ fn test_build_select_sql_with_params_parameterizes_postgres_array_predicates() {
         sql.contains("($5 = ANY(\"tags\") OR $6 = ANY(\"tags\"))"),
         "sql: {sql}"
     );
+    assert!(
+        sql.contains("($7 = ANY(\"scores\") AND $8 = ANY(\"scores\"))"),
+        "sql: {sql}"
+    );
+    assert!(
+        sql.contains("($9 = ANY(\"scores\") OR $10 = ANY(\"scores\"))"),
+        "sql: {sql}"
+    );
     // The `ARRAY[..]` constructor would hide these markers from sea-query's
     // fragment tokenizer, which treats `[` as a string delimiter.
     assert!(!sql.contains("ARRAY["), "sql: {sql}");
     assert!(!sql.contains("ops'"), "sql: {sql}");
-    assert_eq!(params.len(), 6);
-}
-
-#[test]
-fn test_build_select_sql_with_params_parameterizes_postgres_integer_array_predicates() {
-    let query = QueryBuilder::<QueryTestUser>::new()
-        .where_array_contains("scores", vec![5, 7])
-        .where_array_overlaps("scores", vec![3, 5]);
-
-    let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::Postgres);
-
-    assert!(
-        sql.contains("($1 = ANY(\"scores\") AND $2 = ANY(\"scores\"))"),
-        "sql: {sql}"
-    );
-    assert!(
-        sql.contains("($3 = ANY(\"scores\") OR $4 = ANY(\"scores\"))"),
-        "sql: {sql}"
-    );
-    assert!(!sql.contains("ARRAY["), "sql: {sql}");
-    assert_eq!(params.len(), 4);
-}
-
-#[test]
-fn test_build_select_sql_with_params_renders_valid_empty_postgres_array_predicates() {
-    let empty: Vec<&str> = Vec::new();
-    let query = QueryBuilder::<QueryTestUser>::new()
-        .where_array_contains("tags", empty.clone())
-        .where_array_overlaps("tags", empty.clone())
-        .where_array_contained_by("tags", empty);
-
-    let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::Postgres);
-
-    // `ARRAY[]` has no inferrable element type and PostgreSQL rejects it outright.
-    assert!(!sql.contains("ARRAY["), "sql: {sql}");
-    // Empty containment excludes SQL NULL; empty overlap matches nothing.
-    assert!(sql.contains("\"tags\" IS NOT NULL"), "sql: {sql}");
-    assert!(sql.contains("0 = 1"), "sql: {sql}");
-    assert!(
-        sql.contains(
-            "NOT EXISTS (SELECT 1 FROM unnest(\"tags\") AS tideorm_array_element(element))"
-        ),
-        "sql: {sql}"
-    );
-    assert!(params.is_empty(), "params: {:?}", params);
+    assert_eq!(params.len(), 10);
 }
 
 #[test]
@@ -676,39 +605,23 @@ fn test_build_select_sql_with_params_quotes_reserved_identifiers() {
 fn test_build_select_sql_with_params_uses_escape_clause_for_typed_literal_like_helpers() {
     let name = crate::columns::Column::<String>::new("name");
     let query = QueryBuilder::<QueryTestUser>::new().where_col(name.contains(r"100%_\done"));
+    let pattern = vec![Value::String(Some(r"%100!%!_\done%".to_string()))];
 
     let (postgres_sql, postgres_params) = query
         .clone()
         .build_select_sql_with_params_for_db(DatabaseType::Postgres);
     assert!(
-        postgres_sql.contains(" LIKE "),
+        postgres_sql.ends_with("WHERE \"name\" LIKE $1 ESCAPE '!'"),
         "postgres sql: {postgres_sql}"
     );
-    assert!(
-        postgres_sql.contains("ESCAPE '!'"),
-        "postgres sql: {postgres_sql}"
-    );
-    assert!(postgres_sql.contains("$1"), "postgres sql: {postgres_sql}");
-    assert_eq!(
-        postgres_params.len(),
-        1,
-        "postgres params: {:?}",
-        postgres_params
-    );
-    assert!(matches!(
-        postgres_params.first(),
-        Some(Value::String(Some(value))) if value == r"%100!%!_\done%"
-    ));
+    assert_eq!(postgres_params, pattern);
 
     let (mysql_sql, mysql_params) = query.build_select_sql_with_params_for_db(DatabaseType::MySQL);
-    assert!(mysql_sql.contains(" LIKE "), "mysql sql: {mysql_sql}");
-    assert!(mysql_sql.contains("ESCAPE '!'"), "mysql sql: {mysql_sql}");
-    assert!(mysql_sql.contains("?"), "mysql sql: {mysql_sql}");
-    assert_eq!(mysql_params.len(), 1, "mysql params: {:?}", mysql_params);
-    assert!(matches!(
-        mysql_params.first(),
-        Some(Value::String(Some(value))) if value == r"%100!%!_\done%"
-    ));
+    assert!(
+        mysql_sql.ends_with("WHERE `name` LIKE ? ESCAPE '!'"),
+        "mysql sql: {mysql_sql}"
+    );
+    assert_eq!(mysql_params, pattern);
 }
 
 #[test]
@@ -785,140 +698,26 @@ fn test_consolidate_preserves_full_query_fragment_state() {
 }
 
 #[test]
-fn test_window_function_sql_uses_postgres_identifier_quoting() {
-    let (sql, params) = QueryBuilder::<QueryTestUser>::new()
-        .first_value("first_name", "na\"me", "id", "na\"me", Order::Asc)
-        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
+fn test_window_function_sql_escapes_identifiers_per_backend() {
+    for (db_type, column, expected) in [
+        (
+            DatabaseType::Postgres,
+            "na\"me",
+            "FIRST_VALUE(\"na\"\"me\") OVER (PARTITION BY \"id\" ORDER BY \"na\"\"me\" ASC) AS \"first_name\"",
+        ),
+        (
+            DatabaseType::MySQL,
+            "na`me",
+            "FIRST_VALUE(`na``me`) OVER (PARTITION BY `id` ORDER BY `na``me` ASC) AS `first_name`",
+        ),
+    ] {
+        let (sql, params) = QueryBuilder::<QueryTestUser>::new()
+            .first_value("first_name", column, "id", column, Order::Asc)
+            .build_select_sql_with_params_for_db(db_type);
 
-    assert!(params.is_empty());
-    assert!(sql.contains("FIRST_VALUE(\"na\"\"me\") OVER (PARTITION BY \"id\" ORDER BY \"na\"\"me\" ASC) AS \"first_name\""));
-}
-
-#[test]
-fn test_window_function_sql_uses_mysql_identifier_quoting() {
-    let (sql, params) = QueryBuilder::<QueryTestUser>::new()
-        .first_value("first_name", "na`me", "id", "na`me", Order::Asc)
-        .build_select_sql_with_params_for_db(DatabaseType::MySQL);
-
-    assert!(params.is_empty());
-    assert!(sql.contains(
-        "FIRST_VALUE(`na``me`) OVER (PARTITION BY `id` ORDER BY `na``me` ASC) AS `first_name`"
-    ));
-}
-
-#[cfg(feature = "fulltext")]
-#[test]
-fn test_fulltext_build_postgres_sql_parameterizes_query_and_escapes_identifiers() {
-    let builder = FullTextSearchBuilder::<QueryTestUser>::new(&["na\"me", "bio"], "o'hai");
-
-    let (sql, params) = builder.build_sql(DatabaseType::Postgres).unwrap();
-
-    assert!(
-        sql.contains("SELECT \"id\", \"name\" FROM \"query_test_users\""),
-        "{sql}"
-    );
-    assert!(sql.contains("COALESCE(\"na\"\"me\", '')"));
-    assert!(sql.contains("plainto_tsquery('english', $1)"), "{sql}");
-    assert_eq!(params, vec![Value::String(Some("o'hai".to_string()))]);
-
-    // The configuration is written into the SQL, so only a name is accepted.
-    assert!(
-        builder
-            .language("en'g\"lish")
-            .build_sql(DatabaseType::Postgres)
-            .is_err()
-    );
-}
-
-#[cfg(feature = "fulltext")]
-#[test]
-fn test_fulltext_build_postgres_ranked_sql_binds_prefix_query_and_min_rank() {
-    let builder = FullTextSearchBuilder::<QueryTestUser>::new(&["name"], "quick fox")
-        .mode(SearchMode::Prefix)
-        .with_ranking()
-        .min_rank(0.75);
-
-    let (sql, params) = builder.build_ranked_sql(DatabaseType::Postgres).unwrap();
-
-    assert!(sql.contains("to_tsquery('english', $1)"), "{sql}");
-    assert!(sql.contains(" >= $3"));
-    assert!(
-        matches!(params.first(), Some(Value::String(Some(query))) if query == "'quick':* & 'fox':*")
-    );
-    assert!(
-        matches!(params.get(2), Some(Value::Double(Some(rank))) if (*rank - 0.75).abs() < f64::EPSILON)
-    );
-}
-
-#[cfg(feature = "fulltext")]
-#[test]
-fn test_fulltext_build_postgres_boolean_sql_sanitizes_tsquery_operators() {
-    let builder = FullTextSearchBuilder::<QueryTestUser>::new(&["name"], "test* OR 1")
-        .mode(SearchMode::Boolean);
-
-    let (sql, params) = builder.build_sql(DatabaseType::Postgres).unwrap();
-
-    assert!(sql.contains("to_tsquery('english', $1)"), "{sql}");
-    assert!(
-        matches!(params.first(), Some(Value::String(Some(query))) if query == "'test' & 'OR' & '1'")
-    );
-}
-
-#[cfg(feature = "fulltext")]
-#[test]
-fn test_fulltext_build_mysql_ranked_sql_uses_bound_values_for_all_dynamic_inputs() {
-    let builder = FullTextSearchBuilder::<QueryTestUser>::new(&["na`me", "bio"], "+urgent term")
-        .mode(SearchMode::Boolean)
-        .with_ranking()
-        .min_rank(0.5);
-
-    let (sql, params) = builder.build_ranked_sql(DatabaseType::MySQL).unwrap();
-
-    assert!(sql.contains("MATCH(`na``me`, `bio`) AGAINST(? IN BOOLEAN MODE)"));
-    assert!(sql.contains("AND MATCH(`na``me`, `bio`) AGAINST(? IN BOOLEAN MODE) >= ?"));
-    assert_eq!(params.len(), 4);
-    assert!(matches!(params.first(), Some(Value::String(Some(query))) if query == "+urgent term"));
-    assert!(matches!(params.get(1), Some(Value::String(Some(query))) if query == "+urgent term"));
-    assert!(matches!(params.get(2), Some(Value::String(Some(query))) if query == "+urgent term"));
-    assert!(
-        matches!(params.get(3), Some(Value::Double(Some(rank))) if (*rank - 0.5).abs() < f64::EPSILON)
-    );
-}
-
-#[cfg(feature = "fulltext")]
-#[test]
-fn test_fulltext_build_sqlite_sql_binds_escaped_fts_query() {
-    let builder =
-        FullTextSearchBuilder::<QueryTestUser>::new(&["name", "bio"], "say \"hello\" to it's")
-            .limit(5)
-            .offset(2);
-
-    let (sql, params) = builder.build_sql(DatabaseType::SQLite).unwrap();
-
-    assert!(
-        sql.contains("SELECT \"t\".\"id\", \"t\".\"name\" FROM \"query_test_users\" t"),
-        "{sql}"
-    );
-    assert!(sql.contains("INNER JOIN \"query_test_users_fts\" fts"));
-    assert!(sql.contains("WHERE \"query_test_users_fts\" MATCH ?"));
-    assert!(sql.contains("LIMIT 5 OFFSET ?"), "{sql}");
-    assert!(
-        matches!(params.first(), Some(Value::String(Some(query))) if query == "{\"name\" \"bio\"} : (\"say\" \"hello\" \"to\" \"it's\")")
-    );
-    assert!(matches!(params.get(1), Some(Value::BigInt(Some(offset))) if *offset == 2));
-    assert_eq!(params.len(), 2);
-}
-
-#[cfg(feature = "fulltext")]
-#[test]
-fn test_fulltext_build_sqlite_sql_neutralizes_fts_operators() {
-    let builder = FullTextSearchBuilder::<QueryTestUser>::new(&["name"], "test* OR 1");
-
-    let (_, params) = builder.build_sql(DatabaseType::SQLite).unwrap();
-
-    assert!(
-        matches!(params.first(), Some(Value::String(Some(query))) if query == "{\"name\"} : (\"test*\" \"OR\" \"1\")")
-    );
+        assert!(params.is_empty(), "{db_type:?}: {params:?}");
+        assert!(sql.contains(expected), "{db_type:?}: {sql}");
+    }
 }
 
 #[test]
@@ -1026,28 +825,6 @@ fn test_having_placeholder_count_mismatch_is_rejected() {
 }
 
 #[test]
-fn test_cte_sql_uses_backend_identifier_quoting() {
-    let cte = CTE::with_columns(
-        "recent",
-        vec!["id", "name"],
-        "SELECT id, name FROM query_test_users".to_string(),
-    );
-
-    assert!(
-        cte.to_sql_for_db(DatabaseType::Postgres)
-            .starts_with("\"recent\" (\"id\", \"name\") AS ("),
-        "{}",
-        cte.to_sql_for_db(DatabaseType::Postgres)
-    );
-    assert!(
-        cte.to_sql_for_db(DatabaseType::MySQL)
-            .starts_with("`recent` (`id`, `name`) AS ("),
-        "{}",
-        cte.to_sql_for_db(DatabaseType::MySQL)
-    );
-}
-
-#[test]
 fn test_or_where_calls_share_one_or_group() {
     // Each call used to push its own single-condition group, and groups are
     // ANDed: this rendered `price > 1000 AND price < 50` and matched nothing.
@@ -1127,37 +904,6 @@ fn test_fragment_or_where_conditions_join_the_builders_or_group() {
 }
 
 #[test]
-fn test_a_grouped_count_counts_the_groups() {
-    let (sql, _) = QueryBuilder::<QueryTestUser>::new()
-        .group_by("name")
-        .build_count_sql_with_params_for_db(DatabaseType::Postgres);
-    // One constant row per group: two grouping columns of one name
-    // (`orders.status`, `customers.status`) would collide in the derived
-    // table, which MySQL refuses.
-    assert_eq!(
-        sql,
-        "SELECT COUNT(*) AS count FROM (SELECT 1 FROM \"query_test_users\" GROUP BY \"name\") AS \"tideorm_count_subquery\""
-    );
-}
-
-#[test]
-fn test_exists_keeps_the_aliases_having_refers_to() {
-    let (sql, _) = QueryBuilder::<QueryTestUser>::new()
-        .select_raw("name")
-        .select_raw("COUNT(*) AS n")
-        .group_by("name")
-        .having("n > 1")
-        .build_exists_sql_with_params_for_db(DatabaseType::SQLite);
-    assert!(sql.contains("COUNT(*) AS n"), "{sql}");
-
-    let (sql, _) = QueryBuilder::<QueryTestUser>::new()
-        .group_by("name")
-        .having("COUNT(*) > 1")
-        .build_exists_sql_with_params_for_db(DatabaseType::SQLite);
-    assert!(sql.starts_with("SELECT EXISTS(SELECT 1 FROM"), "{sql}");
-}
-
-#[test]
 fn test_count_and_exists_ignore_an_ordering_they_do_not_render() {
     let query = QueryBuilder::<QueryTestUser>::new()
         .select(vec!["name"])
@@ -1182,24 +928,4 @@ fn test_window_columns_take_rust_field_names() {
     assert!(sql.contains("PARTITION BY \"sha_256\""), "{sql}");
     assert!(sql.contains("ORDER BY \"sha_256\" ASC"), "{sql}");
     assert!(!sql.contains("\"sha256\""), "{sql}");
-}
-
-#[test]
-fn test_where_not_none_is_no_filter_for_a_mutation() {
-    let err = QueryBuilder::<QueryTestUser>::new()
-        .where_not("name", None::<String>)
-        .ensure_mutation_has_explicit_filters("delete")
-        .expect_err("`name IS NOT NULL` keeps every row of a NOT NULL column");
-    assert!(err.to_string().contains("explicit filter"), "{err}");
-}
-
-#[test]
-fn test_a_null_related_condition_tests_for_null() {
-    let sql = QueryBuilder::<QueryTestUser>::new()
-        .has_no_related("posts", "user_id", "id", "status", None::<String>)
-        .where_preview();
-    assert_eq!(
-        sql,
-        "NOT EXISTS (SELECT 1 FROM \"posts\" WHERE \"posts\".\"user_id\" = \"query_test_users\".\"id\" AND \"posts\".\"status\" IS NULL)"
-    );
 }

@@ -1,32 +1,26 @@
 use super::*;
 
 #[test]
-fn test_translations_data_basic() {
+fn test_translations_data_round_trips_through_json() {
     let mut data = TranslationsData::new();
-
     data.set("name", "en", "Product");
     data.set("name", "ar", "منتج");
+    data.set("description", "en", "A great product");
 
-    assert_eq!(data.get("name", "en"), Some(&serde_json::json!("Product")));
-    assert_eq!(data.get("name", "ar"), Some(&serde_json::json!("منتج")));
-    assert_eq!(data.get("name", "fr"), None);
-}
-
-#[test]
-fn test_translations_data_from_json() {
     let json = serde_json::json!({
         "name": {"en": "Product", "ar": "منتج"},
         "description": {"en": "A great product"}
     });
+    assert_eq!(data.to_json(), json);
 
     let data = TranslationsData::from_json(&json);
-
     assert_eq!(data.get("name", "en"), Some(&serde_json::json!("Product")));
     assert_eq!(data.get("name", "ar"), Some(&serde_json::json!("منتج")));
     assert_eq!(
         data.get("description", "en"),
         Some(&serde_json::json!("A great product"))
     );
+    assert_eq!(data.get("name", "fr"), None);
 }
 
 #[test]
@@ -60,20 +54,6 @@ fn test_translation_input_from_json_rejects_a_non_object() {
 }
 
 #[test]
-fn test_translations_data_to_json() {
-    let mut data = TranslationsData::new();
-    data.set("name", "en", "Product");
-    data.set("name", "ar", "منتج");
-
-    let json = data.to_json();
-    let expected = serde_json::json!({
-        "name": {"en": "Product", "ar": "منتج"}
-    });
-
-    assert_eq!(json, expected);
-}
-
-#[test]
 fn test_field_translations() {
     let mut field = FieldTranslations::new();
 
@@ -88,33 +68,6 @@ fn test_field_translations() {
 
     field.remove("ar");
     assert!(!field.has("ar"));
-}
-
-#[test]
-fn test_translation_input() {
-    let mut input = TranslationInput::new();
-    input.add("name", "en", "Product");
-    input.add("name", "ar", "منتج");
-    input.add("description", "en", "Description");
-
-    assert_eq!(input.fields.len(), 2);
-    assert_eq!(input.fields.get("name").unwrap().len(), 2);
-}
-
-#[test]
-fn test_translation_input_from_json() {
-    let json = serde_json::json!({
-        "name": {"en": "Product", "ar": "منتج"},
-        "description": {"en": "A product"}
-    });
-
-    let input = TranslationInput::from_json(&json).unwrap();
-
-    assert_eq!(input.fields.len(), 2);
-    assert_eq!(
-        input.fields.get("name").unwrap().get("en"),
-        Some(&serde_json::json!("Product"))
-    );
 }
 
 #[derive(Default)]
@@ -172,46 +125,32 @@ fn test_translation_lookups_fall_back_to_the_fallback_language_then_the_default(
     );
 }
 
+/// Attacker-chosen field and language keys never reach the translations
+/// payload, and a partly invalid batch is rejected as a whole.
 #[test]
-fn test_apply_translations_rejects_untranslatable_field() {
-    let mut model = TranslatableProbe::default();
-    let mut input = TranslationInput::new();
-    input.add("evil_field", "en", "junk");
+fn test_apply_translations_stores_nothing_from_an_invalid_batch() {
+    type IsExpected = fn(&TranslationError) -> bool;
+    let invalid_field: IsExpected = |error| matches!(error, TranslationError::InvalidField(_));
+    let invalid_language: IsExpected =
+        |error| matches!(error, TranslationError::InvalidLanguage(_));
+    for (entries, expected) in [
+        (vec![("evil_field", "en")], invalid_field),
+        (vec![("name", "zz-junk")], invalid_language),
+        (vec![("name", "en"), ("name", "zz-junk")], invalid_language),
+    ] {
+        let mut model = TranslatableProbe::default();
+        let mut input = TranslationInput::new();
+        for (field, language) in &entries {
+            input.add(field, language, "value");
+        }
 
-    let error = model
-        .apply_translations(input)
-        .expect_err("attacker-chosen field keys must not reach the translations payload");
+        let error = model
+            .apply_translations(input)
+            .expect_err("the batch must be rejected");
 
-    assert!(matches!(error, TranslationError::InvalidField(_)));
-    assert_eq!(model.translations, serde_json::Value::Null);
-}
-
-#[test]
-fn test_apply_translations_rejects_disallowed_language() {
-    let mut model = TranslatableProbe::default();
-    let mut input = TranslationInput::new();
-    input.add("name", "zz-junk", "junk");
-
-    let error = model
-        .apply_translations(input)
-        .expect_err("attacker-chosen language keys must not reach the translations payload");
-
-    assert!(matches!(error, TranslationError::InvalidLanguage(_)));
-    assert_eq!(model.translations, serde_json::Value::Null);
-}
-
-#[test]
-fn test_apply_translations_stores_nothing_when_part_of_the_batch_is_invalid() {
-    let mut model = TranslatableProbe::default();
-    let mut input = TranslationInput::new();
-    input.add("name", "en", "Product");
-    input.add("name", "zz-junk", "junk");
-
-    model
-        .apply_translations(input)
-        .expect_err("a partially invalid batch must be rejected as a whole");
-
-    assert_eq!(model.translations, serde_json::Value::Null);
+        assert!(expected(&error), "{entries:?}: {error:?}");
+        assert_eq!(model.translations, serde_json::Value::Null, "{entries:?}");
+    }
 }
 
 #[derive(Default, serde::Serialize)]

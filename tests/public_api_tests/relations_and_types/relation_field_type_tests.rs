@@ -14,108 +14,48 @@ struct RelationFieldPivotTestModel {
     id: i64,
 }
 
-macro_rules! assert_unconfigured_relation_load_fails {
-    ($test_name:ident, $relation:expr, $message:literal) => {
-        #[tokio::test]
-        async fn $test_name() {
-            let relation = $relation;
+/// A relation wrapper left at `Default`, with no keys from a `#[tideorm(..)]`
+/// field, fails its load naming the relation instead of returning nothing.
+#[tokio::test]
+async fn an_unconfigured_relation_fails_to_load() {
+    #[track_caller]
+    fn assert_unconfigured<T: std::fmt::Debug>(result: tideorm::Result<T>, relation: &str) {
+        let error = result.expect_err(relation).to_string();
+        assert!(
+            error.contains(&format!("{relation} relation is not configured")),
+            "{relation}: {error}"
+        );
+    }
 
-            let err = relation.load().await.unwrap_err();
-            assert!(err.to_string().contains($message));
-        }
-    };
+    type Model = RelationFieldTestModel;
+    assert_unconfigured(
+        HasOne::<Model>::default()
+            .with_parent_pk(json!(1))
+            .load()
+            .await,
+        "HasOne",
+    );
+    assert_unconfigured(
+        HasMany::<Model>::default()
+            .with_parent_pk(json!(1))
+            .load()
+            .await,
+        "HasMany",
+    );
+    assert_unconfigured(
+        BelongsTo::<Model>::default()
+            .with_fk_value(json!(1))
+            .load()
+            .await,
+        "BelongsTo",
+    );
+    assert_unconfigured(
+        HasManyThrough::<Model, RelationFieldPivotTestModel>::default()
+            .with_parent_pk(json!(1))
+            .load()
+            .await,
+        "HasManyThrough",
+    );
+    assert_unconfigured(MorphOne::<Model>::default().load().await, "MorphOne");
+    assert_unconfigured(MorphMany::<Model>::default().load().await, "MorphMany");
 }
-
-#[test]
-fn test_has_one_default_has_none_cached() {
-    let relation = HasOne::<RelationFieldTestModel>::default();
-
-    assert_eq!(relation.foreign_key, "");
-    assert_eq!(relation.local_key, "");
-    assert!(relation.get_cached().is_none());
-}
-
-assert_unconfigured_relation_load_fails!(
-    test_has_one_default_fails_loudly_when_unconfigured,
-    HasOne::<RelationFieldTestModel>::default().with_parent_pk(json!(1)),
-    "HasOne relation is not configured"
-);
-
-#[test]
-fn test_has_many_default_has_none_cached() {
-    let relation = HasMany::<RelationFieldTestModel>::default();
-
-    assert_eq!(relation.foreign_key, "");
-    assert_eq!(relation.local_key, "");
-    assert!(relation.get_cached().is_none());
-}
-
-assert_unconfigured_relation_load_fails!(
-    test_has_many_default_fails_loudly_when_unconfigured,
-    HasMany::<RelationFieldTestModel>::default().with_parent_pk(json!(1)),
-    "HasMany relation is not configured"
-);
-
-#[test]
-fn test_belongs_to_default_has_none_cached() {
-    let relation = BelongsTo::<RelationFieldTestModel>::default();
-
-    assert_eq!(relation.foreign_key, "");
-    assert_eq!(relation.owner_key, "");
-    assert!(relation.get_cached().is_none());
-}
-
-assert_unconfigured_relation_load_fails!(
-    test_belongs_to_default_fails_loudly_when_unconfigured,
-    BelongsTo::<RelationFieldTestModel>::default().with_fk_value(json!(1)),
-    "BelongsTo relation is not configured"
-);
-
-#[test]
-fn test_has_many_through_default_has_none_cached() {
-    let relation = HasManyThrough::<RelationFieldTestModel, RelationFieldPivotTestModel>::default();
-
-    assert_eq!(relation.foreign_key, "");
-    assert_eq!(relation.related_key, "");
-    assert_eq!(relation.local_key, "");
-    assert_eq!(relation.related_local_key, "");
-    assert_eq!(relation.pivot_table, "");
-    assert!(relation.get_cached().is_none());
-}
-
-assert_unconfigured_relation_load_fails!(
-    test_has_many_through_default_fails_loudly_when_unconfigured,
-    HasManyThrough::<RelationFieldTestModel, RelationFieldPivotTestModel>::default()
-        .with_parent_pk(json!(1)),
-    "HasManyThrough relation is not configured"
-);
-
-#[test]
-fn test_morph_one_default_has_none_cached() {
-    let relation = MorphOne::<RelationFieldTestModel>::default();
-
-    assert_eq!(relation.morph_name, "");
-    assert_eq!(relation.local_key, "");
-    assert!(relation.get_cached().is_none());
-}
-
-assert_unconfigured_relation_load_fails!(
-    test_morph_one_default_fails_loudly_when_unconfigured,
-    MorphOne::<RelationFieldTestModel>::default(),
-    "MorphOne relation is not configured"
-);
-
-#[test]
-fn test_morph_many_default_has_none_cached() {
-    let relation = MorphMany::<RelationFieldTestModel>::default();
-
-    assert_eq!(relation.morph_name, "");
-    assert_eq!(relation.local_key, "");
-    assert!(relation.get_cached().is_none());
-}
-
-assert_unconfigured_relation_load_fails!(
-    test_morph_many_default_fails_loudly_when_unconfigured,
-    MorphMany::<RelationFieldTestModel>::default(),
-    "MorphMany relation is not configured"
-);

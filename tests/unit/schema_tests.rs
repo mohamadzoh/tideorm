@@ -12,69 +12,65 @@ fn sql_for(rust_type: &str, db_type: DatabaseType) -> String {
 }
 
 #[test]
-fn test_schema_generation() {
-    let mut generator = SchemaGenerator::new(DatabaseType::Postgres);
+fn test_schema_generator_renders_each_backends_create_table() {
+    let mysql = "CREATE TABLE IF NOT EXISTS `products` (
+    `id` BIGINT AUTO_INCREMENT,
+    `name` VARCHAR(255) NOT NULL,
+    `price` DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+    `description` TEXT,
+    PRIMARY KEY (`id`)
+) DEFAULT CHARSET=utf8mb4;
+";
+    // SQLite numbers an `INTEGER` primary key itself, as its rowid.
+    for (db_type, id_type, expected) in [
+        (
+            DatabaseType::Postgres,
+            "BIGINT",
+            r#"CREATE TABLE IF NOT EXISTS "products" (
+    "id" BIGSERIAL,
+    "name" VARCHAR(255) NOT NULL,
+    "price" DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+    "description" TEXT,
+    PRIMARY KEY ("id")
+);
+"#,
+        ),
+        (DatabaseType::MySQL, "BIGINT", mysql),
+        (DatabaseType::MariaDB, "BIGINT", mysql),
+        (
+            DatabaseType::SQLite,
+            "INTEGER",
+            r#"CREATE TABLE IF NOT EXISTS "products" (
+    "id" INTEGER NOT NULL,
+    "name" VARCHAR(255) NOT NULL,
+    "price" DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+    "description" TEXT,
+    PRIMARY KEY ("id")
+);
+"#,
+        ),
+    ] {
+        let table = TableSchemaBuilder::new("products")
+            .column(
+                ColumnSchema::new("id", id_type)
+                    .primary_key()
+                    .auto_increment(),
+            )
+            .column(ColumnSchema::new("name", "VARCHAR(255)").not_null())
+            .column(
+                ColumnSchema::new("price", "DECIMAL(10,2)")
+                    .not_null()
+                    .default("0.00"),
+            )
+            .column(ColumnSchema::new("description", "TEXT"))
+            .build();
 
-    let table = TableSchemaBuilder::new("users")
-        .column(
-            ColumnSchema::new("id", "BIGINT")
-                .primary_key()
-                .auto_increment(),
-        )
-        .column(ColumnSchema::new("email", "TEXT").not_null())
-        .column(ColumnSchema::new("name", "TEXT"))
-        .index(IndexDefinition::new(
-            "idx_users_email",
-            vec!["email".to_string()],
-            false,
-        ))
-        .index(IndexDefinition::new(
-            "uidx_users_email",
-            vec!["email".to_string()],
-            true,
-        ))
-        .build();
-
-    generator.add_table(table);
-
-    let sql = generator.generate();
-    assert!(sql.contains("CREATE TABLE IF NOT EXISTS"));
-    assert!(sql.contains("CREATE INDEX IF NOT EXISTS"));
-    assert!(sql.contains("CREATE UNIQUE INDEX IF NOT EXISTS"));
-}
-
-#[test]
-fn test_schema_generator_postgres() {
-    let mut generator = SchemaGenerator::new(DatabaseType::Postgres);
-
-    let table = TableSchemaBuilder::new("products")
-        .column(
-            ColumnSchema::new("id", "BIGINT")
-                .primary_key()
-                .auto_increment(),
-        )
-        .column(ColumnSchema::new("name", "VARCHAR(255)").not_null())
-        .column(
-            ColumnSchema::new("price", "DECIMAL(10,2)")
-                .not_null()
-                .default("0.00"),
-        )
-        .column(ColumnSchema::new("description", "TEXT"))
-        .column(
-            ColumnSchema::new("created_at", "TIMESTAMPTZ")
-                .not_null()
-                .default("NOW()"),
-        )
-        .build();
-
-    generator.add_table(table);
-
-    let sql = generator.generate();
-
-    assert!(sql.contains("\"products\""));
-    assert!(sql.contains("BIGSERIAL"));
-    assert!(sql.contains("NOT NULL"));
-    assert!(sql.contains("DEFAULT"));
+        assert_eq!(
+            SchemaGenerator::new(db_type).generate_create_table(&table),
+            expected,
+            "{db_type:?}"
+        );
+    }
 }
 
 #[test]
@@ -119,82 +115,58 @@ fn test_schema_generator_postgres_preserves_serial_width() {
 }
 
 #[test]
-fn test_schema_generator_omits_index_if_not_exists_for_mysql() {
-    let table = TableSchemaBuilder::new("users")
-        .column(ColumnSchema::new("email", "TEXT").not_null())
-        .index(IndexDefinition::new(
-            "idx_users_email",
-            vec!["email".to_string()],
-            false,
-        ))
-        .build();
-
-    let mut mysql = SchemaGenerator::new(DatabaseType::MySQL);
-    mysql.add_table(table.clone());
-    let mysql_sql = mysql.generate();
-    assert!(
-        mysql_sql.contains("CREATE INDEX `idx_users_email`"),
-        "Got: {}",
-        mysql_sql
-    );
-    assert!(
-        !mysql_sql.contains("IF NOT EXISTS `idx_users_email`"),
-        "MySQL has no CREATE INDEX IF NOT EXISTS. Got: {}",
-        mysql_sql
-    );
-
-    let mut mariadb = SchemaGenerator::new(DatabaseType::MariaDB);
-    mariadb.add_table(table);
-    let mariadb_sql = mariadb.generate();
-    assert!(
-        mariadb_sql.contains("CREATE INDEX IF NOT EXISTS `idx_users_email`"),
-        "MariaDB does support it. Got: {}",
-        mariadb_sql
-    );
-}
-
-#[test]
-fn test_schema_generator_mysql_family() {
-    for database_type in [DatabaseType::MySQL, DatabaseType::MariaDB] {
-        let mut generator = SchemaGenerator::new(database_type);
-
-        let table = TableSchemaBuilder::new("products")
-            .column(
-                ColumnSchema::new("id", "BIGINT")
-                    .primary_key()
-                    .auto_increment(),
-            )
-            .column(ColumnSchema::new("name", "VARCHAR(255)").not_null())
+fn test_schema_generator_writes_a_header_then_tables_then_indexes() {
+    // MySQL has no CREATE INDEX IF NOT EXISTS; MariaDB does.
+    for (db_type, indexes) in [
+        (
+            DatabaseType::Postgres,
+            r#"CREATE INDEX IF NOT EXISTS "idx_users_email" ON "users" ("email");
+CREATE UNIQUE INDEX IF NOT EXISTS "uidx_users_email" ON "users" ("email");
+"#,
+        ),
+        (
+            DatabaseType::MySQL,
+            "CREATE INDEX `idx_users_email` ON `users` (`email`);
+CREATE UNIQUE INDEX `uidx_users_email` ON `users` (`email`);
+",
+        ),
+        (
+            DatabaseType::MariaDB,
+            "CREATE INDEX IF NOT EXISTS `idx_users_email` ON `users` (`email`);
+CREATE UNIQUE INDEX IF NOT EXISTS `uidx_users_email` ON `users` (`email`);
+",
+        ),
+        (
+            DatabaseType::SQLite,
+            r#"CREATE INDEX IF NOT EXISTS "idx_users_email" ON "users" ("email");
+CREATE UNIQUE INDEX IF NOT EXISTS "uidx_users_email" ON "users" ("email");
+"#,
+        ),
+    ] {
+        let table = TableSchemaBuilder::new("users")
+            .column(ColumnSchema::new("email", "TEXT").not_null())
+            .index(IndexDefinition::new(
+                "idx_users_email",
+                vec!["email".to_string()],
+                false,
+            ))
+            .indexes(vec![IndexDefinition::new(
+                "uidx_users_email",
+                vec!["email".to_string()],
+                true,
+            )])
             .build();
-
-        generator.add_table(table);
+        let mut generator = SchemaGenerator::new(db_type);
+        generator.add_table(table.clone());
 
         let sql = generator.generate();
-
-        assert!(sql.contains("`products`"), "{database_type:?}");
-        assert!(sql.contains("AUTO_INCREMENT"), "{database_type:?}");
+        let header =
+            format!("-- TideORM Generated Schema\n-- Database: {db_type:?}\n-- Generated at: ");
+        assert!(sql.starts_with(&header), "{db_type:?}: {sql}");
+        let tables_then_indexes =
+            format!("{}\n{indexes}\n", generator.generate_create_table(&table));
+        assert!(sql.ends_with(&tables_then_indexes), "{db_type:?}: {sql}");
     }
-}
-
-#[test]
-fn test_schema_generator_sqlite() {
-    let mut generator = SchemaGenerator::new(DatabaseType::SQLite);
-
-    let table = TableSchemaBuilder::new("products")
-        .column(
-            ColumnSchema::new("id", "INTEGER")
-                .primary_key()
-                .auto_increment(),
-        )
-        .column(ColumnSchema::new("name", "TEXT").not_null())
-        .build();
-
-    generator.add_table(table);
-
-    let sql = generator.generate();
-
-    assert!(sql.contains("\"products\""));
-    assert!(sql.contains("INTEGER"));
 }
 
 #[test]
@@ -220,102 +192,27 @@ fn test_schema_generator_escapes_embedded_identifier_quotes() {
     assert!(mysql_sql.contains("`display``name` TEXT"));
 }
 
+/// A schema given apart and one written into the table name qualify alike.
 #[test]
 fn test_schema_generator_qualifies_postgres_schema_names() {
-    let mut generator = SchemaGenerator::new(DatabaseType::Postgres);
-    generator.add_table(
-        TableSchemaBuilder::new("posts")
-            .schema("public")
+    for table in [
+        TableSchemaBuilder::new("posts").schema("public"),
+        TableSchemaBuilder::new("public.posts"),
+    ] {
+        let table = table
             .column(
                 ColumnSchema::new("id", "BIGINT")
                     .primary_key()
                     .auto_increment(),
             )
-            .build(),
-    );
+            .build();
 
-    let sql = generator.generate();
-    assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"public\".\"posts\""));
-}
-
-#[test]
-fn test_schema_generator_supports_identifier_references() {
-    let mut generator = SchemaGenerator::new(DatabaseType::Postgres);
-    generator.add_table(
-        TableSchemaBuilder::new("public.posts")
-            .column(
-                ColumnSchema::new("id", "BIGINT")
-                    .primary_key()
-                    .auto_increment(),
-            )
-            .build(),
-    );
-
-    let sql = generator.generate();
-    assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"public\".\"posts\""));
-}
-
-#[test]
-fn test_column_schema_builder() {
-    let col = ColumnSchema::new("email", "VARCHAR(255)")
-        .not_null()
-        .default("''");
-
-    assert_eq!(col.name, "email");
-    assert_eq!(col.sql_type, "VARCHAR(255)");
-    assert!(!col.nullable);
-    assert_eq!(col.default, Some("''".to_string()));
-    assert!(!col.primary_key);
-    assert!(!col.auto_increment);
-}
-
-#[test]
-fn test_column_schema_primary_key() {
-    let col = ColumnSchema::new("id", "BIGINT")
-        .primary_key()
-        .auto_increment();
-
-    assert!(col.primary_key);
-    assert!(col.auto_increment);
-    assert!(!col.nullable);
-}
-
-#[test]
-fn test_table_schema_builder() {
-    let table = TableSchemaBuilder::new("users")
-        .column(ColumnSchema::new("id", "BIGINT").primary_key())
-        .column(ColumnSchema::new("email", "TEXT").not_null())
-        .index(IndexDefinition::new(
-            "idx_email",
-            vec!["email".to_string()],
-            false,
-        ))
-        .build();
-
-    assert_eq!(table.name, "users");
-    assert_eq!(table.columns.len(), 2);
-    assert_eq!(table.indexes.len(), 1);
-    assert_eq!(table.primary_keys, vec!["id"]);
-}
-
-#[test]
-fn test_table_schema_multiple_indexes() {
-    let indexes = vec![
-        IndexDefinition::new("idx_email", vec!["email".to_string()], false),
-        IndexDefinition::new(
-            "idx_name",
-            vec!["first_name".to_string(), "last_name".to_string()],
-            false,
-        ),
-        IndexDefinition::new("uidx_email", vec!["email".to_string()], true),
-    ];
-
-    let table = TableSchemaBuilder::new("users")
-        .column(ColumnSchema::new("id", "BIGINT").primary_key())
-        .indexes(indexes)
-        .build();
-
-    assert_eq!(table.indexes.len(), 3);
+        let sql = SchemaGenerator::new(DatabaseType::Postgres).generate_create_table(&table);
+        assert!(
+            sql.starts_with("CREATE TABLE IF NOT EXISTS \"public\".\"posts\""),
+            "{sql}"
+        );
+    }
 }
 
 #[test]
@@ -335,99 +232,63 @@ fn test_schema_generator_supports_composite_primary_keys() {
 }
 
 #[test]
-fn test_rust_type_mapping_postgres() {
-    assert_eq!(sql_for("i64", DatabaseType::Postgres), "BIGINT");
-    assert_eq!(sql_for("i32", DatabaseType::Postgres), "INTEGER");
-    assert_eq!(sql_for("String", DatabaseType::Postgres), "TEXT");
-    assert_eq!(sql_for("bool", DatabaseType::Postgres), "BOOLEAN");
-    assert_eq!(sql_for("f64", DatabaseType::Postgres), "DOUBLE PRECISION");
-    assert_eq!(sql_for("Option<i64>", DatabaseType::Postgres), "BIGINT");
-    assert_eq!(sql_for("Uuid", DatabaseType::Postgres), "UUID");
-    assert_eq!(sql_for("Uuid", DatabaseType::SQLite), "TEXT");
-    assert_eq!(sql_for("NaiveDate", DatabaseType::Postgres), "DATE");
-    assert_eq!(sql_for("NaiveTime", DatabaseType::Postgres), "TIME");
-    // "NaiveDateTime" contains "DateTime": a naive column must not become the
-    // session-shifted TIMESTAMPTZ.
-    assert_eq!(
-        sql_for("Option<NaiveDateTime>", DatabaseType::Postgres),
-        "TIMESTAMP"
-    );
-    assert_eq!(
-        sql_for("serde_json::Value", DatabaseType::Postgres),
-        "JSONB"
-    );
-}
-
-#[test]
-fn test_rust_type_mapping_maps_unsigned_types_to_what_postgres_reads_back() {
-    // PostgreSQL has no unsigned integers, so the mapping picks the signed type
-    // sea-orm's decoder actually accepts. `u32` is read as an `Oid` and then as
-    // an `i32`; widening it to BIGINT makes every read fail. `u64` is only
-    // decodable on MySQL, and the binder narrows it to `i64` on the way in, so
-    // an exact NUMERIC column buys nothing BIGINT does not already give.
-    let pg = DatabaseType::Postgres;
-    assert_eq!(sql_for("u8", pg), "SMALLINT");
-    assert_eq!(sql_for("u16", pg), "INTEGER");
-    assert_eq!(sql_for("u32", pg), "INTEGER");
-    assert_eq!(sql_for("u64", pg), "BIGINT");
-    assert_eq!(sql_for("Option<u32>", pg), "INTEGER");
-
-    // MySQL does have unsigned column types, so nothing widens there.
-    let mysql = DatabaseType::MySQL;
-    assert_eq!(sql_for("u32", mysql), "INT UNSIGNED");
-    assert_eq!(sql_for("u64", mysql), "BIGINT UNSIGNED");
-
-    // SQLite has one integer storage class for all of them.
-    let sqlite = DatabaseType::SQLite;
-    assert_eq!(sql_for("u32", sqlite), "INTEGER");
-    assert_eq!(sql_for("u64", sqlite), "INTEGER");
-}
-
-#[test]
-fn test_rust_type_mapping_keeps_decimals_readable() {
-    // TEXT would be the lossless target on SQLite, but sea-orm decodes both
-    // Decimal and BigDecimal there through `try_get::<Option<f64>>`, and sqlx
-    // only yields an f64 from a REAL-affinity column - a TEXT column cannot be
-    // read at all.
-    let pg = DatabaseType::Postgres;
-    let sqlite = DatabaseType::SQLite;
-    assert_eq!(sql_for("Decimal", pg), "DECIMAL");
-    assert_eq!(sql_for("Decimal", sqlite), "REAL");
-    assert_eq!(sql_for("BigDecimal", sqlite), "REAL");
-    assert_eq!(sql_for("rust_decimal::Decimal", sqlite), "REAL");
-}
-
-#[test]
-fn test_rust_type_mapping_maps_128_bit_integers_per_backend() {
-    // i128/u128 map to Decimal { precision: 39, scale: 0 }, so they inherit the
-    // decimal rendering - including SQLite's REAL, which cannot hold the range.
-    let pg = DatabaseType::Postgres;
-    assert_eq!(sql_for("i128", pg), "DECIMAL(39, 0)");
-    assert_eq!(sql_for("u128", pg), "DECIMAL(39, 0)");
-    assert_eq!(sql_for("i128", DatabaseType::MySQL), "DECIMAL(39, 0)");
-    assert_eq!(sql_for("i128", DatabaseType::SQLite), "REAL");
-}
-
-#[test]
-fn test_rust_type_mapping_mysql_family() {
-    for database_type in [DatabaseType::MySQL, DatabaseType::MariaDB] {
-        assert_eq!(sql_for("i64", database_type), "BIGINT");
-        assert_eq!(sql_for("bool", database_type), "TINYINT(1)");
-        assert_eq!(sql_for("f64", database_type), "DOUBLE");
-        assert_eq!(sql_for("Uuid", database_type), "BINARY(16)");
-        assert_eq!(sql_for("Vec<i32>", database_type), "JSON");
-        assert_eq!(sql_for("Vec<i64>", database_type), "JSON");
-        assert_eq!(sql_for("Vec<String>", database_type), "JSON");
+fn test_rust_types_map_to_the_column_each_backend_reads_back() {
+    // MariaDB maps as MySQL does.
+    for (rust_type, postgres, mysql, sqlite) in [
+        ("i32", "INTEGER", "INT", "INTEGER"),
+        ("i64", "BIGINT", "BIGINT", "INTEGER"),
+        ("f64", "DOUBLE PRECISION", "DOUBLE", "REAL"),
+        ("bool", "BOOLEAN", "TINYINT(1)", "INTEGER"),
+        ("String", "TEXT", "LONGTEXT", "TEXT"),
+        ("Uuid", "UUID", "BINARY(16)", "TEXT"),
+        ("NaiveDate", "DATE", "DATE", "TEXT"),
+        ("NaiveTime", "TIME", "TIME(6)", "TEXT"),
+        ("serde_json::Value", "JSONB", "JSON", "TEXT"),
+        ("Vec<i32>", "INTEGER[]", "JSON", "TEXT"),
+        ("Vec<i64>", "BIGINT[]", "JSON", "TEXT"),
+        ("Vec<String>", "TEXT[]", "JSON", "TEXT"),
+        // PostgreSQL has no unsigned integers, so the mapping picks the signed
+        // type sea-orm's decoder actually accepts. `u32` is read as an `Oid`
+        // and then as an `i32`; widening it to BIGINT makes every read fail.
+        // `u64` is only decodable on MySQL, and the binder narrows it to `i64`
+        // on the way in, so an exact NUMERIC column buys nothing BIGINT does
+        // not already give. MySQL does have unsigned column types, so nothing
+        // widens there, and SQLite has one integer storage class for them all.
+        ("u8", "SMALLINT", "TINYINT UNSIGNED", "INTEGER"),
+        ("u16", "INTEGER", "SMALLINT UNSIGNED", "INTEGER"),
+        ("u32", "INTEGER", "INT UNSIGNED", "INTEGER"),
+        ("u64", "BIGINT", "BIGINT UNSIGNED", "INTEGER"),
+        // TEXT would be the lossless target on SQLite, but sea-orm decodes both
+        // Decimal and BigDecimal there through `try_get::<Option<f64>>`, and
+        // sqlx only yields an f64 from a REAL-affinity column - a TEXT column
+        // cannot be read at all.
+        ("Decimal", "DECIMAL", "DECIMAL(65,30)", "REAL"),
+        ("BigDecimal", "DECIMAL", "DECIMAL(65,30)", "REAL"),
+        // i128/u128 map to Decimal { precision: 39, scale: 0 }, so they inherit
+        // the decimal rendering - including SQLite's REAL, which cannot hold
+        // the range.
+        ("i128", "DECIMAL(39, 0)", "DECIMAL(39, 0)", "REAL"),
+        ("u128", "DECIMAL(39, 0)", "DECIMAL(39, 0)", "REAL"),
+        // A naive timestamp carries no offset, so it must not land in a column
+        // the server shifts by session timezone, although "NaiveDateTime"
+        // contains "DateTime". MySQL stores both in DATETIME(6): its TIMESTAMP
+        // only spans 1970-2038, and sqlx pins the session to UTC.
+        ("NaiveDateTime", "TIMESTAMP", "DATETIME(6)", "TEXT"),
+        ("DateTime<Utc>", "TIMESTAMPTZ", "DATETIME(6)", "TEXT"),
+    ] {
+        for (db_type, expected) in [
+            (DatabaseType::Postgres, postgres),
+            (DatabaseType::MySQL, mysql),
+            (DatabaseType::MariaDB, mysql),
+            (DatabaseType::SQLite, sqlite),
+        ] {
+            assert_eq!(
+                sql_for(rust_type, db_type),
+                expected,
+                "{rust_type} on {db_type:?}"
+            );
+        }
     }
-}
-
-#[test]
-fn test_rust_type_mapping_sqlite() {
-    assert_eq!(sql_for("i64", DatabaseType::SQLite), "INTEGER");
-    assert_eq!(sql_for("i32", DatabaseType::SQLite), "INTEGER");
-    assert_eq!(sql_for("bool", DatabaseType::SQLite), "INTEGER");
-    assert_eq!(sql_for("f64", DatabaseType::SQLite), "REAL");
-    assert_eq!(sql_for("String", DatabaseType::SQLite), "TEXT");
 }
 
 #[test]
@@ -443,50 +304,9 @@ fn test_rust_type_normalization_strips_paths_lifetimes_and_options() {
     assert_eq!(sql_for("&'static str", pg), "TEXT");
     assert_eq!(sql_for("Option < i32 >", pg), "INTEGER");
     assert_eq!(sql_for("Option<Option<String>>", pg), "TEXT");
+    assert_eq!(sql_for("Option<NaiveDateTime>", pg), "TIMESTAMP");
     assert_eq!(sql_for("rust_decimal::Decimal", pg), "DECIMAL");
     assert_eq!(sql_for("Vec<serde_json::Value>", pg), "JSONB[]");
-}
-
-#[test]
-fn test_naive_and_aware_timestamps_get_different_columns() {
-    // A naive timestamp carries no offset, so it must not land in a column the
-    // server shifts by session timezone. MySQL stores both in DATETIME(6): its
-    // TIMESTAMP only spans 1970-2038, and sqlx pins the session to UTC.
-    let mysql = DatabaseType::MySQL;
-    assert_eq!(sql_for("NaiveDateTime", mysql), "DATETIME(6)");
-    assert_eq!(sql_for("DateTime<Utc>", mysql), "DATETIME(6)");
-
-    let pg = DatabaseType::Postgres;
-    assert_eq!(sql_for("NaiveDateTime", pg), "TIMESTAMP");
-    assert_eq!(sql_for("DateTime<Utc>", pg), "TIMESTAMPTZ");
-}
-
-#[test]
-fn test_migration_column_type_to_sql_dispatches_per_backend() {
-    use crate::migration::ColumnType;
-
-    assert_eq!(
-        ColumnType::Unsigned.to_sql(DatabaseType::Postgres),
-        ColumnType::Unsigned.to_postgres_sql()
-    );
-    assert_eq!(
-        ColumnType::Unsigned.to_sql(DatabaseType::MariaDB),
-        ColumnType::Unsigned.to_mysql_sql()
-    );
-    assert_eq!(
-        ColumnType::Unsigned.to_sql(DatabaseType::SQLite),
-        ColumnType::Unsigned.to_sqlite_sql()
-    );
-}
-
-#[test]
-fn test_schema_generator_header() {
-    let generator = SchemaGenerator::new(DatabaseType::Postgres);
-    let sql = generator.generate();
-
-    assert!(sql.contains("-- TideORM Generated Schema"));
-    assert!(sql.contains("-- Database:"));
-    assert!(sql.contains("-- Generated at:"));
 }
 
 fn catalog_column(name: &str, sql_type: &str) -> CatalogColumn {

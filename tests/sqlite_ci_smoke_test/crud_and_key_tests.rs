@@ -177,3 +177,56 @@ async fn sqlite_natural_primary_key_save_smoke_test() {
     assert_eq!(saved_again.label, "Updated key");
     assert!(!saved_again.active);
 }
+
+#[tokio::test]
+async fn sqlite_direct_crud_helpers_read_every_row_of_a_regular_model() {
+    fresh_table(CI_USERS_DDL).await;
+
+    for (email, name) in [
+        ("first@example.com", "First"),
+        ("middle@example.com", "Middle"),
+        ("last@example.com", "Last"),
+    ] {
+        CiUser {
+            id: 0,
+            email: email.to_string(),
+            name: name.to_string(),
+            active: true,
+        }
+        .save()
+        .await
+        .expect("failed to insert regular user");
+    }
+
+    let all_users = CiUser::all()
+        .await
+        .expect("failed to fetch all regular users");
+    assert_eq!(all_users.len(), 3);
+
+    let first_user = CiUser::first()
+        .await
+        .expect("failed to fetch first regular user")
+        .expect("first regular user should exist");
+    assert_eq!(first_user.email, "first@example.com");
+
+    let last_user = CiUser::last()
+        .await
+        .expect("failed to fetch last regular user")
+        .expect("last regular user should exist");
+    assert_eq!(last_user.email, "last@example.com");
+
+    let count = CiUser::count()
+        .await
+        .expect("failed to count regular users");
+    assert_eq!(count, 3);
+
+    let exists_any = CiUser::exists_any()
+        .await
+        .expect("failed to check regular users existence");
+    assert!(exists_any);
+
+    let page = CiUser::paginate(1, 10)
+        .await
+        .expect("failed to paginate regular users");
+    assert_eq!(page.len(), 3);
+}

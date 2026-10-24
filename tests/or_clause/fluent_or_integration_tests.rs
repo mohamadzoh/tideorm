@@ -304,26 +304,6 @@ async fn test_all_fluent_or_scenarios() {
         .expect("Query failed");
     assert_eq!(results.len(), 9, "all active users");
 
-    let sql = OrTestUser::query()
-        .where_eq("active", true)
-        .begin_or()
-        .or_where_eq("role", "admin")
-        .and_where_eq("verified", true)
-        .or_where_eq("role", "moderator")
-        .and_where_gt("age", 30)
-        .end_or()
-        .build_sql_preview();
-    let sql_lower = sql.to_lowercase();
-    assert!(
-        sql_lower.contains("where"),
-        "SQL should contain WHERE: {sql}"
-    );
-    assert!(sql_lower.contains(" or "), "SQL should contain OR: {sql}");
-    assert!(
-        sql_lower.contains("active") && sql_lower.contains("role"),
-        "SQL should reference both filtered columns: {sql}"
-    );
-
     let results = OrTestUser::query()
         .begin_or()
         .or_where_eq("role", "admin")

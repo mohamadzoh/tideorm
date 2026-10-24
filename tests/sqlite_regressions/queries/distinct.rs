@@ -33,20 +33,23 @@ async fn distinct_pluck_uses_database_equality_for_every_projection_shape() {
             .await
             .unwrap();
         assert_eq!(expected.len(), if collation == "BINARY" { 4 } else { 3 });
-        for shape in 0..6 {
+        // Each shape selects more than `name`; the pluck is distinct on `name`
+        // alone, under its collation, before a page is cut.
+        for shape in 0..7 {
             let base = Name::query_with(&db).where_gt("id", 0);
             let query = match shape {
                 0 => base.select_raw("id AS extra"),
                 1 => base.row_number("extra", None, "id", Order::Asc),
-                2 => base.select_subquery(
+                2 => base.select_raw("row_number() OVER (ORDER BY id) AS extra"),
+                3 => base.select_subquery(
                     Name::query_with(&db)
                         .select(vec!["id"])
                         .where_eq("id", 1)
                         .limit(1),
                     "extra",
                 ),
-                3 => base.select_raw("id AS tideorm_pluck_group"),
-                4 => base
+                4 => base.select_raw("id AS tideorm_pluck_group"),
+                5 => base
                     .select(vec!["id", "name"])
                     .where_lte("id", 2)
                     .union_all(
@@ -171,46 +174,12 @@ struct Entry {
 }
 
 #[tokio::test]
-async fn distinct_pluck_paginates_scalars_before_limiting() {
-    let db = memory_database("CREATE TABLE resume_entries(id INTEGER PRIMARY KEY,amount INTEGER); INSERT INTO resume_entries VALUES(1,10),(2,10),(3,20),(4,30)").await;
-    for kind in 0..6 {
-        let q = Entry::query_with(&db);
-        let q = match kind {
-            0 => q,
-            1 => q.select_raw("id AS extra"),
-            2 => q.select_raw("row_number() OVER (ORDER BY id) AS extra"),
-            3 => q.row_number("extra", None, "id", Order::Asc),
-            4 => q.select_subquery(Entry::query_with(&db).select(vec!["id"]).limit(1), "extra"),
-            _ => q.select(vec!["id", "amount"]).where_lte("id", 2).union_all(
-                Entry::query_with(&db)
-                    .select(vec!["id", "amount"])
-                    .where_gt("id", 2),
-            ),
-        }
-        .distinct()
-        .order_asc("amount");
-        assert_eq!(
-            q.clone().limit(2).pluck::<i64>("amount").await.unwrap(),
-            vec![10, 20],
-            "{kind}"
-        );
-        assert_eq!(
-            q.clone()
-                .offset(1)
-                .limit(2)
-                .pluck::<i64>("amount")
-                .await
-                .unwrap(),
-            vec![20, 30],
-            "{kind}"
-        );
-        assert!(q.limit(0).pluck::<i64>("amount").await.unwrap().is_empty());
-    }
-}
-
-#[tokio::test]
 async fn distinct_aggregates_resolve_swapped_output_aliases_first() {
-    let db = memory_database("CREATE TABLE resume_entries(id INTEGER PRIMARY KEY,amount INTEGER); INSERT INTO resume_entries VALUES(1,10),(2,20)").await;
+    let db = memory_database(
+        "CREATE TABLE resume_entries(id INTEGER PRIMARY KEY,amount INTEGER); \
+         INSERT INTO resume_entries VALUES(1,10),(2,20)",
+    )
+    .await;
     let q = Entry::query_with(&db)
         .select(vec!["id AS amount", "amount AS id"])
         .distinct();

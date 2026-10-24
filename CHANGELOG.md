@@ -5,6 +5,48 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.1] - 2026-10-24
+
+A correcting release: dependency updates, a clearer `insert_all` validation message, corrected
+documentation and a cleanup of the test suite. No API changes.
+
+### Changed
+
+- Dependencies: argon2 0.6 and chacha20poly1305 0.11. Tokens, encrypted columns and password
+  hashes written by earlier releases still open and verify; tests built from the old crates' output
+  now pin that. `tideorm-macros` moves to syn 3 and darling 0.24, sea-orm to 2.0.4, and every
+  other dependency's minimum version to its current release. The minimum Rust version stays 1.94:
+  parking_lot 0.13, which needs 1.95, is not taken.
+- A validation failure in `insert_all` names the model by its index in the batch ("the batch's
+  model at index 1"). "Model 1 of the batch" read as the first model when it meant the second.
+
+### Fixed
+
+- Documentation: `Model::to_hash_map` now says it leaves out a `params` field that holds an object
+  or an array, which it always did (`params` is reserved for presenter payloads). The docs of
+  `CTE::recursive` and `WindowFunction`, and the query cache's list of eviction strategies,
+  described behaviour the code no longer has.
+
+### Internal
+
+- Tests: 1,670 test functions are 1,197, and about 6,300 lines lighter, with every remaining test
+  checking something no other test does:
+  - duplicates are gone, including tests repeated across the unit, public-API, regression and
+    backend-parity suites, and two `tests/ui` fixtures that pinned the diagnostic a third already
+    did;
+  - families of near-identical tests are table-driven, with messages that name the failing case,
+    and many now compare exact SQL, messages and values where they checked substrings, counts or
+    only `is_err()`;
+  - tests that asserted only what a type, a constructor or a setter guarantees are deleted;
+  - stale comments are corrected. Two tests had gone vacuous: one stopped reaching the per-row
+    rollback path when the batch-insert strategy changed, and one passed on an encryption key an
+    earlier test left behind;
+  - `tokenization_missing_key_test` and `tests/tokenization_tests/` are folded into the unit tests
+    and one `tests/tokenization_tests.rs`, scenarios the parity suite ran only on SQLite moved to
+    `sqlite_regressions`, and the last inline test modules in `src/` moved to `tests/unit/`.
+- CI runs `postgres_integration_tests` with `dirty-tracking`, so the scenario behind that feature
+  runs.
+
 ## [0.16.0] - 2026-10-23
 
 ### Added
@@ -2851,6 +2893,7 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
+[0.16.1]: https://github.com/mohamadzoh/tideorm/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/mohamadzoh/tideorm/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/mohamadzoh/tideorm/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/mohamadzoh/tideorm/compare/v0.14.0...v0.14.1
