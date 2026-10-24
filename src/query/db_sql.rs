@@ -1,5 +1,6 @@
 use crate::config::DatabaseType;
 use crate::internal::Value;
+use std::fmt::Write as _;
 
 mod arrays;
 mod mysql_json;
@@ -124,23 +125,23 @@ pub(crate) fn json_scalar_parameter(value: &serde_json::Value) -> Value {
     Value::String(Some(value.to_string()))
 }
 
-/// Bind a list of JSON values as the text of one JSON array.
-pub(crate) fn json_array_parameter(values: &[serde_json::Value]) -> Value {
-    json_scalar_parameter(&serde_json::Value::Array(values.to_vec()))
+/// Bind a list of JSON values or strings as the text of one JSON array.
+///
+/// The list is serialized where it lies rather than copied into an array
+/// value first: it is how a long `where_in` list binds, thousands of values.
+/// JSON values and strings always serialize, so the text is never the empty
+/// default.
+pub(crate) fn json_array_parameter<T: serde::Serialize>(values: &[T]) -> Value {
+    Value::String(Some(serde_json::to_string(values).unwrap_or_default()))
 }
 
 fn json_native_parameter(value: &serde_json::Value) -> Value {
     Value::Json(Some(Box::new(value.clone())))
 }
 
-fn json_string_contents(value: &str) -> String {
-    let json = serde_json::Value::String(value.to_string()).to_string();
-    json[1..json.len() - 1].to_string()
-}
-
 /// The JSON path of the member `key` below `path`, the key quoted.
 fn json_member_path(path: &str, key: &str) -> String {
-    format!("{path}.\"{}\"", json_string_contents(key))
+    format!("{path}.{}", serde_json::Value::from(key))
 }
 
 /// `column_sql` as `jsonb`, which PostgreSQL's JSON operators require: a
@@ -480,22 +481,30 @@ pub(crate) fn append_limit_offset(
     params: &mut Vec<Value>,
 ) {
     match (limit, offset) {
-        (Some(limit), _) => sql.push_str(&format!(" LIMIT {limit}")),
+        (Some(limit), _) => {
+            let _ = write!(sql, " LIMIT {limit}");
+        }
         (None, Some(_)) => match db_type {
             DatabaseType::Postgres => {}
             DatabaseType::SQLite => sql.push_str(" LIMIT -1"),
             DatabaseType::MySQL | DatabaseType::MariaDB => {
-                sql.push_str(&format!(" LIMIT {}", u64::MAX))
+                let _ = write!(sql, " LIMIT {}", u64::MAX);
             }
         },
         (None, None) => {}
     }
     if let Some(offset) = offset {
-        let offset = match i64::try_from(offset) {
-            Ok(offset) => crate::internal::push_param(db_type, params, Value::BigInt(Some(offset))),
-            Err(_) => offset.to_string(),
-        };
-        sql.push_str(&format!(" OFFSET {offset}"));
+        sql.push_str(" OFFSET ");
+        match i64::try_from(offset) {
+            Ok(offset) => sql.push_str(&crate::internal::push_param(
+                db_type,
+                params,
+                Value::BigInt(Some(offset)),
+            )),
+            Err(_) => {
+                let _ = write!(sql, "{offset}");
+            }
+        }
     }
 }
 

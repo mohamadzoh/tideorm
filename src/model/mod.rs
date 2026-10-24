@@ -374,7 +374,7 @@ pub fn __loading_through<T>(
     // baselines its load records go back if it rolls back.
     connection.recording(|| {
         crate::database::with_loading_connection(connection, || {
-            __loading_from(connection.source().origin, load)
+            __loading_from(connection.origin(), load)
         })
     })
 }

@@ -14,9 +14,11 @@ impl<M: Model> QueryBuilder<M> {
         let mut sql = format!("SELECT {projection} ");
         self.append_from_and_join_sql(&mut sql, db_type);
         if !where_sql.is_empty() {
-            sql.push_str(&format!("WHERE {}", where_sql));
+            sql.push_str("WHERE ");
+            sql.push_str(&where_sql);
         }
-        (sql.trim_end().to_string(), params)
+        sql.truncate(sql.trim_end().len());
+        (sql, params)
     }
 
     pub(crate) fn build_count_sql_with_params_for_db(

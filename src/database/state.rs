@@ -133,7 +133,8 @@ fn install_db_override(scope: &Arc<Scope>) -> ResetDbOverride {
 /// outer database still joins its transaction inside another one's.
 pub(crate) fn enclosing_transaction(own: Option<u64>) -> Option<ConnectionRef> {
     DB_OVERRIDE.with(|slot| {
-        let mut scope = slot.borrow().clone();
+        let slot = slot.borrow();
+        let mut scope = slot.as_deref();
         while let Some(current) = scope {
             let joins = match (own, current.origin) {
                 (Some(own), Some(origin)) => own == origin,
@@ -143,7 +144,7 @@ pub(crate) fn enclosing_transaction(own: Option<u64>) -> Option<ConnectionRef> {
                 return matches!(current.connection, ConnectionRef::Transaction(..))
                     .then(|| current.connection.clone());
             }
-            scope = current.enclosing.clone();
+            scope = current.enclosing.as_deref();
         }
         None
     })

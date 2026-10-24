@@ -290,6 +290,15 @@ pub(crate) fn fts5_near_query(input: &str, distance: u32) -> String {
 /// Characters InnoDB's full-text parser gives a meaning, in every search mode.
 const MYSQL_FULLTEXT_OPERATORS: &[char] = &['+', '-', '<', '>', '(', ')', '~', '*', '"', '@'];
 
+/// The searchable words of `text`, space-separated, each operator character
+/// read as a space.
+fn mysql_fulltext_words(text: &str) -> String {
+    text.split(|ch: char| ch.is_whitespace() || MYSQL_FULLTEXT_OPERATORS.contains(&ch))
+        .filter(|word| has_searchable_char(word))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Rewrite user input into an `AGAINST(..)` operand MySQL can always parse.
 ///
 /// The operand is bound, so this is not about injection: InnoDB parses it, and
@@ -302,21 +311,7 @@ const MYSQL_FULLTEXT_OPERATORS: &[char] = &['+', '-', '<', '>', '(', ')', '~', '
 /// terms.
 pub(crate) fn sanitize_mysql_fulltext_query(input: &str, boolean: bool) -> String {
     if !boolean {
-        let text: String = input
-            .chars()
-            .map(|ch| {
-                if MYSQL_FULLTEXT_OPERATORS.contains(&ch) {
-                    ' '
-                } else {
-                    ch
-                }
-            })
-            .collect();
-        return text
-            .split_whitespace()
-            .filter(|word| has_searchable_char(word))
-            .collect::<Vec<_>>()
-            .join(" ");
+        return mysql_fulltext_words(input);
     }
 
     split_search_segments(input)
@@ -341,26 +336,12 @@ pub(crate) fn sanitize_mysql_fulltext_query(input: &str, boolean: bool) -> Strin
             // Operator characters inside a term separate words, as MySQL's own
             // tokenizer reads them; the operator binds to the first word and
             // the prefix star to the last.
-            let body: String = segment
-                .text
-                .chars()
-                .map(|ch| {
-                    if MYSQL_FULLTEXT_OPERATORS.contains(&ch) {
-                        ' '
-                    } else {
-                        ch
-                    }
-                })
-                .collect();
-            let words: Vec<&str> = body
-                .split_whitespace()
-                .filter(|word| has_searchable_char(word))
-                .collect();
+            let words = mysql_fulltext_words(&segment.text);
             (!words.is_empty()).then(|| {
                 format!(
                     "{}{}{}",
                     operator.map(String::from).unwrap_or_default(),
-                    words.join(" "),
+                    words,
                     if prefix { "*" } else { "" }
                 )
             })

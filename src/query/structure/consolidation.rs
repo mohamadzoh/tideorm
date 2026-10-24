@@ -53,10 +53,7 @@ impl JoinResultConsolidator {
         K: Eq + Hash,
         F: Fn(&A) -> K,
     {
-        Self::consolidate_two_optional(
-            items.into_iter().map(|(a, b)| (a, Some(b))).collect(),
-            key_fn,
-        )
+        group_pairs(items.into_iter().map(|(a, b)| (a, Some(b))), key_fn)
     }
 
     /// Group LEFT JOIN rows, where an unmatched parent arrives with `None`.
@@ -72,15 +69,7 @@ impl JoinResultConsolidator {
         K: Eq + Hash,
         F: Fn(&A) -> K,
     {
-        let mut index = HashMap::new();
-        let mut groups: Vec<(A, Vec<B>)> = Vec::new();
-
-        for (a, maybe_b) in items {
-            let slot = group_slot(&mut index, &mut groups, key_fn(&a), || (a, Vec::new()));
-            groups[slot].1.extend(maybe_b);
-        }
-
-        groups
+        group_pairs(items, key_fn)
     }
 
     /// Nest a three-way join two levels deep: `(A, B, C)` rows become
@@ -106,8 +95,8 @@ impl JoinResultConsolidator {
         FA: Fn(&A) -> KA,
         FB: Fn(&B) -> KB,
     {
-        Self::consolidate_three_optional(
-            items.into_iter().map(|(a, b, c)| (a, b, Some(c))).collect(),
+        group_triples(
+            items.into_iter().map(|(a, b, c)| (a, b, Some(c))),
             key_a,
             key_b,
         )
@@ -130,31 +119,60 @@ impl JoinResultConsolidator {
         FA: Fn(&A) -> KA,
         FB: Fn(&B) -> KB,
     {
-        let mut a_index = HashMap::new();
-        let mut groups: Vec<ParentGroup<A, B, C, KB>> = Vec::new();
-
-        for (a, b, maybe_c) in items {
-            let a_slot = group_slot(&mut a_index, &mut groups, key_a(&a), || ParentGroup {
-                parent: a,
-                children: Vec::new(),
-                child_index: HashMap::new(),
-            });
-
-            let group = &mut groups[a_slot];
-            let b_slot = group_slot(
-                &mut group.child_index,
-                &mut group.children,
-                key_b(&b),
-                || (b, Vec::new()),
-            );
-            group.children[b_slot].1.extend(maybe_c);
-        }
-
-        groups
-            .into_iter()
-            .map(|group| (group.parent, group.children))
-            .collect()
+        group_triples(items, key_a, key_b)
     }
+}
+
+/// [`JoinResultConsolidator::consolidate_two_optional`] over any row
+/// iterator, so the non-optional form groups its rows without first
+/// collecting them into a second vector.
+fn group_pairs<A, B, K: Eq + Hash>(
+    items: impl IntoIterator<Item = (A, Option<B>)>,
+    key_fn: impl Fn(&A) -> K,
+) -> Vec<(A, Vec<B>)> {
+    let mut index = HashMap::new();
+    let mut groups: Vec<(A, Vec<B>)> = Vec::new();
+
+    for (a, maybe_b) in items {
+        let slot = group_slot(&mut index, &mut groups, key_fn(&a), || (a, Vec::new()));
+        groups[slot].1.extend(maybe_b);
+    }
+
+    groups
+}
+
+/// [`JoinResultConsolidator::consolidate_three_optional`] over any row
+/// iterator, as [`group_pairs`] is for two levels.
+#[allow(clippy::type_complexity)]
+fn group_triples<A, B, C, KA: Eq + Hash, KB: Eq + Hash>(
+    items: impl IntoIterator<Item = (A, B, Option<C>)>,
+    key_a: impl Fn(&A) -> KA,
+    key_b: impl Fn(&B) -> KB,
+) -> Vec<(A, Vec<(B, Vec<C>)>)> {
+    let mut a_index = HashMap::new();
+    let mut groups: Vec<ParentGroup<A, B, C, KB>> = Vec::new();
+
+    for (a, b, maybe_c) in items {
+        let a_slot = group_slot(&mut a_index, &mut groups, key_a(&a), || ParentGroup {
+            parent: a,
+            children: Vec::new(),
+            child_index: HashMap::new(),
+        });
+
+        let group = &mut groups[a_slot];
+        let b_slot = group_slot(
+            &mut group.child_index,
+            &mut group.children,
+            key_b(&b),
+            || (b, Vec::new()),
+        );
+        group.children[b_slot].1.extend(maybe_c);
+    }
+
+    groups
+        .into_iter()
+        .map(|group| (group.parent, group.children))
+        .collect()
 }
 
 /// One outer parent of a three-way consolidation, with its middle rows in

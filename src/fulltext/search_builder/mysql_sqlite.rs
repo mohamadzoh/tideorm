@@ -57,16 +57,17 @@ fn fts5_in_columns(columns: &[String], operand: String) -> String {
 // its fragments — and pushes their values — in the order they appear in the
 // statement.
 impl<T: Model> FullTextSearchBuilder<T> {
-    pub(super) fn build_mysql_sql(&self) -> Result<(String, Vec<Value>)> {
+    pub(super) fn build_mysql_sql(&self) -> (String, Vec<Value>) {
         let mut params = Vec::new();
         let predicate = self.mysql_predicate(&mut params);
-        Ok(self.select_where(DatabaseType::MySQL, &predicate, params))
+        self.select_where(DatabaseType::MySQL, &predicate, params)
     }
 
-    pub(super) fn build_mysql_ranked_sql(&self) -> Result<(String, Vec<Value>)> {
+    pub(super) fn build_mysql_ranked_sql(&self) -> (String, Vec<Value>) {
         let mut params = Vec::new();
         let rank = self.mysql_match(&mut params);
         let predicate = self.mysql_predicate(&mut params);
+        let rank_alias = Self::rank_alias();
         let mut sql = SqlBuilder::new(DatabaseType::MySQL, &mut params)
             .raw("SELECT ")
             .raw(&crate::query::db_sql::model_columns_sql::<T>(
@@ -76,7 +77,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
             .raw(", ")
             .raw(&rank)
             .raw(" AS ")
-            .raw(&Self::rank_alias())
+            .raw(&rank_alias)
             .raw(" FROM ")
             .raw(&crate::query::db_sql::quote_table::<T>(DatabaseType::MySQL))
             .raw(" WHERE ")
@@ -98,17 +99,19 @@ impl<T: Model> FullTextSearchBuilder<T> {
             sql.push(' ');
         }
 
-        sql.push_str(&format!("ORDER BY {} DESC ", Self::rank_alias()));
+        sql.push_str("ORDER BY ");
+        sql.push_str(&rank_alias);
+        sql.push_str(" DESC ");
 
         self.append_limit_offset(DatabaseType::MySQL, &mut sql, &mut params);
 
-        Ok((sql, params))
+        (sql, params)
     }
 
-    pub(super) fn build_mysql_count_sql(&self) -> Result<(String, Vec<Value>)> {
+    pub(super) fn build_mysql_count_sql(&self) -> (String, Vec<Value>) {
         let mut params = Vec::new();
         let predicate = self.mysql_predicate(&mut params);
-        Ok(Self::count_where(DatabaseType::MySQL, &predicate, params))
+        Self::count_where(DatabaseType::MySQL, &predicate, params)
     }
 
     /// The `AGAINST(..)` operand for the search mode, empty when the search
@@ -179,7 +182,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
         (!operand.is_empty()).then(|| fts5_in_columns(&self.column_names(), operand))
     }
 
-    pub(super) fn build_sqlite_sql(&self) -> Result<(String, Vec<Value>)> {
+    pub(super) fn build_sqlite_sql(&self) -> (String, Vec<Value>) {
         let mut params = Vec::new();
         let from = self.sqlite_from(self.sqlite_match_operand(), &mut params);
         let mut sql = SqlBuilder::new(DatabaseType::SQLite, &mut params)
@@ -194,10 +197,10 @@ impl<T: Model> FullTextSearchBuilder<T> {
 
         self.append_limit_offset(DatabaseType::SQLite, &mut sql, &mut params);
 
-        Ok((sql, params))
+        (sql, params)
     }
 
-    pub(super) fn build_sqlite_ranked_sql(&self) -> Result<(String, Vec<Value>)> {
+    pub(super) fn build_sqlite_ranked_sql(&self) -> (String, Vec<Value>) {
         let mut params = Vec::new();
         let operand = self.sqlite_match_operand();
 
@@ -249,10 +252,10 @@ impl<T: Model> FullTextSearchBuilder<T> {
 
         self.append_limit_offset(DatabaseType::SQLite, &mut sql, &mut params);
 
-        Ok((sql, params))
+        (sql, params)
     }
 
-    pub(super) fn build_sqlite_count_sql(&self) -> Result<(String, Vec<Value>)> {
+    pub(super) fn build_sqlite_count_sql(&self) -> (String, Vec<Value>) {
         let mut params = Vec::new();
         let from = self.sqlite_from(self.sqlite_match_operand(), &mut params);
         let sql = SqlBuilder::new(DatabaseType::SQLite, &mut params)
@@ -260,7 +263,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
             .raw(&from)
             .into_sql();
 
-        Ok((sql, params))
+        (sql, params)
     }
 
     /// The FTS5 table an index built by [`FullTextIndex::to_sqlite_sql`] keeps

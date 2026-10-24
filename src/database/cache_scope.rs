@@ -74,14 +74,30 @@ pub(crate) async fn identify(_conn: &OrmConnection) -> crate::Result<Option<Arc<
 
 impl super::ConnectionRef {
     pub(crate) fn cache_scope(&self) -> Option<Arc<str>> {
-        self.source().cache_scope.read().clone()
+        self.cache_scope_slot().read().clone()
+    }
+
+    /// The scope of the pool this connection's statements run on, read
+    /// without building the whole [`source`](Self::source).
+    fn cache_scope_slot(&self) -> &CacheScope {
+        match self {
+            Self::Database(pool) => &pool.cache_scope,
+            Self::Transaction(_, source) => &source.cache_scope,
+        }
     }
 
     /// Attached SQLite databases can overlap any other pool's database. Keep
     /// conservative global invalidation once this connection uses ATTACH;
     /// DETACH cannot prove every pooled connection detached the same database.
     pub(crate) fn observe_cache_sql(&self, sql: &str) {
-        if self.backend() != crate::internal::Backend::Sqlite {
+        // A statement that never spells `attach` holds no such keyword, so
+        // only one that does is lexed.
+        if self.backend() != crate::internal::Backend::Sqlite
+            || !sql
+                .as_bytes()
+                .windows(6)
+                .any(|window| window.eq_ignore_ascii_case(b"attach"))
+        {
             return;
         }
         let mut statement_start = true;
@@ -91,7 +107,7 @@ impl super::ConnectionRef {
             attach
         });
         if attaches {
-            *self.source().cache_scope.write() = None;
+            *self.cache_scope_slot().write() = None;
             self.recording(|| crate::cache::QueryCache::global().clear());
         }
     }

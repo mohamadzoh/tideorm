@@ -22,37 +22,34 @@ impl<M: Model> QueryBuilder<M> {
         self.build_custom_expression(sql, values)
     }
 
-    pub(in crate::query::sql) fn build_compare_expression(
-        &self,
-        column: &str,
-        column_expr: SimpleExpr,
-        operator: ComparisonOperator,
-        value: &serde_json::Value,
-    ) -> SimpleExpr {
-        operator.apply(column_expr, self.column_value(column, value))
-    }
-
     /// Whether `column` holds JSON, which compares as documents, not text.
     pub(in crate::query::sql) fn is_json_column(&self, column: &str) -> bool {
-        matches!(
-            self.column_type(column),
-            Some(crate::orm::ColumnType::Json | crate::orm::ColumnType::JsonBinary)
-        )
+        is_json_type(self.column_type(column).as_ref())
     }
 
-    /// The JSON `column` holding the document `value`, or not when `negated`.
-    pub(in crate::query::sql) fn build_json_equals_expression(
+    /// `column` as the JSON and array conditions write it: on SQLite, one of
+    /// the model's columns is always qualified with its table.
+    pub(in crate::query::sql) fn condition_column_sql(
         &self,
         db_type: DatabaseType,
         column: &str,
+    ) -> String {
+        self.format_column_for_db(
+            db_type,
+            &self.model_identifier(column, db_type == DatabaseType::SQLite),
+        )
+    }
+
+    /// The JSON column `column_sql` holding the document `value`, or not when
+    /// `negated`.
+    pub(in crate::query::sql) fn build_json_equals_expression(
+        &self,
+        db_type: DatabaseType,
+        column_sql: &str,
         value: &serde_json::Value,
         negated: bool,
     ) -> SimpleExpr {
-        let column_sql = self.format_column_for_db(
-            db_type,
-            &self.model_identifier(column, db_type == DatabaseType::SQLite),
-        );
-        let bound = db_sql::json_equals_bound(db_type, &column_sql, value, negated);
+        let bound = db_sql::json_equals_bound(db_type, column_sql, value, negated);
         self.build_custom_expression(bound.sql, bound.values)
     }
 
@@ -119,8 +116,11 @@ impl<M: Model> QueryBuilder<M> {
         // literally, `IN (.., NULL)` never matches a NULL row and
         // `NOT IN (.., NULL)` never matches any row at all. A JSON column
         // compares a JSON `null` member as the `null` document instead.
+        let column_type = self.column_type(column);
         let (sql_null, values): (bool, Vec<&serde_json::Value>) = match documents {
-            Some(sql_null) if self.is_json_column(column) => (sql_null, values.iter().collect()),
+            Some(sql_null) if is_json_type(column_type.as_ref()) => {
+                (sql_null, values.iter().collect())
+            }
             documents => {
                 let (nulls, values): (Vec<&serde_json::Value>, Vec<&serde_json::Value>) =
                     values.iter().partition(|value| value.is_null());
@@ -130,6 +130,7 @@ impl<M: Model> QueryBuilder<M> {
         let listed = self.build_non_null_list_expression(
             db_type,
             column,
+            column_type.as_ref(),
             column_expr.clone(),
             operator,
             &values,
@@ -149,17 +150,19 @@ impl<M: Model> QueryBuilder<M> {
         &self,
         db_type: DatabaseType,
         column: &str,
+        column_type: Option<&crate::orm::ColumnType>,
         column_expr: SimpleExpr,
         operator: ListOperator,
         values: &[&serde_json::Value],
     ) -> SimpleExpr {
         // A JSON column compares documents, one per listed value, as
         // `where_eq`/`where_not` do.
-        if self.is_json_column(column) {
+        if is_json_type(column_type) {
             let negated = matches!(operator, ListOperator::NotIn);
-            let mut documents = values
-                .iter()
-                .map(|value| self.build_json_equals_expression(db_type, column, value, negated));
+            let column_sql = self.condition_column_sql(db_type, column);
+            let mut documents = values.iter().map(|value| {
+                self.build_json_equals_expression(db_type, &column_sql, value, negated)
+            });
             if let Some(first) = documents.next() {
                 return documents.fold(first, |all, document| {
                     if negated {
@@ -173,18 +176,18 @@ impl<M: Model> QueryBuilder<M> {
 
         let sea_values: Vec<Value> = values
             .iter()
-            .map(|value| self.column_value(column, value))
+            .map(|value| crate::internal::json_to_column_value(value, column_type))
             .collect();
         // PostgreSQL takes a long list as one array parameter, so any length
         // fits in a statement and every length shares one prepared statement.
         #[cfg(feature = "postgres")]
         if db_type == DatabaseType::Postgres
             && sea_values.len() > INLINE_INTEGER_LIST_AFTER
-            && let Some(array) = postgres_array(&sea_values)
+            && let Some(array_type) = shared_array_type(&sea_values)
         {
             use crate::orm::sea_query::extension::postgres::PgFunc;
 
-            let array = Expr::val(array);
+            let array = Expr::val(Value::Array(array_type, Some(Box::new(sea_values))));
             return match operator {
                 ListOperator::In => column_expr.eq(PgFunc::any(array)),
                 ListOperator::NotIn => column_expr.ne(PgFunc::all(array)),
@@ -198,7 +201,7 @@ impl<M: Model> QueryBuilder<M> {
             && let Some(texts) = sea_values
                 .iter()
                 .map(|value| match value {
-                    Value::String(Some(text)) => Some(serde_json::Value::String(text.clone())),
+                    Value::String(Some(text)) => Some(text.as_str()),
                     _ => None,
                 })
                 .collect::<Option<Vec<_>>>()
@@ -270,14 +273,14 @@ fn sqlite_literal_pattern(pattern: &str) -> Option<(String, bool, bool)> {
     Some((middle.iter().map(|(ch, _)| ch).collect(), leading, trailing))
 }
 
-/// `values` as one PostgreSQL array value, when they share a type.
+/// The PostgreSQL array type of `values`, when they share one.
 #[cfg(feature = "postgres")]
-fn postgres_array(values: &[Value]) -> Option<Value> {
+fn shared_array_type(values: &[Value]) -> Option<crate::orm::sea_query::ArrayType> {
     let array_type = values.first()?.array_type();
     values
         .iter()
         .all(|value| value.array_type() == array_type)
-        .then(|| Value::Array(array_type, Some(Box::new(values.to_vec()))))
+        .then_some(array_type)
 }
 
 /// The SQL literal of an integer value, or `None` for anything else.

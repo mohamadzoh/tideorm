@@ -333,7 +333,7 @@ impl<M: Model> QueryBuilder<M> {
         for expression in &self.clauses.raw_select_expressions {
             collect_tables_from_sql(expression, &mut tables);
         }
-        for (having, _) in self.having_clauses() {
+        for having in &self.clauses.having_conditions {
             collect_tables_from_sql(having, &mut tables);
         }
         for (column, _) in &self.clauses.order_by {
@@ -576,36 +576,7 @@ impl<M: Model> QueryBuilder<M> {
         Fut: std::future::Future<Output = Result<()>>,
     {
         self.ensure_query_is_executable()?;
-
-        if chunk_size == 0 {
-            return Err(Error::query(
-                "chunk() requires chunk_size to be greater than 0",
-            ));
-        }
-
-        if !self.clauses.window_functions.is_empty() {
-            return Err(Error::query(
-                "chunk() does not support window functions: its cursor changes the window input; use get() or page()",
-            ));
-        }
-
-        if !self.clauses.group_by.is_empty() || !self.clauses.having_conditions.is_empty() {
-            return Err(Error::query(
-                "chunk() does not support GROUP BY or HAVING: its primary-key cursor changes group membership; read grouped results with get() or page()",
-            ));
-        }
-
-        if self.clauses.offset_value.unwrap_or(0) > 0 {
-            return Err(Error::query(
-                "chunk() does not support offset(); use page()/get() for fixed windows or chunk over primary-key order",
-            ));
-        }
-
-        if !self.clauses.unions.is_empty() {
-            return Err(Error::query(
-                "chunk() pages by the model's primary key, which the other branches of a union() do not follow; read a union with get(), or page() it",
-            ));
-        }
+        self.ensure_query_is_chunkable(chunk_size)?;
 
         let primary_key = self.chunk_primary_key_column()?;
         self.ensure_chunk_key_is_original(primary_key)?;
@@ -698,6 +669,42 @@ impl<M: Model> QueryBuilder<M> {
             if fetched < batch_limit {
                 break;
             }
+        }
+
+        Ok(())
+    }
+
+    /// Refuse a `chunk()` its primary-key cursor cannot page: a zero batch
+    /// size, or a query the cursor would change or not reach all of.
+    fn ensure_query_is_chunkable(&self, chunk_size: u64) -> Result<()> {
+        if chunk_size == 0 {
+            return Err(Error::query(
+                "chunk() requires chunk_size to be greater than 0",
+            ));
+        }
+
+        if !self.clauses.window_functions.is_empty() {
+            return Err(Error::query(
+                "chunk() does not support window functions: its cursor changes the window input; use get() or page()",
+            ));
+        }
+
+        if !self.clauses.group_by.is_empty() || !self.clauses.having_conditions.is_empty() {
+            return Err(Error::query(
+                "chunk() does not support GROUP BY or HAVING: its primary-key cursor changes group membership; read grouped results with get() or page()",
+            ));
+        }
+
+        if self.clauses.offset_value.unwrap_or(0) > 0 {
+            return Err(Error::query(
+                "chunk() does not support offset(); use page()/get() for fixed windows or chunk over primary-key order",
+            ));
+        }
+
+        if !self.clauses.unions.is_empty() {
+            return Err(Error::query(
+                "chunk() pages by the model's primary key, which the other branches of a union() do not follow; read a union with get(), or page() it",
+            ));
         }
 
         Ok(())
@@ -946,13 +953,8 @@ impl<M: Model> QueryBuilder<M> {
             // but its stamp.
             let query = self.live_rows_only();
             let (scope_sql, params) = query.build_where_clause_with_condition_for_db(db_type);
-            let sql = format!(
-                "UPDATE {} SET {} = {} WHERE {}",
-                db_sql::quote_table::<M>(db_type),
-                db_sql::quote_ident(db_type, M::deleted_at_column()),
-                Self::current_timestamp_sql(db_type),
-                scope_sql
-            );
+            let now = Self::current_timestamp_sql(db_type);
+            let sql = Self::deleted_at_update_sql(db_type, &now, &scope_sql);
             return query.run_mutation(&sql, params).await;
         }
         let (scope_sql, params) = self.build_where_clause_with_condition_for_db(db_type);
@@ -984,17 +986,24 @@ impl<M: Model> QueryBuilder<M> {
     /// shape differs per backend, so a statement bound for MySQL that carried
     /// the PostgreSQL rendering would be rejected by the server.
     fn build_soft_delete_sql(&self, db_type: DatabaseType) -> Result<(String, Vec<Value>)> {
-        let table = db_sql::quote_table::<M>(db_type);
-        let deleted_at = db_sql::quote_ident(db_type, M::deleted_at_column());
         let now = Self::current_timestamp_sql(db_type);
         let (where_sql, params) = self.build_where_clause_with_condition_for_db(db_type);
         Self::ensure_rendered_filter_is_restrictive("soft_delete", &where_sql)?;
-        let sql = format!(
-            "UPDATE {} SET {} = {} WHERE {}",
-            table, deleted_at, now, where_sql
-        );
+        let sql = Self::deleted_at_update_sql(db_type, &now, &where_sql);
 
         Ok((sql, params))
+    }
+
+    /// `UPDATE <table> SET <deleted_at> = <value> WHERE <where_sql>`, the
+    /// statement that trashes or restores rows.
+    fn deleted_at_update_sql(db_type: DatabaseType, value: &str, where_sql: &str) -> String {
+        format!(
+            "UPDATE {} SET {} = {} WHERE {}",
+            db_sql::quote_table::<M>(db_type),
+            db_sql::quote_ident(db_type, M::deleted_at_column()),
+            value,
+            where_sql
+        )
     }
 
     /// Mark the live rows this query matches deleted, stamping `deleted_at`;
@@ -1081,12 +1090,7 @@ impl<M: Model> QueryBuilder<M> {
         let db_type = query.db_type_for_sql();
         let (where_sql, params) = query.build_where_clause_with_condition_for_db(db_type);
         Self::ensure_rendered_filter_is_restrictive("restore", &where_sql)?;
-        let sql = format!(
-            "UPDATE {} SET {} = NULL WHERE {}",
-            db_sql::quote_table::<M>(db_type),
-            db_sql::quote_ident(db_type, M::deleted_at_column()),
-            where_sql
-        );
+        let sql = Self::deleted_at_update_sql(db_type, "NULL", &where_sql);
 
         query.run_mutation(&sql, params).await
     }

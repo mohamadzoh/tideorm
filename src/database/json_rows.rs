@@ -340,11 +340,11 @@ impl Database {
     ) -> Option<serde_json::Value> {
         use crate::internal::sqlx::{Row, TypeInfo, ValueRef};
 
-        let storage_class = row
+        let raw = row
             .try_as_sqlite_row()
-            .and_then(|sqlite_row| sqlite_row.try_get_raw(index).ok())
-            .map(|value| value.type_info().name().to_string());
-        match storage_class.as_deref() {
+            .and_then(|sqlite_row| sqlite_row.try_get_raw(index).ok());
+        let storage_class = raw.as_ref().map(ValueRef::type_info);
+        match storage_class.as_deref().map(TypeInfo::name) {
             Some("NULL") => Some(serde_json::Value::Null),
             Some("INTEGER") => Self::typed_or_fallback::<i64>(row, index),
             Some("REAL") => Self::float_or_fallback::<f64>(row, index),

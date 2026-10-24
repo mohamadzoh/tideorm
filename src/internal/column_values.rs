@@ -10,6 +10,7 @@ use std::str::FromStr;
 
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use rust_decimal::Decimal;
+use serde::Deserialize;
 
 use super::{Value, json_to_db_value};
 use crate::model::Model;
@@ -53,24 +54,13 @@ pub(crate) fn json_to_assignment_value(
     value: &serde_json::Value,
     column_type: Option<&ColumnType>,
 ) -> Value {
-    use serde_json::Value as Json;
-
-    let assigned = match (column_type, value) {
-        (_, Json::Null) => None,
-        (Some(ColumnType::Json | ColumnType::JsonBinary), document) => {
-            Some(Value::from(document.clone()))
+    // `json_to_column_value` binds binary and array columns that way already.
+    match column_type {
+        Some(ColumnType::Json | ColumnType::JsonBinary) if !value.is_null() => {
+            Value::from(value.clone())
         }
-        (
-            Some(ColumnType::Blob | ColumnType::Binary(_) | ColumnType::VarBinary(_)),
-            Json::Array(_),
-        ) => serde_json::from_value::<Vec<u8>>(value.clone())
-            .ok()
-            .map(Value::from),
-        #[cfg(feature = "postgres")]
-        (Some(ColumnType::Array(element)), Json::Array(_)) => array_value(value, element),
-        _ => None,
-    };
-    assigned.unwrap_or_else(|| json_to_column_value(value, column_type))
+        _ => json_to_column_value(value, column_type),
+    }
 }
 
 /// A JSON array as the PostgreSQL array of `element` a model field of that
@@ -82,9 +72,7 @@ fn array_value(value: &serde_json::Value, element: &ColumnType) -> Option<Value>
         T: serde::de::DeserializeOwned,
         Vec<T>: Into<Value>,
     {
-        serde_json::from_value::<Vec<T>>(value.clone())
-            .ok()
-            .map(Into::into)
+        Vec::<T>::deserialize(value).ok().map(Into::into)
     }
 
     match element {
@@ -105,9 +93,7 @@ fn typed_value(value: &serde_json::Value, column_type: &ColumnType) -> Option<Va
         #[cfg(feature = "postgres")]
         (ColumnType::Array(element), Json::Array(_)) => array_value(value, element),
         (ColumnType::Blob | ColumnType::Binary(_) | ColumnType::VarBinary(_), Json::Array(_)) => {
-            serde_json::from_value::<Vec<u8>>(value.clone())
-                .ok()
-                .map(Value::from)
+            Vec::<u8>::deserialize(value).ok().map(Value::from)
         }
         (ColumnType::Uuid, Json::String(text)) => uuid::Uuid::parse_str(text).ok().map(Value::from),
         (ColumnType::TimestampWithTimeZone, Json::String(text)) => {

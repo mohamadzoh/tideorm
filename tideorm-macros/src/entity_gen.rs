@@ -9,17 +9,22 @@ use crate::meta_support::has_managed_timestamp_columns;
 use crate::parse::{ModelField, RelationKind, is_optional_type, type_string, variant_ident};
 
 pub(crate) fn generate_entity_support(ctx: &BuildContext) -> syn::Result<TokenStream2> {
-    let base_impl = generate_base_impl(ctx)?;
+    // `ModelMeta`'s checks run first: a model failing one there and one in the
+    // entity module reports the `ModelMeta` error.
+    let model_meta_impl = generate_model_meta_impl(ctx)?;
+    let entity_module = generate_entity_module(ctx)?;
     let sync_impl = generate_sync_impl(ctx);
     let columns_impl = generate_columns_impl(ctx);
     Ok(quote! {
-        #base_impl
+        #entity_module
+        #model_meta_impl
         #sync_impl
         #columns_impl
     })
 }
 
-fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
+/// The hidden module holding the SeaORM entity the typed CRUD paths run on.
+fn generate_entity_module(ctx: &BuildContext) -> syn::Result<TokenStream2> {
     let internal_entity_mod = &ctx.internal_entity_mod;
     let table_name = &ctx.table_name;
     // Declared on both sides: the engine's entity qualifies the typed CRUD
@@ -28,11 +33,6 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
         .schema_name
         .as_ref()
         .map(|schema| quote!(fn schema_name(&self) -> Option<&str> { Some(#schema) }));
-    let meta_schema_name = ctx
-        .schema_name
-        .as_ref()
-        .map(|schema| quote!(fn schema_name() -> Option<&'static str> { Some(#schema) }));
-    let struct_name = &ctx.struct_name;
     let pk_type = &ctx.pk_type;
     let pk_column_names = &ctx.pk_column_names;
     let pk_column_variants = &ctx.pk_column_variants;
@@ -40,6 +40,124 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
     let column_names = &ctx.column_names;
     let column_variants = &ctx.column_variants;
     let column_types = &ctx.column_types;
+    let sea_orm_field_defs = ctx.db_fields.iter().map(sea_orm_field_def);
+    let entity_relations: Vec<&ModelField> = ctx
+        .relation_fields
+        .iter()
+        .filter(|field| {
+            field
+                .relation_kind()
+                .is_some_and(RelationKind::is_entity_relation)
+        })
+        .collect();
+    let relation_variants = entity_relations
+        .iter()
+        .map(|field| variant_ident(field.ident()));
+    let relation_defs = entity_relations
+        .iter()
+        .map(|field| build_relation_def(ctx, field))
+        .collect::<syn::Result<Vec<_>>>()?;
+    let related_impls = build_related_impls(&entity_relations)?;
+    let relation_def_body = if relation_defs.is_empty() {
+        quote!(match *self {})
+    } else {
+        quote!(match self { #(#relation_defs),* })
+    };
+
+    Ok(quote! {
+        #[doc(hidden)]
+        #[allow(non_snake_case, clippy::derivable_impls, clippy::enum_variant_names, clippy::redundant_closure)]
+        mod #internal_entity_mod {
+            use super::*;
+            // The engine's derives write a bare `Result<_, DbErr>`, which the glob
+            // above would resolve to `tideorm::Result` in a module that imports it.
+            use ::core::result::Result;
+            use ::tideorm::orm as sea_orm;
+            // Deliberately NOT `use ::tideorm::orm::entity::prelude::*;`. That glob
+            // and the `use super::*;` above both bring `Json` and `DateTime` into
+            // scope, so any model field spelled with one of those names became an
+            // ambiguous-glob error (rust-lang #114095, a future hard error) even
+            // though the code was correct. The user's `super::*` stays the only glob.
+            use ::tideorm::orm::entity::prelude::{
+                ActiveModelBehavior, ColumnDef, ColumnTrait, ColumnTypeTrait, DeriveColumn,
+                DerivePrimaryKey, EntityName, EntityTrait, EnumIter, PrimaryKeyTrait,
+                RelationDef, RelationTrait,
+            };
+            use ::tideorm::orm::{DeriveActiveModel, DeriveEntity, DeriveModel};
+
+            #[derive(Copy, Clone, Default, Debug, DeriveEntity)]
+            pub struct Entity;
+
+            impl EntityName for Entity {
+                #entity_schema_name
+                fn table_name(&self) -> &'static str {
+                    #table_name
+                }
+            }
+
+            #[derive(Clone, Debug, PartialEq, DeriveModel, DeriveActiveModel)]
+            pub struct Model {
+                #(#sea_orm_field_defs),*
+            }
+
+            #[derive(Copy, Clone, Debug, EnumIter, DeriveColumn)]
+            pub enum Column {
+                #(
+                    #[sea_orm(column_name = #column_names)]
+                    #column_variants
+                ),*
+            }
+
+            #[derive(Copy, Clone, Debug, EnumIter, DerivePrimaryKey)]
+            pub enum PrimaryKey {
+                #(
+                    #[sea_orm(column_name = #pk_column_names)]
+                    #pk_column_variants
+                ),*
+            }
+
+            impl PrimaryKeyTrait for PrimaryKey {
+                type ValueType = #pk_type;
+                fn auto_increment() -> bool { #pk_auto_increment }
+            }
+
+            impl ColumnTrait for Column {
+                type EntityName = Entity;
+                fn def(&self) -> ColumnDef {
+                    match self {
+                        #(Self::#column_variants => #column_types),*
+                    }
+                }
+            }
+
+            #[derive(Copy, Clone, Debug, EnumIter)]
+            pub enum Relation {
+                #(#relation_variants),*
+            }
+
+            impl RelationTrait for Relation {
+                fn def(&self) -> RelationDef {
+                    #relation_def_body
+                }
+            }
+
+            #(#related_impls)*
+
+            impl ActiveModelBehavior for ActiveModel {}
+        }
+    })
+}
+
+fn generate_model_meta_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
+    let table_name = &ctx.table_name;
+    let meta_schema_name = ctx
+        .schema_name
+        .as_ref()
+        .map(|schema| quote!(fn schema_name() -> Option<&'static str> { Some(#schema) }));
+    let struct_name = &ctx.struct_name;
+    let pk_type = &ctx.pk_type;
+    let pk_column_names = &ctx.pk_column_names;
+    let column_names = &ctx.column_names;
     let integer_bounds = ctx
         .db_fields
         .iter()
@@ -54,35 +172,18 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
                 )),
             }
         });
-    let sea_orm_field_defs = ctx.db_fields.iter().map(sea_orm_field_def);
     let field_names = &ctx.field_names;
     let hidden_attrs = &ctx.hidden_attrs;
-    let flattened_fields: Vec<_> = ctx
-        .fields
-        .iter()
-        .filter(|field| !ctx.should_gen_serialize && crate::serde_names::is_flattened(&field.attrs))
-        .map(ModelField::name)
-        .collect();
-    let flattened_fields_impl = (!flattened_fields.is_empty()).then(|| {
-        quote! {
-            fn __flattened_fields() -> &'static [&'static str] {
-                &[#(#flattened_fields),*]
-            }
-        }
-    });
-    let skipped_fields: Vec<_> = ctx
-        .fields
-        .iter()
-        .filter(|field| !ctx.should_gen_serialize && crate::serde_names::is_skipped(&field.attrs))
-        .map(ModelField::name)
-        .collect();
-    let skipped_fields_impl = (!skipped_fields.is_empty()).then(|| {
-        quote! {
-            fn __skipped_fields() -> &'static [&'static str] {
-                &[#(#skipped_fields),*]
-            }
-        }
-    });
+    let flattened_fields_impl = user_serde_fields_impl(
+        ctx,
+        format_ident!("__flattened_fields"),
+        crate::serde_names::is_flattened,
+    );
+    let skipped_fields_impl = user_serde_fields_impl(
+        ctx,
+        format_ident!("__skipped_fields"),
+        crate::serde_names::is_skipped,
+    );
     let translation_field = ctx.fields.iter().find(|field| {
         !ctx.translatable_fields.is_empty()
             && field
@@ -130,7 +231,7 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
     });
     let relation_payload_filters = build_relation_payload_filters(ctx);
     // Each method is emitted only where the model differs from its default.
-    let primary_key_auto_increment_impl = pk_auto_increment.then(|| {
+    let primary_key_auto_increment_impl = ctx.pk_auto_increment.then(|| {
         quote!(
             fn primary_key_auto_increment() -> bool {
                 true
@@ -220,113 +321,10 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
             }
         }
     });
-    let entity_relations: Vec<&ModelField> = ctx
-        .relation_fields
-        .iter()
-        .filter(|field| {
-            field
-                .relation_kind()
-                .is_some_and(RelationKind::is_entity_relation)
-        })
-        .collect();
-    let relation_variants = entity_relations
-        .iter()
-        .map(|field| variant_ident(field.ident()));
-    let relation_defs = entity_relations
-        .iter()
-        .map(|field| build_relation_def(ctx, field))
-        .collect::<syn::Result<Vec<_>>>()?;
-    let related_impls = build_related_impls(&entity_relations)?;
-    let relation_def_body = if relation_defs.is_empty() {
-        quote!(match *self {})
-    } else {
-        quote!(match self { #(#relation_defs),* })
-    };
     let primary_key_display_impl = build_primary_key_display_impl(ctx);
     let primary_key_is_new_impl = build_primary_key_is_new_impl(ctx);
 
     Ok(quote! {
-        #[doc(hidden)]
-        #[allow(non_snake_case, clippy::derivable_impls, clippy::enum_variant_names, clippy::redundant_closure)]
-        mod #internal_entity_mod {
-            use super::*;
-            // The engine's derives write a bare `Result<_, DbErr>`, which the glob
-            // above would resolve to `tideorm::Result` in a module that imports it.
-            use ::core::result::Result;
-            use ::tideorm::orm as sea_orm;
-            // Deliberately NOT `use ::tideorm::orm::entity::prelude::*;`. That glob
-            // and the `use super::*;` above both bring `Json` and `DateTime` into
-            // scope, so any model field spelled with one of those names became an
-            // ambiguous-glob error (rust-lang #114095, a future hard error) even
-            // though the code was correct. The user's `super::*` stays the only glob.
-            use ::tideorm::orm::entity::prelude::{
-                ActiveModelBehavior, ColumnDef, ColumnTrait, ColumnTypeTrait, DeriveColumn,
-                DerivePrimaryKey, EntityName, EntityTrait, EnumIter, PrimaryKeyTrait,
-                RelationDef, RelationTrait,
-            };
-            use ::tideorm::orm::{DeriveActiveModel, DeriveEntity, DeriveModel};
-
-            #[derive(Copy, Clone, Default, Debug, DeriveEntity)]
-            pub struct Entity;
-
-            impl EntityName for Entity {
-                #entity_schema_name
-                fn table_name(&self) -> &'static str {
-                    #table_name
-                }
-            }
-
-            #[derive(Clone, Debug, PartialEq, DeriveModel, DeriveActiveModel)]
-            pub struct Model {
-                #(#sea_orm_field_defs),*
-            }
-
-            #[derive(Copy, Clone, Debug, EnumIter, DeriveColumn)]
-            pub enum Column {
-                #(
-                    #[sea_orm(column_name = #column_names)]
-                    #column_variants
-                ),*
-            }
-
-            #[derive(Copy, Clone, Debug, EnumIter, DerivePrimaryKey)]
-            pub enum PrimaryKey {
-                #(
-                    #[sea_orm(column_name = #pk_column_names)]
-                    #pk_column_variants
-                ),*
-            }
-
-            impl PrimaryKeyTrait for PrimaryKey {
-                type ValueType = #pk_type;
-                fn auto_increment() -> bool { #pk_auto_increment }
-            }
-
-            impl ColumnTrait for Column {
-                type EntityName = Entity;
-                fn def(&self) -> ColumnDef {
-                    match self {
-                        #(Self::#column_variants => #column_types),*
-                    }
-                }
-            }
-
-            #[derive(Copy, Clone, Debug, EnumIter)]
-            pub enum Relation {
-                #(#relation_variants),*
-            }
-
-            impl RelationTrait for Relation {
-                fn def(&self) -> RelationDef {
-                    #relation_def_body
-                }
-            }
-
-            #(#related_impls)*
-
-            impl ActiveModelBehavior for ActiveModel {}
-        }
-
         impl ::tideorm::model::ModelMeta for #struct_name {
             type PrimaryKey = #pk_type;
             fn table_name() -> &'static str { #table_name }
@@ -365,6 +363,29 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
             #soft_delete_impl
             #has_timestamps_impl
             #indexes_impl
+        }
+    })
+}
+
+/// `ModelMeta::__flattened_fields` or `__skipped_fields`: the fields whose
+/// attributes `predicate` accepts, which only a model's own `Serialize` derive
+/// reads; emitted when there are any.
+fn user_serde_fields_impl(
+    ctx: &BuildContext,
+    method: syn::Ident,
+    predicate: fn(&[syn::Attribute]) -> bool,
+) -> Option<TokenStream2> {
+    let fields: Vec<_> = ctx
+        .fields
+        .iter()
+        .filter(|field| !ctx.should_gen_serialize && predicate(&field.attrs))
+        .map(ModelField::name)
+        .collect();
+    (!fields.is_empty()).then(|| {
+        quote! {
+            fn #method() -> &'static [&'static str] {
+                &[#(#fields),*]
+            }
         }
     })
 }
@@ -775,18 +796,16 @@ fn generate_columns_impl(ctx: &BuildContext) -> TokenStream2 {
         .as_ref()
         .map_or_else(|| quote!(None), |schema| quote!(Some(#schema)));
 
-    let constant_idents: Vec<_> = field_idents
+    // A field's constant is its name, `r#` removed, in upper case.
+    let constant_ident = |name: &str| format_ident!("{}", name.to_uppercase());
+    let constant_idents: Vec<_> = ctx
+        .field_names
         .iter()
-        .map(|ident| {
-            format_ident!(
-                "{}",
-                ident.to_string().trim_start_matches("r#").to_uppercase()
-            )
-        })
+        .map(|name| constant_ident(name))
         .collect();
     let relation_constants = ctx.relation_fields.iter().map(|field| {
         let name = field.name();
-        let ident = format_ident!("{}", name.trim_start_matches("r#").to_uppercase());
+        let ident = constant_ident(&name);
         quote! {
             #[doc = concat!("The `", #name, "` relation for eager loading.")]
             pub const #ident: &'static str = #name;
@@ -811,7 +830,7 @@ fn generate_columns_impl(ctx: &BuildContext) -> TokenStream2 {
 
             #[allow(non_upper_case_globals)]
             pub const columns: #columns_struct_name = #columns_struct_name {
-                #(#field_idents: ::tideorm::columns::Column::of_schema(#schema, #table_name, #column_names)),*
+                #(#field_idents: Self::#constant_idents),*
             };
         }
     }

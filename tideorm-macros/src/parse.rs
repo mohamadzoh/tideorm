@@ -287,6 +287,11 @@ impl ModelField {
             quote!(::tideorm::orm::ColumnType::TimestampWithTimeZone)
         } else {
             let base_type = type_string(base_ty);
+            let array = |element: TokenStream2| {
+                quote!(::tideorm::orm::ColumnType::Array(
+                    ::tideorm::orm::sea_query::RcOrArc::new(::tideorm::orm::ColumnType::#element)
+                ))
+            };
             match canonical_schema_type(&base_type).as_str() {
                 "i8" | "i16" | "u8" | "u16" => quote!(::tideorm::orm::ColumnType::SmallInteger),
                 "i32" | "u32" => quote!(::tideorm::orm::ColumnType::Integer),
@@ -304,30 +309,16 @@ impl ModelField {
                     quote!(::tideorm::orm::ColumnType::Json)
                 }
                 "Vec<u8>" => quote!(::tideorm::orm::ColumnType::Blob),
-                "Vec<i32>" | "IntArray" => quote!(::tideorm::orm::ColumnType::Array(
-                    ::tideorm::orm::sea_query::RcOrArc::new(::tideorm::orm::ColumnType::Integer)
-                )),
-                "Vec<i64>" | "BigIntArray" => quote!(::tideorm::orm::ColumnType::Array(
-                    ::tideorm::orm::sea_query::RcOrArc::new(::tideorm::orm::ColumnType::BigInteger)
-                )),
-                "Vec<String>" | "TextArray" => quote!(::tideorm::orm::ColumnType::Array(
-                    ::tideorm::orm::sea_query::RcOrArc::new(::tideorm::orm::ColumnType::Text)
-                )),
-                "Vec<bool>" | "BoolArray" => quote!(::tideorm::orm::ColumnType::Array(
-                    ::tideorm::orm::sea_query::RcOrArc::new(::tideorm::orm::ColumnType::Boolean)
-                )),
-                "Vec<f64>" | "FloatArray" => quote!(::tideorm::orm::ColumnType::Array(
-                    ::tideorm::orm::sea_query::RcOrArc::new(::tideorm::orm::ColumnType::Double)
-                )),
+                "Vec<i32>" | "IntArray" => array(quote!(Integer)),
+                "Vec<i64>" | "BigIntArray" => array(quote!(BigInteger)),
+                "Vec<String>" | "TextArray" => array(quote!(Text)),
+                "Vec<bool>" | "BoolArray" => array(quote!(Boolean)),
+                "Vec<f64>" | "FloatArray" => array(quote!(Double)),
                 "Vec<Value>"
                 | "Vec<serde_json::Value>"
                 | "Vec<Json>"
                 | "Vec<JsonValue>"
-                | "JsonArray" => {
-                    quote!(::tideorm::orm::ColumnType::Array(
-                        ::tideorm::orm::sea_query::RcOrArc::new(::tideorm::orm::ColumnType::Json)
-                    ))
-                }
+                | "JsonArray" => array(quote!(Json)),
                 _ => {
                     return Err(syn::Error::new_spanned(
                         &self.ty,

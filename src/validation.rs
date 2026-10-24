@@ -424,11 +424,10 @@ fn compare_decimal_text(left: &str, right: &str) -> Option<std::cmp::Ordering> {
         if digits.is_empty() {
             return None;
         }
-        let first = digits.iter().position(|digit| *digit != b'0');
-        let Some(first) = first else {
+        let Some(first) = digits.iter().position(|digit| *digit != b'0') else {
             return Some((false, vec![], 0));
         };
-        let digits = digits[first..].to_vec();
+        digits.drain(..first);
         let magnitude = exponent
             .checked_sub(fractional)?
             .checked_add(digits.len() as i128)?;
@@ -482,6 +481,15 @@ fn decimal_outside(value: rust_decimal::Decimal, text: &str, below: bool) -> boo
 
 fn outside_exact<T: ValidatableValue + ?Sized>(value: &T, text: &str, below: bool) -> bool {
     if let Some(integer) = value.as_i128_value() {
+        // An integer bound, the one `#[validate(min = 18)]` writes, compares
+        // as an integer; any other spelling as decimal text.
+        if let Ok(bound) = text.parse::<i128>() {
+            return if below {
+                integer < bound
+            } else {
+                integer > bound
+            };
+        }
         return decimal_text_outside(&integer.to_string(), text, below);
     }
     if let Some(decimal) = value.as_decimal_value() {

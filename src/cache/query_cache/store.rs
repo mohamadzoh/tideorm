@@ -1,6 +1,7 @@
 use super::*;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Instant;
 
 const INVALIDATION_HISTORY_LIMIT: usize = 1024;
@@ -69,14 +70,15 @@ impl CacheEntry {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Candidate<P> {
     priority: P,
-    key: String,
+    /// Shared with the entry and the other indexes rather than copied.
+    key: Arc<str>,
 }
 
 impl<P> Candidate<P> {
-    fn new(priority: P, key: &str) -> Reverse<Self> {
+    fn new(priority: P, key: &Arc<str>) -> Reverse<Self> {
         Reverse(Self {
             priority,
-            key: key.to_string(),
+            key: key.clone(),
         })
     }
 }
@@ -89,7 +91,7 @@ impl<P> Candidate<P> {
 /// stale candidates outnumber the live entries too far.
 #[derive(Debug, Default)]
 pub(super) struct CacheStore {
-    entries: HashMap<String, CacheEntry>,
+    entries: HashMap<Arc<str>, CacheEntry>,
     lru_heap: BinaryHeap<Reverse<Candidate<u64>>>,
     fifo_heap: BinaryHeap<Reverse<Candidate<u64>>>,
     ttl_heap: BinaryHeap<Reverse<Candidate<(Instant, u64)>>>,
@@ -120,7 +122,7 @@ impl CacheStore {
     }
 
     /// Store `entry` under `key`, replacing whatever was there.
-    pub(super) fn insert(&mut self, key: String, entry: CacheEntry) {
+    pub(super) fn insert(&mut self, key: Arc<str>, entry: CacheEntry) {
         self.lru_heap
             .push(Candidate::new(entry.lru_priority(), &key));
         self.fifo_heap
@@ -228,13 +230,15 @@ impl CacheStore {
                 .any(|table| self.invalidated_at.get(table).is_some_and(|&at| at > seq))
     }
 
-    /// Mark `key` as the most recently used entry and return it.
-    pub(super) fn touch(&mut self, key: &str, access_order: u64) -> Option<&CacheEntry> {
+    /// Mark `key` as the most recently used entry and return its data.
+    pub(super) fn touch(&mut self, key: &str, access_order: u64) -> Option<Arc<[u8]>> {
         let entry = self.entries.get_mut(key)?;
         entry.access_order = access_order;
-        self.lru_heap.push(Candidate::new(access_order, key));
+        let data = entry.data.clone();
+        self.lru_heap
+            .push(Candidate::new(access_order, &Arc::from(key)));
         self.maybe_rebuild_indexes();
-        self.entries.get(key)
+        Some(data)
     }
 
     /// Remove and return the entry `strategy` evicts first.
@@ -293,12 +297,12 @@ impl CacheStore {
 /// that entry's key.
 fn pop_current<P: Ord>(
     heap: &mut BinaryHeap<Reverse<Candidate<P>>>,
-    entries: &HashMap<String, CacheEntry>,
+    entries: &HashMap<Arc<str>, CacheEntry>,
     priority_of: impl Fn(&CacheEntry) -> P,
-) -> Option<String> {
+) -> Option<Arc<str>> {
     while let Some(Reverse(candidate)) = heap.pop() {
         if entries
-            .get(&candidate.key)
+            .get(&*candidate.key)
             .is_some_and(|entry| priority_of(entry) == candidate.priority)
         {
             return Some(candidate.key);

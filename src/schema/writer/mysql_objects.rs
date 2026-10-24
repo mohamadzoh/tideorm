@@ -78,21 +78,9 @@ pub(super) async fn introspect(conn: &OrmConnection) -> Result<Catalog> {
         } else {
             "TABLE"
         };
-        let rows = query(
-            conn,
-            Backend::MySql,
-            &format!(
-                "SHOW CREATE {command} {}",
-                quote_ident(DatabaseType::MySQL, &name)
-            ),
-            Vec::new(),
-        )
-        .await?;
-        let row = rows
-            .first()
-            .ok_or_else(|| Error::internal("SHOW CREATE returned no row"))?;
+        let row = show_create(conn, command, &name, "SHOW CREATE returned no row").await?;
         let ddl: String = get(
-            row,
+            &row,
             if command == "SEQUENCE" {
                 "Create Sequence"
             } else {
@@ -174,26 +162,14 @@ pub(super) async fn introspect(conn: &OrmConnection) -> Result<Catalog> {
         .await?;
     }
     for name in views {
-        let rows = query(
-            conn,
-            Backend::MySql,
-            &format!(
-                "SHOW CREATE VIEW {}",
-                quote_ident(DatabaseType::MySQL, &name)
-            ),
-            Vec::new(),
-        )
-        .await?;
-        let row = rows
-            .first()
-            .ok_or_else(|| Error::internal("SHOW CREATE VIEW returned no row"))?;
-        let ddl: String = get(row, "Create View")?;
+        let row = show_create(conn, "VIEW", &name, "SHOW CREATE VIEW returned no row").await?;
+        let ddl: String = get(&row, "Create View")?;
         catalog
             .verbatim
             .push("SET SESSION sql_mode = 'ANSI_QUOTES'".into());
         catalog.verbatim.push(format!(
             "SET SESSION collation_connection = {}",
-            literal(&get::<String>(row, "collation_connection")?)
+            literal(&get::<String>(&row, "collation_connection")?)
         ));
         catalog.verbatim.push(format!(
             "DROP TABLE {}",
@@ -274,31 +250,25 @@ async fn stored_object(
     database: &str,
     fold_names: bool,
 ) -> Result<()> {
-    let rows = query(
+    let row = show_create(
         conn,
-        Backend::MySql,
-        &format!(
-            "SHOW CREATE {kind} {}",
-            quote_ident(DatabaseType::MySQL, name)
-        ),
-        Vec::new(),
+        kind,
+        name,
+        "SHOW CREATE stored object returned no row",
     )
     .await?;
-    let row = rows
-        .first()
-        .ok_or_else(|| Error::internal("SHOW CREATE stored object returned no row"))?;
-    let ddl: Option<String> = get(row, key)?;
+    let ddl: Option<String> = get(&row, key)?;
     let ddl=ddl.ok_or_else(||Error::query(format!("Cannot export {kind} {name}: SHOW CREATE did not disclose its definition; additional database privileges are required")))?;
     // Use canonical escaping while setting the object's original parsing mode.
     output.push("SET SESSION sql_mode = 'ANSI_QUOTES'".into());
     output.push(format!(
         "SET SESSION collation_connection = {}",
-        literal(&get::<String>(row, "collation_connection")?)
+        literal(&get::<String>(&row, "collation_connection")?)
     ));
     if kind == "EVENT" {
         output.push(format!(
             "SET SESSION time_zone = {}",
-            literal(&get::<String>(row, "time_zone")?)
+            literal(&get::<String>(&row, "time_zone")?)
         ));
     }
     // Parameters, return values and local variables without an explicit
@@ -308,13 +278,36 @@ async fn stored_object(
         "ALTER DATABASE COLLATE {}",
         quote_ident(
             DatabaseType::MySQL,
-            &get::<String>(row, "Database Collation")?
+            &get::<String>(&row, "Database Collation")?
         )
     ));
-    let mode: String = get(row, "sql_mode")?;
+    let mode: String = get(&row, "sql_mode")?;
     output.push(format!("SET SESSION sql_mode = {}", literal(&mode)));
     output.push(script(&localize(&ddl, database, &mode, fold_names)));
     Ok(())
+}
+
+/// The row `SHOW CREATE {kind}` returns for `name`, or the `missing` error
+/// when it returns none.
+async fn show_create(
+    conn: &OrmConnection,
+    kind: &str,
+    name: &str,
+    missing: &str,
+) -> Result<QueryResult> {
+    query(
+        conn,
+        Backend::MySql,
+        &format!(
+            "SHOW CREATE {kind} {}",
+            quote_ident(DatabaseType::MySQL, name)
+        ),
+        Vec::new(),
+    )
+    .await?
+    .into_iter()
+    .next()
+    .ok_or_else(|| Error::internal(missing))
 }
 
 /// Rebind catalog-qualified references to the selected destination database.
@@ -414,13 +407,12 @@ fn localize(sql: &str, database: &str, mode: &str, fold_names: bool) -> String {
         if trigger_header && upper == "FOR" {
             trigger_header = false;
         }
-        let previous = i.checked_sub(1).map(|j| tokens[j].2.to_ascii_uppercase());
         match upper.as_str() {
             "DELETE" | "FROM" | "JOIN" | "USING" | "TABLE" | "TABLES" => {
                 *context = (true, true);
                 continue;
             }
-            "UPDATE" if previous.as_deref() != Some("KEY") => {
+            "UPDATE" if !(i > 0 && tokens[i - 1].2.eq_ignore_ascii_case("KEY")) => {
                 *context = (true, true);
                 continue;
             }

@@ -7,12 +7,15 @@ use crate::parse::{ModelField, RelationKind};
 pub(super) fn generate_eager_loader_impl(ctx: &BuildContext) -> TokenStream2 {
     let struct_name = &ctx.struct_name;
     let struct_name_str = &ctx.struct_name_str;
-    let valid_relations = ctx
-        .relation_fields
-        .iter()
-        .map(|field| field.name())
-        .collect::<Vec<_>>()
-        .join(", ");
+    let valid_relations = if ctx.relation_fields.is_empty() {
+        "(none)".to_string()
+    } else {
+        ctx.relation_fields
+            .iter()
+            .map(ModelField::name)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     let relation_arms = ctx
         .relation_fields
         .iter()
@@ -46,8 +49,7 @@ pub(super) fn generate_eager_loader_impl(ctx: &BuildContext) -> TokenStream2 {
                         #(#validation_arms)*
                         _ => return Err(::tideorm::Error::query(format!(
                             "Unknown relation '{}' on {}; valid relations: {}",
-                            name, #struct_name_str,
-                            if #valid_relations.is_empty() { "(none)" } else { #valid_relations }
+                            name, #struct_name_str, #valid_relations
                         ))),
                     }
                 }
@@ -71,7 +73,7 @@ pub(super) fn generate_eager_loader_impl(ctx: &BuildContext) -> TokenStream2 {
                                 "Unknown relation '{}' on {}; valid relations: {}",
                                 relation_name,
                                 #struct_name_str,
-                                if #valid_relations.is_empty() { "(none)" } else { #valid_relations }
+                                #valid_relations
                             )));
                         }
                     }
@@ -98,28 +100,24 @@ fn build_relation_arm(ctx: &BuildContext, field: &ModelField) -> TokenStream2 {
     };
     // Resolve the related rows of every parent in one query, as `Vec<Vec<R>>` for a
     // to-many relation or `Vec<Option<R>>` for a to-one one.
-    let (related, is_many) = match kind {
-        RelationKind::HasManyThrough => match through_lookup(ctx, field, related_ty) {
-            Some(lookup) => (lookup, true),
-            None => return unsupported_relation_arm(&ctx.struct_name, &relation_name, kind),
-        },
+    let lookup = match kind {
+        RelationKind::HasManyThrough => through_lookup(ctx, field, related_ty),
         RelationKind::HasMany
         | RelationKind::HasOne
         | RelationKind::BelongsTo
         | RelationKind::MorphOne
-        | RelationKind::MorphMany => match keyed_lookup(ctx, field, related_ty, kind) {
-            Some(lookup) => (
-                lookup,
-                matches!(kind, RelationKind::HasMany | RelationKind::MorphMany),
-            ),
-            None => return unsupported_relation_arm(&ctx.struct_name, &relation_name, kind),
-        },
+        | RelationKind::MorphMany => keyed_lookup(ctx, field, related_ty, kind),
         // `MorphTo` resolves a different target type per row, and a self-referencing
         // relation nests to any depth, which no fixed set of batched queries covers.
-        RelationKind::MorphTo | RelationKind::SelfRef | RelationKind::SelfRefMany => {
-            return unsupported_relation_arm(&ctx.struct_name, &relation_name, kind);
-        }
+        RelationKind::MorphTo | RelationKind::SelfRef | RelationKind::SelfRefMany => None,
     };
+    let Some(related) = lookup else {
+        return unsupported_relation_arm(&ctx.struct_name, &relation_name, kind);
+    };
+    let is_many = matches!(
+        kind,
+        RelationKind::HasManyThrough | RelationKind::HasMany | RelationKind::MorphMany
+    );
 
     let resolve_nested = if is_many {
         quote!(::tideorm::relations::__eager_load_nested_many)
@@ -144,7 +142,7 @@ fn parent_keys(parent_key_ident: &Ident) -> TokenStream2 {
     quote! {
         &models
             .iter()
-            .map(|entry| ::tideorm::prelude::json!(entry.model.#parent_key_ident.clone()))
+            .map(|entry| ::tideorm::prelude::json!(entry.model.#parent_key_ident))
             .collect::<Vec<_>>()
     }
 }

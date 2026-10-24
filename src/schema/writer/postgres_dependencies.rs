@@ -42,37 +42,30 @@ pub(super) async fn postgres_dependencies(conn: &impl ConnectionTrait) -> Result
             objects.join(", ")
         )));
     }
-    let mut statements = Vec::new();
-    let mut postlude = Vec::new();
-    for row in query(
+    let mut prelude = statements(
         conn,
-        Backend::Postgres,
         "SELECT format('CREATE SCHEMA IF NOT EXISTS %I', nspname) AS definition,
                 format('ALTER SCHEMA %I OWNER TO %I', nspname, pg_catalog.pg_get_userbyid(nspowner)) AS owner
          FROM pg_catalog.pg_namespace
          WHERE nspname <> 'information_schema' AND nspname !~ '^pg_'
          ORDER BY nspname",
         Vec::new(),
+        &["definition", "owner"],
     )
-    .await?
-    {
-        statements.push(get(&row, "definition")?);
-        statements.push(get(&row, "owner")?);
-    }
-    for row in query(
-        conn,
-        Backend::Postgres,
-        "SELECT format('CREATE EXTENSION IF NOT EXISTS %I WITH SCHEMA %I VERSION %L',
+    .await?;
+    prelude.extend(
+        statements(
+            conn,
+            "SELECT format('CREATE EXTENSION IF NOT EXISTS %I WITH SCHEMA %I VERSION %L',
                        e.extname, n.nspname, e.extversion) AS definition
          FROM pg_catalog.pg_extension e JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
          WHERE e.extname <> 'plpgsql' ORDER BY e.extname",
-        Vec::new(),
-    )
-    .await?
-    {
-        statements.push(get(&row, "definition")?);
-    }
-    for row in query(conn, Backend::Postgres,
+            Vec::new(),
+            &["definition"],
+        )
+        .await?,
+    );
+    prelude.extend(statements(conn,
         "SELECT format('CREATE COLLATION %I.%I (provider = %s, %s, deterministic = %s%s)',
             n.nspname, c.collname,
             CASE c.collprovider WHEN 'i' THEN 'icu' WHEN 'b' THEN 'builtin' ELSE 'libc' END,
@@ -86,14 +79,11 @@ pub(super) async fn postgres_dependencies(conn: &impl ConnectionTrait) -> Result
          WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
            AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
                WHERE d.classid = 'pg_catalog.pg_collation'::regclass AND d.objid = c.oid AND d.deptype = 'e')
-         ORDER BY n.nspname, c.collname", Vec::new()).await? {
-        statements.push(get(&row, "definition")?);
-        statements.push(get(&row, "owner")?);
-    }
+         ORDER BY n.nspname, c.collname", Vec::new(), &["definition", "owner"]).await?);
 
     // Identity sequences are recreated by their column clauses. Other
     // sequences must exist before defaults referencing them are restored.
-    for row in query(conn, Backend::Postgres,
+    prelude.extend(statements(conn,
         "SELECT format('CREATE %sSEQUENCE %I.%I AS %s START WITH %s INCREMENT BY %s MINVALUE %s MAXVALUE %s CACHE %s %s',
             CASE c.relpersistence WHEN 'u' THEN 'UNLOGGED ' ELSE '' END,
             n.nspname, c.relname, pg_catalog.format_type(s.seqtypid, NULL),
@@ -105,10 +95,7 @@ pub(super) async fn postgres_dependencies(conn: &impl ConnectionTrait) -> Result
          WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
            AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
                WHERE d.classid = 'pg_catalog.pg_class'::regclass AND d.objid = c.oid AND d.deptype IN ('i', 'e'))
-         ORDER BY n.nspname, c.relname", Vec::new()).await? {
-        statements.push(get(&row, "definition")?);
-        statements.push(get(&row, "owner")?);
-    }
+         ORDER BY n.nspname, c.relname", Vec::new(), &["definition", "owner"]).await?);
 
     let rows = query(conn, Backend::Postgres,
         "WITH RECURSIVE edges AS (
@@ -174,7 +161,7 @@ pub(super) async fn postgres_dependencies(conn: &impl ConnectionTrait) -> Result
          WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
          ORDER BY n.nspname, t.typname", Vec::new()).await?;
 
-    for row in query(conn, Backend::Postgres,
+    let mut postlude = statements(conn,
         "SELECT format('ALTER DOMAIN %I.%I SET DEFAULT %s', n.nspname, t.typname, pg_catalog.pg_get_expr(t.typdefaultbin, 0)) AS definition
          FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace
          WHERE t.typtype='d' AND t.typdefaultbin IS NOT NULL
@@ -186,9 +173,7 @@ pub(super) async fn postgres_dependencies(conn: &impl ConnectionTrait) -> Result
          JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace
          WHERE c.contype='c' AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
            AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid='pg_catalog.pg_type'::regclass AND d.objid=t.oid AND d.deptype='e')",
-        Vec::new()).await? {
-        postlude.push(get(&row, "definition")?);
-    }
+        Vec::new(), &["definition"]).await?;
     let mut nodes = BTreeMap::new();
     let mut indexes = Vec::new();
     for row in rows {
@@ -213,7 +198,7 @@ pub(super) async fn postgres_dependencies(conn: &impl ConnectionTrait) -> Result
     // As in pg_dump, defer validation of quoted function bodies: a SQL or
     // PL/pgSQL body can refer to a table restored later. Parsed SQL bodies
     // still have catalog dependencies, which are ordered below.
-    statements.push("SET check_function_bodies = false".into());
+    prelude.push("SET check_function_bodies = false".into());
 
     for row in query(conn, Backend::Postgres,
         "SELECT p.oid::bigint AS id, pg_catalog.pg_get_functiondef(p.oid) AS definition,
@@ -251,25 +236,21 @@ pub(super) async fn postgres_dependencies(conn: &impl ConnectionTrait) -> Result
          ORDER BY n.nspname,c.relname", Vec::new()).await? {
         let id: i64 = get(&row, "id")?;
         let definitions = vec![get(&row, "definition")?, get(&row, "owner")?];
-        for index in query(conn, Backend::Postgres,
+        indexes.extend(statements(conn,
             "SELECT pg_catalog.pg_get_indexdef(indexrelid) AS definition FROM pg_catalog.pg_index WHERE indrelid=$1::oid ORDER BY indexrelid",
-            vec![id.into()]).await? {
-            indexes.push(get(&index, "definition")?);
-        }
+            vec![id.into()], &["definition"]).await?);
         nodes.insert(("table".into(), id), definitions);
     }
-    for row in query(conn, Backend::Postgres,
+    postlude.extend(statements(conn,
         "SELECT format('ALTER VIEW %I.%I ALTER COLUMN %I SET DEFAULT %s', n.nspname, c.relname, a.attname, pg_catalog.pg_get_expr(d.adbin,d.adrelid)) AS definition
          FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
          JOIN pg_catalog.pg_attribute a ON a.attrelid=c.oid
          JOIN pg_catalog.pg_attrdef d ON d.adrelid=c.oid AND d.adnum=a.attnum
          WHERE c.relkind='v' AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
            AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend e WHERE e.classid='pg_catalog.pg_class'::regclass AND e.objid=c.oid AND e.deptype='e')
-         ORDER BY n.nspname,c.relname,a.attnum",Vec::new()).await? {
-        postlude.push(get(&row, "definition")?);
-    }
+         ORDER BY n.nspname,c.relname,a.attnum",Vec::new(), &["definition"]).await?);
     Ok(PostgresObjects {
-        prelude: statements,
+        prelude,
         nodes,
         indexes,
         postlude,

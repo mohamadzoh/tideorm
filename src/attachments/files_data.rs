@@ -35,7 +35,12 @@ impl FilesData {
 
     /// Convert to JSON value
     pub fn to_json(&self) -> serde_json::Value {
-        serde_json::to_value(&self.data).unwrap_or(serde_json::json!({}))
+        serde_json::Value::Object(
+            self.data
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        )
     }
 
     /// Set a single file (hasOne)
@@ -52,10 +57,7 @@ impl FilesData {
     /// Get a single file (hasOne), returning None for malformed legacy data.
     /// Use [`Self::try_get_one`] to distinguish malformed data from an absent file.
     pub fn get_one(&self, relation: &str) -> Option<FileAttachment> {
-        self.data
-            .get(relation)
-            .filter(|value| !value.is_null())
-            .and_then(|value| serde_json::from_value(value.clone()).ok())
+        self.try_get_one(relation).ok().flatten()
     }
 
     /// Add to file array (hasMany)
@@ -108,7 +110,7 @@ impl FilesData {
         self.data
             .get(relation)
             .filter(|value| !value.is_null())
-            .map(|value| serde_json::from_value(value.clone()))
+            .map(FileAttachment::deserialize)
             .transpose()
     }
 

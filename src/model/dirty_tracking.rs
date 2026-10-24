@@ -226,13 +226,18 @@ fn row_key_for_model<M: Model>(model: &M) -> Result<Option<RowKey>> {
     row_key_for_primary_key::<M>(&model.primary_key())
 }
 
-fn snapshot_values_for_model<M: Model>(model: &M) -> Result<Option<SnapshotValues>> {
+/// What `read` takes from `model`'s baseline, read under the store's lock;
+/// `None` when no baseline is known.
+fn read_snapshot<M: Model, T>(
+    model: &M,
+    read: impl FnOnce(&SnapshotValues) -> T,
+) -> Result<Option<T>> {
     let Some(row) = row_key_for_model(model)? else {
         return Ok(None);
     };
 
     let store = snapshot_store().read();
-    Ok(store.get(&row).cloned())
+    Ok(store.get(&row).map(read))
 }
 
 fn capture_snapshot<M: Model>(model: &M) -> Result<SnapshotValues> {
@@ -362,14 +367,14 @@ pub fn clear_all() {
 /// different rows. `Ok(Some(fields))` means a baseline was
 /// found, so an empty vector really does mean "nothing changed".
 pub(crate) fn changed_fields<M: Model>(model: &M) -> Result<Option<Vec<&'static str>>> {
-    let Some(snapshot) = snapshot_values_for_model(model)? else {
+    // A copy, so the model's fields are not serialized under the lock.
+    let Some(snapshot) = read_snapshot(model, SnapshotValues::clone)? else {
         return Ok(None);
     };
 
     let mut changed = Vec::new();
     for field in M::field_names() {
-        let previous = snapshot.get(*field).cloned();
-        if model.field_compare_value(field)? != previous {
+        if model.field_compare_value(field)?.as_ref() != snapshot.get(*field) {
             changed.push(*field);
         }
     }
@@ -395,11 +400,7 @@ pub(crate) fn original_value<M: Model>(
         )));
     };
 
-    let Some(snapshot) = snapshot_values_for_model(model)? else {
-        return Ok(None);
-    };
-
-    Ok(Some(snapshot.get(field_name).cloned()))
+    read_snapshot(model, |snapshot| snapshot.get(field_name).cloned())
 }
 
 #[cfg(test)]

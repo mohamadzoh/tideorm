@@ -8,12 +8,7 @@ impl<M: Model> QueryBuilder<M> {
     ) -> Option<SimpleExpr> {
         let column = condition.column.as_str();
         let column_expr = || self.sea_column_expr(db_type, column);
-        let column_sql = || {
-            self.format_column_for_db(
-                db_type,
-                &self.model_identifier(column, db_type == DatabaseType::SQLite),
-            )
-        };
+        let column_sql = || self.condition_column_sql(db_type, column);
 
         Some(match Self::condition_spec(condition)? {
             ConditionSpec::Raw {
@@ -40,26 +35,25 @@ impl<M: Model> QueryBuilder<M> {
                 };
                 self.build_raw_condition_expression(db_type, column, &sql, values.to_vec())
             }
-            // A JSON column compares documents, not their text.
-            ConditionSpec::Compare {
-                operator: operator @ (ComparisonOperator::Eq | ComparisonOperator::NotEq),
-                value,
-            } if self.is_json_column(column) => self.build_json_equals_expression(
-                db_type,
-                column,
-                value,
-                matches!(operator, ComparisonOperator::NotEq),
-            ),
-            // Any other column holds no JSON document: a null is SQL NULL.
-            ConditionSpec::Compare {
-                operator: operator @ (ComparisonOperator::Eq | ComparisonOperator::NotEq),
-                value: serde_json::Value::Null,
-            } => self.build_null_check_expression(
-                column_expr(),
-                matches!(operator, ComparisonOperator::NotEq),
-            ),
             ConditionSpec::Compare { operator, value } => {
-                self.build_compare_expression(column, column_expr(), operator, value)
+                let column_type = self.column_type(column);
+                let negated = matches!(operator, ComparisonOperator::NotEq);
+                match operator {
+                    // A JSON column compares documents, not their text.
+                    ComparisonOperator::Eq | ComparisonOperator::NotEq
+                        if is_json_type(column_type.as_ref()) =>
+                    {
+                        self.build_json_equals_expression(db_type, &column_sql(), value, negated)
+                    }
+                    // Any other column holds no JSON document: a null is SQL NULL.
+                    ComparisonOperator::Eq | ComparisonOperator::NotEq if value.is_null() => {
+                        self.build_null_check_expression(column_expr(), negated)
+                    }
+                    _ => operator.apply(
+                        column_expr(),
+                        crate::internal::json_to_column_value(value, column_type.as_ref()),
+                    ),
+                }
             }
             ConditionSpec::CompareColumns { operator, other } => {
                 operator.apply(column_expr(), self.sea_column_expr(db_type, other))
@@ -165,14 +159,18 @@ impl<M: Model> QueryBuilder<M> {
         query.expr(Expr::cust("1"));
         query.cond_where(condition);
 
-        let (sql, values) = match db_type {
+        let (mut sql, values) = match db_type {
             DatabaseType::Postgres => query.build(PostgresQueryBuilder),
             DatabaseType::MySQL | DatabaseType::MariaDB => query.build(MysqlQueryBuilder),
             DatabaseType::SQLite => query.build(SqliteQueryBuilder),
         };
 
-        match sql.split_once(" WHERE ") {
-            Some((_, where_sql)) => (where_sql.to_string(), values.into_iter().collect()),
+        const WHERE: &str = " WHERE ";
+        match sql.find(WHERE) {
+            Some(start) => {
+                sql.drain(..start + WHERE.len());
+                (sql, values.into_iter().collect())
+            }
             None => (String::new(), Vec::new()),
         }
     }

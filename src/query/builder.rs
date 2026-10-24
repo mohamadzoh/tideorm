@@ -54,6 +54,14 @@ fn order_reference(term: &str) -> &str {
     split_direction(term).map_or(term, |(reference, _)| reference)
 }
 
+/// A `table` or `schema.table` reference as its schema, if any, and table.
+fn schema_and_table(reference: &str) -> (Option<&str>, &str) {
+    match reference.split_once('.') {
+        Some((schema, table)) => (Some(schema), table),
+        None => (None, reference),
+    }
+}
+
 /// Sentinel entry recorded in `raw_select_expressions` by
 /// [`QueryBuilder::distinct`](super::QueryBuilder::distinct).
 ///
@@ -210,9 +218,9 @@ impl<M: Model> QueryBuilder<M> {
         };
 
         let reference = if table.is_empty() {
-            column.to_string()
+            std::borrow::Cow::Borrowed(column)
         } else {
-            format!("{}.{}", table, column)
+            std::borrow::Cow::Owned(format!("{}.{}", table, column))
         };
         db_sql::validate_identifier_reference(kind, &reference)?;
 
@@ -531,12 +539,17 @@ impl<M: Model> QueryBuilder<M> {
         if self.is_model_table_qualifier(join.qualifier()) {
             M::column_names()
         } else {
-            let (schema, table) = match join.table.split_once('.') {
-                Some((schema, table)) => (Some(schema), table),
-                None => (None, join.table.as_str()),
-            };
+            let (schema, table) = schema_and_table(&join.table);
             crate::sync::registered_column_names(schema, table)
         }
+    }
+
+    /// The join a `qualifier.column` reference reads: the one with that
+    /// alias, or with that table and no alias.
+    pub(in crate::query) fn join_named(&self, qualifier: &str) -> Option<&super::JoinClause> {
+        self.clauses.joins.iter().find(|join| {
+            join.qualifier() == qualifier || (join.alias.is_none() && join.table == qualifier)
+        })
     }
 
     /// Chunk cursors compare the stored key, so the model must read that same
@@ -566,13 +579,7 @@ impl<M: Model> QueryBuilder<M> {
         M::owns_table_reference(qualifier)
             || self.clauses.joins.iter().any(|join| {
                 join.qualifier() == qualifier
-                    && match (M::schema_name(), join.table.split_once('.')) {
-                        (None, None) => join.table == M::table_name(),
-                        (Some(schema), Some((joined_schema, table))) => {
-                            schema == joined_schema && table == M::table_name()
-                        }
-                        _ => false,
-                    }
+                    && schema_and_table(&join.table) == (M::schema_name(), M::table_name())
             })
     }
 
@@ -585,15 +592,10 @@ impl<M: Model> QueryBuilder<M> {
         if self.is_model_table_qualifier(table) {
             return crate::model::__encrypted_column::<M>(column);
         }
-        let Some(join) = self.clauses.joins.iter().find(|join| {
-            join.qualifier() == table || (join.alias.is_none() && join.table == table)
-        }) else {
+        let Some(join) = self.join_named(table) else {
             return Ok(None);
         };
-        let (schema, table) = match join.table.split_once('.') {
-            Some((schema, table)) => (Some(schema), table),
-            None => (None, join.table.as_str()),
-        };
+        let (schema, table) = schema_and_table(&join.table);
         crate::sync::registered_encrypted_column(schema, table, column)
     }
 
@@ -637,16 +639,16 @@ impl<M: Model> QueryBuilder<M> {
     /// keyed by name, so one of the two would be lost, and a derived table over
     /// the query is rejected by MySQL and MariaDB.
     fn validate_projection_names(&self) -> std::result::Result<(), String> {
-        let mut outputs = self.projection_outputs();
-        for _ in 0..self.model_projection_count() {
-            outputs.extend(
-                M::column_names()
-                    .iter()
-                    .map(|name| (name.to_string(), None)),
-            );
-        }
-        for (index, (name, _)) in outputs.iter().enumerate() {
-            if outputs[..index].iter().any(|(earlier, _)| earlier == name) {
+        let outputs = self.projection_outputs();
+        let model_columns =
+            (0..self.model_projection_count()).flat_map(|_| M::column_names().iter().copied());
+        let names: Vec<&str> = outputs
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .chain(model_columns)
+            .collect();
+        for (index, name) in names.iter().enumerate() {
+            if names[..index].contains(name) {
                 return Err(format!(
                     "the projection names the column '{}' twice, and a result row keeps one value per name; alias one of them, as in `joined_table.{} AS joined_{}`",
                     name, name, name
@@ -669,14 +671,16 @@ impl<M: Model> QueryBuilder<M> {
             .is_none()
             && self.raw_projection().next().is_none()
             && self.clauses.subquery_select_expressions.is_empty();
-        let own_wildcard = format!("{}.*", M::table_name());
         let wildcards = self
             .clauses
             .select_columns
             .iter()
             .flatten()
             .chain(self.raw_projection())
-            .filter(|entry| entry.trim() == "*" || entry.trim() == own_wildcard)
+            .filter(|entry| {
+                let entry = entry.trim();
+                entry == "*" || entry.strip_suffix(".*") == Some(M::table_name())
+            })
             .count();
         usize::from(implicit) + wildcards
     }
@@ -1106,13 +1110,15 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Fail this query when `operand`, a query it embeds through `method`,
-    /// could not run on its own; `what` names the operand in the message.
+    /// could not run on its own; `what` names the operand in the message. The
+    /// tables `operand` reads become this query's cache dependencies too.
     pub(in crate::query) fn absorb_operand_error<N: Model>(
         &mut self,
         what: &str,
         method: &str,
         operand: &QueryBuilder<N>,
     ) {
+        self.clauses.dependencies.extend(operand.cache_tables());
         self.clauses
             .operand_databases
             .extend(operand.database.iter().cloned());

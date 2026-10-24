@@ -3,6 +3,8 @@ use crate::internal::{
     MysqlQueryBuilder, PostgresQueryBuilder, SqliteQueryBuilder, Token, Tokenizer, Value,
     inject_parameters, placeholder,
 };
+use std::borrow::Cow;
+use std::fmt::Write as _;
 
 /// One marker per bound value, numbered from 1.
 pub(crate) fn placeholders(db_type: DatabaseType, count: usize) -> Vec<String> {
@@ -80,11 +82,11 @@ fn placeholders_match_values(db_type: DatabaseType, sql: &str, bound: usize) -> 
 ///
 /// PostgreSQL's `$n` markers are numbered, so they are shifted past those
 /// values; MySQL and SQLite's `?` markers depend only on the order values are
-/// bound in, so their fragment is spliced in unchanged.
-pub(crate) fn rebase_placeholders(db_type: DatabaseType, sql: &str, offset: usize) -> String {
+/// bound in, so their fragment is spliced in unchanged, without a copy.
+pub(crate) fn rebase_placeholders(db_type: DatabaseType, sql: &str, offset: usize) -> Cow<'_, str> {
     match db_type {
         DatabaseType::Postgres => offset_postgres_placeholders(sql, offset),
-        DatabaseType::MySQL | DatabaseType::MariaDB | DatabaseType::SQLite => sql.to_string(),
+        DatabaseType::MySQL | DatabaseType::MariaDB | DatabaseType::SQLite => Cow::Borrowed(sql),
     }
 }
 
@@ -95,9 +97,9 @@ pub(crate) fn rebase_placeholders(db_type: DatabaseType, sql: &str, offset: usiz
 /// to continue that numbering instead. Quoted literals, quoted identifiers,
 /// comments and dollar-quoted strings are skipped, so a `$5` inside any of them
 /// is left alone.
-fn offset_postgres_placeholders(sql: &str, offset: usize) -> String {
+fn offset_postgres_placeholders(sql: &str, offset: usize) -> Cow<'_, str> {
     if offset == 0 {
-        return sql.to_string();
+        return Cow::Borrowed(sql);
     }
 
     let mut output = String::with_capacity(sql.len());
@@ -107,13 +109,12 @@ fn offset_postgres_placeholders(sql: &str, offset: usize) -> String {
             && number > 0
             && let Some(rebased) = number.checked_add(offset)
         {
-            output.push('$');
-            output.push_str(&rebased.to_string());
+            let _ = write!(output, "${rebased}");
         } else {
             output.push_str(token.text);
         }
     }
-    output
+    Cow::Owned(output)
 }
 
 /// Replace template markers outside quoted text and comments.

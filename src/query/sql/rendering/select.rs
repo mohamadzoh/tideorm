@@ -232,7 +232,7 @@ impl<M: Model> QueryBuilder<M> {
                 .having_clauses()
                 .map(|(template, bindings)| {
                     let clause = db_sql::render_template(db_type, template, params.len() + 1);
-                    params.extend(bindings.iter().cloned());
+                    params.extend(bindings);
                     clause
                 })
                 .collect();
@@ -281,10 +281,15 @@ impl<M: Model> QueryBuilder<M> {
         for union in &self.clauses.unions {
             let operand_sql = db_sql::rebase_placeholders(db_type, &union.query_sql, params.len());
 
+            sql.push(' ');
+            sql.push_str(union.union_type.as_sql());
             if Self::wraps_compound_operand(db_type) {
-                sql.push_str(&format!(" {} ({})", union.union_type.as_sql(), operand_sql));
+                sql.push_str(" (");
+                sql.push_str(&operand_sql);
+                sql.push(')');
             } else {
-                sql.push_str(&format!(" {} {}", union.union_type.as_sql(), operand_sql));
+                sql.push(' ');
+                sql.push_str(&operand_sql);
             }
 
             params.extend(union.params.iter().cloned());
@@ -384,15 +389,18 @@ impl<M: Model> QueryBuilder<M> {
 
         let (where_sql, where_params) = self.build_where_clause_with_condition_for_db(db_type);
         if !where_sql.is_empty() {
-            sql.push_str(&format!(
-                "WHERE {} ",
-                db_sql::rebase_placeholders(db_type, &where_sql, params.len())
+            sql.push_str("WHERE ");
+            sql.push_str(&db_sql::rebase_placeholders(
+                db_type,
+                &where_sql,
+                params.len(),
             ));
+            sql.push(' ');
         }
         params.extend(where_params);
 
         self.append_group_by_and_having_sql(&mut sql, db_type, &mut params);
-        (sql.trim().to_string(), params)
+        (into_trimmed(sql), params)
     }
 
     /// This query as an operand of another's `UNION`, with its own ordering,
@@ -459,7 +467,7 @@ impl<M: Model> QueryBuilder<M> {
             sql.push_str(" FOR UPDATE");
         }
 
-        (sql.trim().to_string(), params)
+        (into_trimmed(sql), params)
     }
 
     pub(crate) fn build_select_sql_with_params(&self) -> (String, Vec<Value>) {
@@ -473,6 +481,14 @@ impl<M: Model> QueryBuilder<M> {
         let (sql, params) = self.build_select_sql_with_params_for_db(db_type);
         db_sql::inline_parameters(db_type, &sql, &params)
     }
+}
+
+/// `sql` with surrounding whitespace removed, in place.
+fn into_trimmed(mut sql: String) -> String {
+    sql.truncate(sql.trim_end().len());
+    let leading = sql.len() - sql.trim_start().len();
+    sql.drain(..leading);
+    sql
 }
 
 #[cfg(test)]

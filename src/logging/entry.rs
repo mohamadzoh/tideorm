@@ -74,20 +74,17 @@ pub enum QueryOperation {
 impl QueryOperation {
     /// Classify a rendered SQL statement by its leading keyword.
     pub fn from_sql(sql: &str) -> Self {
-        let words = crate::internal::sql_lexer::top_words(sql);
-        let Some(first) = words.first() else {
+        let mut words = crate::internal::sql_lexer::top_words(sql);
+        let Some(first) = words.next() else {
             return Self::Unknown;
         };
         let operation = if first.eq_ignore_ascii_case("with") {
             words
-                .iter()
-                .skip(1)
                 .find(|word| {
                     ["select", "insert", "update", "delete"]
                         .iter()
                         .any(|op| word.eq_ignore_ascii_case(op))
                 })
-                .copied()
                 .unwrap_or("")
         } else {
             first

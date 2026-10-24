@@ -95,6 +95,29 @@ fn renamed_fields(input: &ModelInput, fields: &[ModelField]) -> Vec<(String, Str
         .collect()
 }
 
+/// [`BuildContext::serde_round_trips`], given which serde halves TideORM
+/// generates and which the model derives itself.
+fn serde_round_trips(
+    input: &ModelInput,
+    db_fields: &[ModelField],
+    should_gen_serialize: bool,
+    should_gen_deserialize: bool,
+    existing_derives: &ExistingDerives,
+) -> bool {
+    let derived_serialize = should_gen_serialize || existing_derives.has_serialize;
+    let derived_deserialize = should_gen_deserialize || existing_derives.has_deserialize;
+    let field_attrs = || db_fields.iter().map(|field| field.attrs.as_slice());
+    // TideORM's generated half reads and writes field names, so against a
+    // user derive of the other half any rename loses the renamed keys; with
+    // both derived, only a split one does.
+    let user_derives_both = !should_gen_serialize && !should_gen_deserialize;
+    derived_serialize
+        && derived_deserialize
+        && ((should_gen_serialize && should_gen_deserialize)
+            || (crate::serde_names::round_trips(&input.attrs, field_attrs())
+                && !crate::serde_names::renames(&input.attrs, field_attrs(), user_derives_both)))
+}
+
 impl BuildContext {
     /// The key `field` is serialized under.
     pub(crate) fn serialized_key(&self, field: &ModelField) -> String {
@@ -276,25 +299,13 @@ impl BuildContext {
             should_gen_default,
             should_gen_serialize,
             should_gen_deserialize,
-            serde_round_trips: {
-                let derived_serialize = should_gen_serialize || existing_derives.has_serialize;
-                let derived_deserialize =
-                    should_gen_deserialize || existing_derives.has_deserialize;
-                let field_attrs = || db_fields.iter().map(|field| field.attrs.as_slice());
-                // TideORM's generated half reads and writes field names, so
-                // against a user derive of the other half any rename loses the
-                // renamed keys; with both derived, only a split one does.
-                let user_derives_both = !should_gen_serialize && !should_gen_deserialize;
-                derived_serialize
-                    && derived_deserialize
-                    && ((should_gen_serialize && should_gen_deserialize)
-                        || (crate::serde_names::round_trips(&input.attrs, field_attrs())
-                            && !crate::serde_names::renames(
-                                &input.attrs,
-                                field_attrs(),
-                                user_derives_both,
-                            )))
-            },
+            serde_round_trips: serde_round_trips(
+                input,
+                &db_fields,
+                should_gen_serialize,
+                should_gen_deserialize,
+                existing_derives,
+            ),
             hidden_attrs,
             translatable_fields,
             encrypted_fields,

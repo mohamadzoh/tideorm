@@ -27,13 +27,14 @@ impl<T: Model> FullTextSearchBuilder<T> {
     /// that score below `min_rank`.
     fn build_pg_ranked_sql(&self, min_rank: Option<f64>) -> Result<(String, Vec<Value>)> {
         let mut params = Vec::new();
+        let rank_alias = Self::rank_alias();
         let Some((tsvector, tsquery)) = self.pg_match_parts(&mut params)? else {
             // No word to rank by, and no row to rank.
             let sql = SqlBuilder::new(PG, &mut params)
                 .raw("SELECT ")
                 .raw(&crate::query::db_sql::model_columns_sql::<T>(PG, None))
                 .raw(", CAST(0 AS double precision) AS ")
-                .raw(&Self::rank_alias())
+                .raw(&rank_alias)
                 .raw(" FROM ")
                 .raw(&crate::query::db_sql::quote_table::<T>(PG))
                 .raw(" WHERE ")
@@ -59,7 +60,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
             .raw(", CAST(")
             .raw(&rank)
             .raw(" AS double precision) AS ")
-            .raw(&Self::rank_alias())
+            .raw(&rank_alias)
             .raw(" FROM ")
             .raw(&crate::query::db_sql::quote_table::<T>(PG))
             .raw(" WHERE ")
@@ -74,7 +75,9 @@ impl<T: Model> FullTextSearchBuilder<T> {
             sql.push_str(&threshold);
         }
 
-        sql.push_str(&format!(" ORDER BY {} DESC", Self::rank_alias()));
+        sql.push_str(" ORDER BY ");
+        sql.push_str(&rank_alias);
+        sql.push_str(" DESC");
         self.append_limit_offset(PG, &mut sql, &mut params);
 
         Ok((sql, params))

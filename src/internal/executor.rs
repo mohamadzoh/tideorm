@@ -71,11 +71,11 @@ impl<'c> Executor<'c> {
 
     /// The record of the transaction this runs on; none for a pool, whose
     /// statements run outside every transaction.
-    pub(crate) fn record(&self) -> Option<Record> {
+    pub(crate) fn record(&self) -> Option<&Record> {
         if !self.is_transaction() {
             return None;
         }
-        self.record.clone()
+        self.record.as_ref()
     }
 
     fn ensure_transaction_active(&self) -> Result<(), DbErr> {
@@ -188,7 +188,7 @@ impl<'c> Executor<'c> {
         };
         let _held = self.hold().await;
         self.ensure_transaction_active()?;
-        let guard = crate::database::SavepointEnd::new(self.record());
+        let guard = crate::database::SavepointEnd::new(self.record().cloned());
         let savepoint = self.inner.begin().await?;
         guard.disarm();
         Ok(Begun {

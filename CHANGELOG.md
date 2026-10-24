@@ -5,6 +5,81 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.2] - 2026-10-24
+
+A performance and maintenance release. Hot paths do less work, long functions are split, and
+duplicated code is shared. No API or behaviour changes: every generated statement, error message
+and result is the same. `tideorm-macros` 0.16.2 emits only items that the 0.16.0 and 0.16.1
+runtimes already have, so any 0.16 pairing works.
+
+### Changed
+
+- Validation:
+  - A `regex` rule reuses its compiled pattern. Each check used to clone the `Regex`, which
+    rebuilt its search caches, and allocated the pattern's text as a cache key: a check now takes
+    about 0.2 µs instead of 20 µs.
+  - An integer `min`, `max` or `range` bound (`#[validate(min = 18)]`) compares as an integer,
+    without the decimal-text comparison and its allocations: about 18 ns instead of 500 ns.
+- Query cache:
+  - One shared key per entry replaces the four copies held by the entry map and the three
+    eviction heaps.
+  - An LRU hit does one hash lookup fewer, and tags are lowercased straight from the borrowed
+    table names.
+  - The cache benchmarks take 29–51% less time (measured on a loaded machine).
+- Per-statement work:
+  - A database handle resolves its own connection once, not twice.
+  - The transaction scope chain is walked without cloning it.
+  - A connection's cache scope and pool identity are read without building its whole transaction
+    source.
+  - SQLite statements are lexed for `ATTACH` only when they contain the word.
+  - The query logger moves each entry into its history instead of copying it, and classifies a
+    statement from its first keyword without lexing the rest.
+- Queries:
+  - A filter column's type is looked up once per condition rather than once per value.
+  - Long `where_in` lists serialize into their one JSON parameter without copying each value
+    first.
+  - Rendered SQL fragments are borrowed rather than copied when no placeholder needs
+    renumbering.
+  - Raw SQL validation no longer copies the rest of the fragment at every `$`. That copy made
+    checking a PostgreSQL subquery quadratic in its number of values.
+- Eager loading hands each parent its group of related rows instead of cloning every row, and the
+  entity manager's flush compares and replaces snapshots without cloning them.
+- Bulk updates look up a column's type once per assignment instead of once per check.
+- Full-text search:
+  - The highlight pattern is compiled only when `highlight()` asks for it.
+  - The connection is resolved once per search rather than once per row.
+  - Highlighting writes into one output string without a temporary string per segment.
+- Attachments, translations, binary and array values are deserialized from the stored JSON in
+  place, not from a clone.
+- A profile report copies only its ten slowest queries.
+- Generated code: the field accessors (`field_json_value`, `set_field_json`, `copy_field_from`)
+  emit their error handling once per model instead of once per field. The `columns` constant
+  reuses the typed column constants. Together this makes each model's expansion about 2% smaller.
+
+### Internal
+
+- Long functions are split into focused ones:
+  - the batch update's 246-line `build_assignment_sql`;
+  - the 499-line PostgreSQL catalog export;
+  - `LedgerLock::acquire`, one function per backend;
+  - the entity manager's managed flush;
+  - `insert_all`'s per-strategy chunk loops;
+  - the upsert's update-column resolution;
+  - the derive's 321-line `generate_base_impl`.
+- Duplicated code is shared:
+  - `MorphOne`/`MorphMany` plumbing, as `HasOne`/`HasMany` already shared theirs;
+  - the PostgreSQL catalog's statement queries, the MySQL export's `SHOW CREATE` reads and the
+    privilege export's `REVOKE` block;
+  - migration apply and revert;
+  - the SQLite integer-range check that increment, multiply and divide share;
+  - MySQL full-text word splitting;
+  - the aggregate projection and `MIN`/`MAX` decoding;
+  - the query builder's join lookup, `deleted_at` update and `chunk()` guards;
+  - the cache dependencies of an embedded query;
+  - the macros' scope signatures and array column types.
+- A doc comment that sat above the wrong function in `internal` is back on
+  `translate_connection_error`.
+
 ## [0.16.1] - 2026-10-24
 
 A correcting release: dependency updates, a clearer `insert_all` validation message, corrected
@@ -2893,6 +2968,7 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
+[0.16.2]: https://github.com/mohamadzoh/tideorm/compare/v0.16.1...v0.16.2
 [0.16.1]: https://github.com/mohamadzoh/tideorm/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/mohamadzoh/tideorm/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/mohamadzoh/tideorm/compare/v0.14.1...v0.15.0

@@ -98,13 +98,29 @@ impl QueryLogger {
     /// and print it if the level allows: the level, `Off` until one is set,
     /// decides only what is printed, so `QueryLogger::enable()` or
     /// `TIDE_LOG_QUERIES` alone still keeps the history and statistics.
-    pub fn log(entry: QueryLogEntry) {
+    pub fn log(mut entry: QueryLogEntry) {
         if !Self::is_enabled() {
             return;
         }
 
         let threshold = STATE.counters.slow_threshold_ms();
         let is_slow = STATE.counters.record(entry.duration);
+
+        // Rendered before the entry moves into the history, so it is never
+        // copied; the history keeps the duration that hidden timing leaves
+        // out of the output.
+        let output = match Self::level() {
+            LogLevel::Off => None,
+            level => {
+                let duration = entry.duration;
+                if !Self::timing_enabled() {
+                    entry.duration = None;
+                }
+                let output = render(level, &entry, is_slow, threshold);
+                entry.duration = duration;
+                output
+            }
+        };
 
         {
             let mut history = STATE.history.write();
@@ -115,19 +131,11 @@ impl QueryLogger {
                 while history.len() >= limit {
                     history.pop_front();
                 }
-                history.push_back(entry.clone());
+                history.push_back(entry);
             }
         }
 
-        let level = Self::level();
-        if level == LogLevel::Off {
-            return;
-        }
-        let mut entry = entry;
-        if !Self::timing_enabled() {
-            entry.duration = None;
-        }
-        if let Some(output) = render(level, &entry, is_slow, threshold) {
+        if let Some(output) = output {
             eprintln!("{}", output);
         }
     }

@@ -266,17 +266,16 @@ pub(crate) fn significant(sql: &str) -> impl Iterator<Item = Token<'_>> {
 pub(crate) fn sqlite_significant(sql: &str) -> impl Iterator<Item = Token<'_>> {
     sqlite_tokens(sql).filter(|token| !matches!(token.kind, Kind::Space | Kind::Comment))
 }
-/// Keywords at the statement's outer level (CTE bodies are nested).
-pub(crate) fn top_words(sql: &str) -> Vec<&str> {
+/// Keywords at the statement's outer level (CTE bodies are nested), lexed
+/// only as far as the caller reads.
+pub(crate) fn top_words(sql: &str) -> impl Iterator<Item = &str> {
     let mut depth: usize = 0;
-    significant(sql)
-        .filter_map(|token| {
-            match token.text {
-                "(" => depth += 1,
-                ")" => depth = depth.saturating_sub(1),
-                _ => {}
-            }
-            (depth == 0 && token.kind == Kind::Word).then_some(token.text)
-        })
-        .collect()
+    significant(sql).filter_map(move |token| {
+        match token.text {
+            "(" => depth += 1,
+            ")" => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        (depth == 0 && token.kind == Kind::Word).then_some(token.text)
+    })
 }

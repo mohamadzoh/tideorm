@@ -112,132 +112,140 @@ impl LedgerLock {
         let _ = kind;
         match db.backend() {
             #[cfg(feature = "sqlite")]
-            DatabaseType::SQLite => {
-                use crate::internal::ConnectionTrait;
-
-                // Where SQLite opened the main database, whatever the URL's
-                // spelling (`sqlite:///C:/..` names `/C:/..`, which Windows
-                // cannot resolve); empty for an in-memory database. Read on
-                // the connection statements run on: inside a transaction, a
-                // one-connection pool has no other to hand out.
-                let connection = db.__get_connection()?;
-                let executor = connection.executor();
-                let probe = crate::internal::build_statement_with_values(
-                    executor.get_database_backend(),
-                    "SELECT file FROM pragma_database_list WHERE name = 'main'",
-                    Vec::new(),
-                );
-                let file: String = match executor
-                    .query_one_raw(probe)
-                    .await
-                    .map_err(crate::internal::translate_error)?
-                {
-                    Some(row) => row
-                        .try_get("", "file")
-                        .map_err(crate::internal::translate_error)?,
-                    None => String::new(),
-                };
-                if file.is_empty() {
-                    let pool = db.__internal_connection()?;
-                    let sqlite = pool.get_sqlite_connection_pool();
-                    let mut name = sqlite
-                        .connect_options()
-                        .get_filename()
-                        .as_os_str()
-                        .to_os_string();
-                    name.push(kind.suffix());
-                    return Ok(Self::SqliteMemory(
-                        super::memory_lock::MemoryLock::acquire(name.into()).await,
-                    ));
-                }
-                let file = std::fs::canonicalize(&file)
-                    .unwrap_or_else(|_| std::path::PathBuf::from(&file));
-                let mut path = file.into_os_string();
-                path.push(kind.suffix());
-                Ok(Self::Sqlite(sqlite_file_lock(path.into()).await?))
-            }
+            DatabaseType::SQLite => Self::acquire_sqlite(db, kind).await,
             #[cfg(not(feature = "sqlite"))]
             DatabaseType::SQLite => Err(Error::backend_not_supported(
                 "SQLite ledger locks require the sqlite feature",
                 "SQLite",
             )),
             #[cfg(feature = "postgres")]
-            DatabaseType::Postgres => {
-                let pool = db.__internal_connection()?;
-                if pool.get_database_backend() != crate::internal::OrmBackend::Postgres {
-                    return Err(Error::transaction(
-                        "the PostgreSQL ledger lock needs a PostgreSQL connection",
-                    ));
-                }
-                let mut connection = pool
-                    .get_postgres_connection_pool()
-                    .connect_options()
-                    .connect()
-                    .await
-                    .map_err(|error| {
-                        crate::internal::translate_connection_error(sqlx_error(error))
-                    })?;
-                crate::internal::sqlx::query("SELECT pg_advisory_lock($1)")
-                    .bind(kind.key())
-                    .execute(&mut connection)
-                    .await
-                    .map_err(sqlx_failure)?;
-                Ok(Self::Postgres(connection))
-            }
+            DatabaseType::Postgres => Self::acquire_postgres(db, kind).await,
             #[cfg(not(feature = "postgres"))]
             DatabaseType::Postgres => Err(Error::backend_not_supported(
                 "the ledger lock needs TideORM's `postgres` feature",
                 "PostgreSQL",
             )),
             #[cfg(feature = "mysql")]
-            DatabaseType::MySQL | DatabaseType::MariaDB => {
-                use crate::internal::sqlx::Row;
-
-                let pool = db.__internal_connection()?;
-                if pool.get_database_backend() != crate::internal::OrmBackend::MySql {
-                    return Err(Error::transaction(
-                        "the MySQL ledger lock needs a MySQL connection",
-                    ));
-                }
-                let mut connection = pool
-                    .get_mysql_connection_pool()
-                    .connect_options()
-                    .connect()
-                    .await
-                    .map_err(|error| {
-                        crate::internal::translate_connection_error(sqlx_error(error))
-                    })?;
-
-                let row = crate::internal::sqlx::query("SELECT GET_LOCK(?, ?)")
-                    .bind(kind.name())
-                    .bind(MIGRATION_LOCK_TIMEOUT_SECONDS)
-                    .fetch_one(&mut connection)
-                    .await
-                    .map_err(sqlx_failure)?;
-                // `GET_LOCK` is 1 once acquired, 0 on timeout, NULL on error.
-                let acquired = row
-                    .try_get::<Option<i64>, _>(0)
-                    .or_else(|_| {
-                        row.try_get::<Option<i32>, _>(0)
-                            .map(|flag| flag.map(i64::from))
-                    })
-                    .ok()
-                    .flatten();
-                if acquired != Some(1) {
-                    return Err(Error::transaction(format!(
-                        "Timed out after {}s waiting for the '{}' lock; another ledger operation is still running",
-                        MIGRATION_LOCK_TIMEOUT_SECONDS,
-                        kind.name()
-                    )));
-                }
-                Ok(Self::Session(connection))
-            }
+            DatabaseType::MySQL | DatabaseType::MariaDB => Self::acquire_mysql(db, kind).await,
             #[cfg(not(feature = "mysql"))]
             DatabaseType::MySQL | DatabaseType::MariaDB => Err(Error::backend_not_supported(
                 "the ledger lock needs TideORM's `mysql` feature",
                 db.backend().to_string(),
             )),
         }
+    }
+
+    /// An OS lock on a sidecar file beside the database, or an in-process
+    /// lock for an in-memory one.
+    #[cfg(feature = "sqlite")]
+    async fn acquire_sqlite(db: &Database, kind: LockKind) -> Result<Self> {
+        use crate::internal::ConnectionTrait;
+
+        // Where SQLite opened the main database, whatever the URL's
+        // spelling (`sqlite:///C:/..` names `/C:/..`, which Windows
+        // cannot resolve); empty for an in-memory database. Read on
+        // the connection statements run on: inside a transaction, a
+        // one-connection pool has no other to hand out.
+        let connection = db.__get_connection()?;
+        let executor = connection.executor();
+        let probe = crate::internal::build_statement_with_values(
+            executor.get_database_backend(),
+            "SELECT file FROM pragma_database_list WHERE name = 'main'",
+            Vec::new(),
+        );
+        let file: String = match executor
+            .query_one_raw(probe)
+            .await
+            .map_err(crate::internal::translate_error)?
+        {
+            Some(row) => row
+                .try_get("", "file")
+                .map_err(crate::internal::translate_error)?,
+            None => String::new(),
+        };
+        if file.is_empty() {
+            let pool = db.__internal_connection()?;
+            let sqlite = pool.get_sqlite_connection_pool();
+            let mut name = sqlite
+                .connect_options()
+                .get_filename()
+                .as_os_str()
+                .to_os_string();
+            name.push(kind.suffix());
+            return Ok(Self::SqliteMemory(
+                super::memory_lock::MemoryLock::acquire(name.into()).await,
+            ));
+        }
+        let file = std::fs::canonicalize(&file).unwrap_or_else(|_| std::path::PathBuf::from(&file));
+        let mut path = file.into_os_string();
+        path.push(kind.suffix());
+        Ok(Self::Sqlite(sqlite_file_lock(path.into()).await?))
+    }
+
+    /// An advisory lock, held on a session of its own.
+    #[cfg(feature = "postgres")]
+    async fn acquire_postgres(db: &Database, kind: LockKind) -> Result<Self> {
+        let pool = db.__internal_connection()?;
+        if pool.get_database_backend() != crate::internal::OrmBackend::Postgres {
+            return Err(Error::transaction(
+                "the PostgreSQL ledger lock needs a PostgreSQL connection",
+            ));
+        }
+        let mut connection = pool
+            .get_postgres_connection_pool()
+            .connect_options()
+            .connect()
+            .await
+            .map_err(|error| crate::internal::translate_connection_error(sqlx_error(error)))?;
+        crate::internal::sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(kind.key())
+            .execute(&mut connection)
+            .await
+            .map_err(sqlx_failure)?;
+        Ok(Self::Postgres(connection))
+    }
+
+    /// A named lock, held on a session of its own.
+    #[cfg(feature = "mysql")]
+    async fn acquire_mysql(db: &Database, kind: LockKind) -> Result<Self> {
+        use crate::internal::sqlx::Row;
+
+        let pool = db.__internal_connection()?;
+        if pool.get_database_backend() != crate::internal::OrmBackend::MySql {
+            return Err(Error::transaction(
+                "the MySQL ledger lock needs a MySQL connection",
+            ));
+        }
+        let mut connection = pool
+            .get_mysql_connection_pool()
+            .connect_options()
+            .connect()
+            .await
+            .map_err(|error| crate::internal::translate_connection_error(sqlx_error(error)))?;
+
+        let row = crate::internal::sqlx::query("SELECT GET_LOCK(?, ?)")
+            .bind(kind.name())
+            .bind(MIGRATION_LOCK_TIMEOUT_SECONDS)
+            .fetch_one(&mut connection)
+            .await
+            .map_err(sqlx_failure)?;
+        // `GET_LOCK` is 1 once acquired, 0 on timeout, NULL on error.
+        let acquired = row
+            .try_get::<Option<i64>, _>(0)
+            .or_else(|_| {
+                row.try_get::<Option<i32>, _>(0)
+                    .map(|flag| flag.map(i64::from))
+            })
+            .ok()
+            .flatten();
+        if acquired != Some(1) {
+            return Err(Error::transaction(format!(
+                "Timed out after {}s waiting for the '{}' lock; another ledger operation is still running",
+                MIGRATION_LOCK_TIMEOUT_SECONDS,
+                kind.name()
+            )));
+        }
+        Ok(Self::Session(connection))
     }
 
     async fn release(self, kind: LockKind) -> Result<()> {
@@ -391,7 +399,7 @@ impl Migrator {
             }
 
             tide_info!("Running migration: {} - {}", version, migration.name());
-            apply_migration(db, Arc::clone(migration), ledger.table().to_string()).await?;
+            run_migration(db, Arc::clone(migration), ledger.table().to_string(), true).await?;
             tide_info!("Completed migration: {} - {}", version, migration.name());
 
             result.applied.push(info);
@@ -442,13 +450,7 @@ impl Migrator {
             migration.name()
         );
 
-        revert_migration(
-            db,
-            Arc::clone(migration),
-            last_version,
-            ledger.table().to_string(),
-        )
-        .await?;
+        run_migration(db, Arc::clone(migration), ledger.table().to_string(), false).await?;
 
         result.rolled_back.push(info_of(migration.as_ref()));
 
@@ -592,41 +594,28 @@ fn info_of(migration: &dyn Migration) -> MigrationInfo {
     }
 }
 
-/// Apply one migration and record it in the ledger, in one
-/// [`in_ddl_scope`].
-async fn apply_migration(
+/// Apply one migration and record it in the ledger, or with `apply` false
+/// revert it and remove its ledger row, in one [`in_ddl_scope`].
+async fn run_migration(
     db: &Database,
     migration: Arc<dyn Migration>,
     table: String,
+    apply: bool,
 ) -> Result<()> {
     let db_type = db.backend();
     let foreign_keys_off = migration.foreign_keys_off();
     in_ddl_scope(db, foreign_keys_off, async move {
         let mut schema = Schema::new(db_type).with_foreign_keys_off(foreign_keys_off);
-        migration.up(&mut schema).await?;
-        Ledger::migrations(&table)
-            .record(&require_db()?, migration.version(), &[migration.name()])
-            .await
-    })
-    .await
-}
-
-/// Revert one migration and remove its ledger row, in one [`in_ddl_scope`].
-async fn revert_migration(
-    db: &Database,
-    migration: Arc<dyn Migration>,
-    version: &str,
-    table: String,
-) -> Result<()> {
-    let db_type = db.backend();
-    let version = version.to_string();
-    let foreign_keys_off = migration.foreign_keys_off();
-    in_ddl_scope(db, foreign_keys_off, async move {
-        let mut schema = Schema::new(db_type).with_foreign_keys_off(foreign_keys_off);
-        migration.down(&mut schema).await?;
-        Ledger::migrations(&table)
-            .remove(&require_db()?, &version)
-            .await
+        let ledger = Ledger::migrations(&table);
+        if apply {
+            migration.up(&mut schema).await?;
+            ledger
+                .record(&require_db()?, migration.version(), &[migration.name()])
+                .await
+        } else {
+            migration.down(&mut schema).await?;
+            ledger.remove(&require_db()?, migration.version()).await
+        }
     })
     .await
 }

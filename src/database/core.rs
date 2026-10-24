@@ -93,13 +93,14 @@ impl Database {
     /// joined inside it.
     #[doc(hidden)]
     pub fn __get_connection(&self) -> Result<ConnectionRef> {
-        let own = match self.own_handle() {
-            Ok(ConnectionRef::Database(inner)) => Some(super::state::connection_identity(&inner)),
+        let own = self.own_handle();
+        let identity = match &own {
+            Ok(ConnectionRef::Database(inner)) => Some(super::state::connection_identity(inner)),
             _ => None,
         };
-        match super::state::enclosing_transaction(own) {
+        match super::state::enclosing_transaction(identity) {
             Some(transaction) => Ok(transaction),
-            None => self.own_handle(),
+            None => own,
         }
     }
 

@@ -356,31 +356,37 @@ pub(crate) fn mark_matches(
     end_tag: &str,
     escape: bool,
 ) -> (String, usize) {
-    let plain = |part: &str| {
+    let plain = |marked: &mut String, part: &str| {
         if escape {
-            escape_html(part)
+            push_escaped_html(marked, part);
         } else {
-            part.to_string()
+            marked.push_str(part);
         }
     };
     let mut marked = String::with_capacity(text.len());
     let mut matches = 0;
     let mut last = 0;
     for found in pattern.find_iter(text) {
-        marked.push_str(&plain(&text[last..found.start()]));
+        plain(&mut marked, &text[last..found.start()]);
         marked.push_str(start_tag);
-        marked.push_str(&plain(found.as_str()));
+        plain(&mut marked, found.as_str());
         marked.push_str(end_tag);
         last = found.end();
         matches += 1;
     }
-    marked.push_str(&plain(&text[last..]));
+    plain(&mut marked, &text[last..]);
     (marked, matches)
 }
 
 /// `text` with the five characters HTML gives a meaning replaced by entities.
 pub(crate) fn escape_html(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
+    push_escaped_html(&mut escaped, text);
+    escaped
+}
+
+/// Append `text` to `escaped` as [`escape_html`] escapes it.
+fn push_escaped_html(escaped: &mut String, text: &str) {
     for ch in text.chars() {
         match ch {
             '&' => escaped.push_str("&amp;"),
@@ -391,7 +397,6 @@ pub(crate) fn escape_html(text: &str) -> String {
             _ => escaped.push(ch),
         }
     }
-    escaped
 }
 
 /// The `fragment_words` words either side of the word holding the first match

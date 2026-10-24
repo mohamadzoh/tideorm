@@ -197,8 +197,8 @@ pub(crate) fn generate_query_scope_support(item_impl: ItemImpl) -> syn::Result<T
     }
 
     let cfg_attrs = conditional_attributes(&item_impl.attrs)?;
-    let model_ty = (*item_impl.self_ty).clone();
-    let model_ident = model_ident(&model_ty)?;
+    let model_ty = &*item_impl.self_ty;
+    let model_ident = model_ident(model_ty)?;
     let trait_ident = format_ident!("{}QueryScopes", model_ident);
 
     let mut trait_methods = Vec::new();
@@ -215,7 +215,7 @@ pub(crate) fn generate_query_scope_support(item_impl: ItemImpl) -> syn::Result<T
             }
         };
 
-        let generated = generate_scope_method(method, &model_ty)?;
+        let generated = generate_scope_method(method, model_ty)?;
         trait_methods.push(generated.trait_method);
         extension_methods.push(generated.extension_method);
     }
@@ -356,16 +356,15 @@ fn generate_scope_method(
     }
 
     let cfg_attrs = conditional_attributes(&method.attrs)?;
+    let signature = quote! {
+        #(#cfg_attrs)*
+        #[must_use]
+        fn #method_ident(self #(, #forwarded_inputs)*) -> ::tideorm::QueryBuilder<#model_ty>
+    };
     Ok(GeneratedScopeMethod {
-        trait_method: quote! {
-            #(#cfg_attrs)*
-            #[must_use]
-            fn #method_ident(self #(, #forwarded_inputs)*) -> ::tideorm::QueryBuilder<#model_ty>;
-        },
+        trait_method: quote!(#signature;),
         extension_method: quote! {
-            #(#cfg_attrs)*
-            #[must_use]
-            fn #method_ident(self #(, #forwarded_inputs)*) -> ::tideorm::QueryBuilder<#model_ty> {
+            #signature {
                 #model_ty::#method_ident(self #(, #forwarded_args)*)
             }
         },

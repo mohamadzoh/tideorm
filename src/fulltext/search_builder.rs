@@ -198,16 +198,20 @@ impl<T: Model> FullTextSearchBuilder<T> {
         let (sql, params) = self.build_ranked_sql(db.execution_backend())?;
         Self::check_sqlite_rowid(&db).await?;
 
-        let pattern = term_pattern(&self.highlight_terms());
+        // Only a search that marks its matches needs the pattern compiled.
+        let pattern = self
+            .highlight
+            .as_ref()
+            .and_then(|_| term_pattern(&self.highlight_terms()));
         let rank_alias = Self::rank_alias();
-        db.fetch_rows(&sql, params)
-            .await?
-            .iter()
+        let rows = db.fetch_rows(&sql, params).await?;
+        let connection = db.__get_connection()?;
+        rows.iter()
             .map(|row| {
                 let model = <T::Entity as EntityTrait>::Model::from_query_result(row, "")
                     .map_err(translate_error)?;
                 let rank = row.try_get("", &rank_alias).map_err(translate_error)?;
-                let record = crate::model::__loading_through(&db.__get_connection()?, || {
+                let record = crate::model::__loading_through(&connection, || {
                     T::try_from_entity_model(model)
                 })?;
                 let mut result = SearchResult::new(record, rank);
@@ -260,8 +264,8 @@ impl<T: Model> FullTextSearchBuilder<T> {
         self.refuse_encrypted_columns()?;
         match db_type {
             DatabaseType::Postgres => self.build_postgres_sql(),
-            DatabaseType::MySQL | DatabaseType::MariaDB => self.build_mysql_sql(),
-            DatabaseType::SQLite => self.build_sqlite_sql(),
+            DatabaseType::MySQL | DatabaseType::MariaDB => Ok(self.build_mysql_sql()),
+            DatabaseType::SQLite => Ok(self.build_sqlite_sql()),
         }
     }
 
@@ -321,7 +325,9 @@ impl<T: Model> FullTextSearchBuilder<T> {
             .iter()
             .filter_map(|column| {
                 let value = record.field_json_value(column).ok()??;
-                let original = value.as_str()?.to_string();
+                let serde_json::Value::String(original) = value else {
+                    return None;
+                };
                 let (highlighted, match_count) = config.mark(&original, pattern);
                 Some(HighlightedField {
                     field: column.clone(),
@@ -338,8 +344,8 @@ impl<T: Model> FullTextSearchBuilder<T> {
         self.refuse_encrypted_columns()?;
         match db_type {
             DatabaseType::Postgres => self.build_postgres_ranked_sql(),
-            DatabaseType::MySQL | DatabaseType::MariaDB => self.build_mysql_ranked_sql(),
-            DatabaseType::SQLite => self.build_sqlite_ranked_sql(),
+            DatabaseType::MySQL | DatabaseType::MariaDB => Ok(self.build_mysql_ranked_sql()),
+            DatabaseType::SQLite => Ok(self.build_sqlite_ranked_sql()),
         }
     }
 
@@ -348,8 +354,8 @@ impl<T: Model> FullTextSearchBuilder<T> {
         self.refuse_encrypted_columns()?;
         match db_type {
             DatabaseType::Postgres => self.build_postgres_count_sql(),
-            DatabaseType::MySQL | DatabaseType::MariaDB => self.build_mysql_count_sql(),
-            DatabaseType::SQLite => self.build_sqlite_count_sql(),
+            DatabaseType::MySQL | DatabaseType::MariaDB => Ok(self.build_mysql_count_sql()),
+            DatabaseType::SQLite => Ok(self.build_sqlite_count_sql()),
         }
     }
 

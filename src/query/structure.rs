@@ -15,6 +15,7 @@ use super::db_sql;
 use crate::config::DatabaseType;
 use crate::internal::Value;
 use crate::model::Model;
+use std::fmt::Write as _;
 use std::marker::PhantomData;
 
 pub use consolidation::JoinResultConsolidator;
@@ -426,9 +427,10 @@ impl WindowFunctionType {
                 };
                 let mut s = format!("{}({}", name, quote_column(col));
                 if let Some(o) = offset {
-                    s.push_str(&format!(", {}", o));
+                    let _ = write!(s, ", {}", o);
                     if let Some(d) = default {
-                        s.push_str(&format!(", {}", d));
+                        s.push_str(", ");
+                        s.push_str(d);
                     }
                 }
                 s.push(')');
@@ -519,7 +521,10 @@ impl WindowFunction {
                 .iter()
                 .map(|(c, direction)| (column(c), *direction))
                 .collect(),
-            ..self.clone()
+            frame_type: self.frame_type,
+            frame_start: self.frame_start.clone(),
+            frame_end: self.frame_end.clone(),
+            alias: self.alias.clone(),
         }
     }
 
@@ -725,14 +730,14 @@ impl CTE {
         let mut sql = db_sql::quote_ident(db_type, &self.name);
 
         if let Some(ref cols) = self.columns {
-            let col_list: Vec<String> = cols
-                .iter()
-                .map(|c| db_sql::quote_ident(db_type, c))
-                .collect();
-            sql.push_str(&format!(" ({})", col_list.join(", ")));
+            sql.push_str(" (");
+            sql.push_str(&crate::internal::sql_safety::column_list(db_type, cols, ""));
+            sql.push(')');
         }
 
-        sql.push_str(&format!(" AS ({})", body_sql));
+        sql.push_str(" AS (");
+        sql.push_str(body_sql);
+        sql.push(')');
         sql
     }
 }

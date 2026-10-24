@@ -258,7 +258,7 @@ fn derive_key_with_salt(secret: &[u8], salt: &[u8]) -> [u8; 32] {
 pub(crate) fn base64_url_encode(data: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
-    let mut result = String::new();
+    let mut result = String::with_capacity((data.len() * 4).div_ceil(3));
     let mut bits = 0u32;
     let mut bit_count = 0;
 

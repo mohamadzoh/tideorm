@@ -94,7 +94,17 @@ fn starts_dollar_quote(chars: &[char], index: usize) -> bool {
     let starts_token = index
         .checked_sub(1)
         .is_none_or(|previous| !sql_lexer::identifier_char(chars[previous]));
-    starts_token && sql_lexer::dollar_tag_len(&chars[index..].iter().collect::<String>()).is_some()
+    // Only the delimiter, which ends at the next `$`, is read, not the rest
+    // of the fragment: a builder-rendered PostgreSQL subquery has a `$n` per
+    // value.
+    starts_token
+        && chars[index + 1..]
+            .iter()
+            .position(|&ch| ch == '$')
+            .is_some_and(|close| {
+                let delimiter: String = chars[index..=index + 1 + close].iter().collect();
+                sql_lexer::dollar_tag_len(&delimiter).is_some()
+            })
 }
 
 /// Whether the `[` at `index` and the next `]` hold a quote: SQLite reads the
@@ -284,14 +294,6 @@ fn scan_sql_tokens(
     Ok(())
 }
 
-/// The lowercased words of `sql` outside any parentheses.
-fn collect_top_level_sql_tokens(sql: &str, kind: &str) -> std::result::Result<Vec<String>, String> {
-    Ok(collect_top_level_sql_words(sql, kind)?
-        .into_iter()
-        .map(|(word, _)| word)
-        .collect())
-}
-
 /// The lowercased words of `sql` outside any parentheses, each with whether a
 /// `(` follows it.
 fn collect_top_level_sql_words(
@@ -301,12 +303,13 @@ fn collect_top_level_sql_words(
     let mut words = Vec::new();
     scan_sql_tokens(sql, kind, |token| {
         if let SqlToken::Word {
-            text,
+            mut text,
             depth: 0,
             called,
         } = token
         {
-            words.push((text.to_ascii_lowercase(), called));
+            text.make_ascii_lowercase();
+            words.push((text, called));
         }
         Ok(())
     })?;
@@ -342,11 +345,9 @@ fn validate_subquery_sql_with_mode(
 ) -> std::result::Result<(), String> {
     validate_raw_sql_fragment("subquery", sql)?;
 
-    let top_level_tokens = collect_top_level_sql_tokens(sql, "subquery")?;
-    let starts_like_subquery = matches!(
-        top_level_tokens.first().map(String::as_str),
-        Some("select") | Some("with")
-    );
+    let top_level_words = collect_top_level_sql_words(sql, "subquery")?;
+    let first_word = top_level_words.first().map(|(word, _)| word.as_str());
+    let starts_like_subquery = matches!(first_word, Some("select") | Some("with"));
 
     if !starts_like_subquery {
         return Err(
@@ -354,9 +355,7 @@ fn validate_subquery_sql_with_mode(
         );
     }
 
-    if top_level_tokens.first().map(String::as_str) == Some("with")
-        && !top_level_tokens.iter().any(|token| token == "select")
-    {
+    if first_word == Some("with") && !top_level_words.iter().any(|(word, _)| word == "select") {
         return Err(
             "unsafe subquery: WITH queries must terminate in a top-level SELECT statement"
                 .to_string(),
@@ -365,8 +364,8 @@ fn validate_subquery_sql_with_mode(
 
     // A forbidden word followed by `(` names a function — `REPLACE(name, ..)`
     // — not the statement.
-    if let Some((token, _)) = collect_top_level_sql_words(sql, "subquery")?
-        .into_iter()
+    if let Some((token, _)) = top_level_words
+        .iter()
         .find(|(token, called)| !called && is_forbidden_top_level_subquery_keyword(token))
     {
         return Err(format!(
@@ -376,9 +375,9 @@ fn validate_subquery_sql_with_mode(
     }
 
     if !allow_top_level_set_ops
-        && let Some(token) = top_level_tokens
+        && let Some((token, _)) = top_level_words
             .iter()
-            .find(|token| matches!(token.as_str(), "union" | "intersect" | "except"))
+            .find(|(token, _)| matches!(token.as_str(), "union" | "intersect" | "except"))
     {
         return Err(format!(
             "unsafe subquery: top-level '{}' queries are not allowed here; use QueryBuilder union()/union_all()/with_recursive_cte() APIs instead",

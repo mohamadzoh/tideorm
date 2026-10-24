@@ -143,9 +143,11 @@ impl ProfileReport {
             }
         }
 
-        let mut slowest: Vec<ProfiledQuery> = queries.clone();
-        slowest.sort_by_key(|query| Reverse(query.duration));
-        slowest.truncate(10);
+        // Only the ten kept are copied; the sort is stable, so ties keep
+        // their recording order.
+        let mut by_duration: Vec<&ProfiledQuery> = queries.iter().collect();
+        by_duration.sort_by_key(|query| Reverse(query.duration));
+        let slowest: Vec<ProfiledQuery> = by_duration.into_iter().take(10).cloned().collect();
 
         Self {
             total_duration,
@@ -249,6 +251,8 @@ impl ProfileReport {
 
 impl fmt::Display for ProfileReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        const DIVIDER: &str = "╠═══════════════════════════════════════════════════════════╣";
+
         writeln!(
             f,
             "╔═══════════════════════════════════════════════════════════╗"
@@ -257,10 +261,7 @@ impl fmt::Display for ProfileReport {
             f,
             "║           TIDEORM PERFORMANCE PROFILE REPORT              ║"
         )?;
-        writeln!(
-            f,
-            "╠═══════════════════════════════════════════════════════════╣"
-        )?;
+        writeln!(f, "{DIVIDER}")?;
         writeln!(
             f,
             "║ Total Duration:     {:>10}ms                          ║",
@@ -282,10 +283,7 @@ impl fmt::Display for ProfileReport {
             "║ Avg Query Time:     {:>10.2}ms                         ║",
             self.avg_query_time().as_secs_f64() * 1000.0
         )?;
-        writeln!(
-            f,
-            "╠═══════════════════════════════════════════════════════════╣"
-        )?;
+        writeln!(f, "{DIVIDER}")?;
 
         writeln!(
             f,
@@ -300,10 +298,7 @@ impl fmt::Display for ProfileReport {
         }
 
         if !self.slowest.is_empty() {
-            writeln!(
-                f,
-                "╠═══════════════════════════════════════════════════════════╣"
-            )?;
+            writeln!(f, "{DIVIDER}")?;
             writeln!(
                 f,
                 "║ Slowest Queries:                                          ║"
@@ -322,10 +317,7 @@ impl fmt::Display for ProfileReport {
 
         let suggestions = self.suggestions();
         if !suggestions.is_empty() {
-            writeln!(
-                f,
-                "╠═══════════════════════════════════════════════════════════╣"
-            )?;
+            writeln!(f, "{DIVIDER}")?;
             writeln!(
                 f,
                 "║ 💡 Optimization Suggestions:                              ║"

@@ -1,19 +1,25 @@
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Compile a validation pattern once per process; `None` when it is not a
 /// valid regex.
-pub(super) fn compiled_validation_regex(pattern: &str) -> Option<regex::Regex> {
-    static REGEX_CACHE: OnceLock<Mutex<HashMap<String, Option<regex::Regex>>>> = OnceLock::new();
+///
+/// Every check shares the one compiled regex: a cloned `Regex` starts with an
+/// empty search cache, which its first match has to build again.
+pub(super) fn compiled_validation_regex(pattern: &str) -> Option<Arc<regex::Regex>> {
+    static REGEX_CACHE: OnceLock<Mutex<HashMap<String, Option<Arc<regex::Regex>>>>> =
+        OnceLock::new();
     let cache = REGEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
     let mut cache = cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    cache
-        .entry(pattern.to_string())
-        .or_insert_with(|| regex::Regex::new(pattern).ok())
-        .clone()
+    if let Some(compiled) = cache.get(pattern) {
+        return compiled.clone();
+    }
+    let compiled = regex::Regex::new(pattern).ok().map(Arc::new);
+    cache.insert(pattern.to_string(), compiled.clone());
+    compiled
 }
 
 /// Value adapter used by the generic validator helpers.

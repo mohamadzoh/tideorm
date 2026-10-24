@@ -531,15 +531,15 @@ where
     }
 
     let entity_manager = owner.entity_manager;
-    let baseline = relation.loaded_keys().map(<[String]>::to_vec);
-    for key in removed_keys(baseline.as_deref(), &updated_keys) {
+    let baseline = relation.loaded_keys();
+    for key in removed_keys(baseline, &updated_keys) {
         if let Some(deleted) = entity_manager.get_by_entity_manager_key::<R>(&key)
             && let Some(value) = deleted.field_json_value(related_key)?
         {
             relation.detach(value).await?;
         }
     }
-    for key in added_keys(baseline.as_deref(), &updated_keys) {
+    for key in added_keys(baseline, &updated_keys) {
         if let Some(value) = related_values.get(&key) {
             relation.attach(value.clone()).await?;
         }

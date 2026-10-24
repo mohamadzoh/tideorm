@@ -84,42 +84,12 @@ where
         }
     }
 
-    let update_cols: Vec<&str> = match (builder.update_columns, builder.exclude_columns) {
-        (Some(columns), _) => columns
-            .iter()
-            .map(|column| {
-                M::canonical_column_name(column).ok_or_else(|| {
-                    Error::query(format!("unknown update column '{column}' for {table}"))
-                })
-            })
-            .collect::<Result<_>>()?,
-        (None, exclude) => {
-            let exclude = exclude
-                .unwrap_or_default()
-                .iter()
-                .map(|name| {
-                    M::canonical_column_name(name).ok_or_else(|| {
-                        Error::query(format!(
-                            "unknown column '{name}' in update_all_except() for {table}"
-                        ))
-                    })
-                })
-                .collect::<Result<Vec<&str>>>()?;
-            // The key and the conflict columns are what matched the stored
-            // row, so they stay as they are; so does a managed `created_at`,
-            // unless named.
-            M::column_names()
-                .iter()
-                .copied()
-                .filter(|column| {
-                    !exclude.contains(column)
-                        && !managed_created_at.contains(column)
-                        && !is_key_column(column)
-                        && !conflict_cols.iter().any(|conflict| conflict == column)
-                })
-                .collect()
-        }
-    };
+    let update_cols = update_column_names::<M>(
+        builder.update_columns,
+        builder.exclude_columns,
+        &conflict_cols,
+        managed_created_at,
+    )?;
     let update_columns = update_cols
         .iter()
         .map(|column| resolve(column, "update"))
@@ -181,6 +151,51 @@ where
         ))
         .await;
     super::crud::stored_row::<M>(&connection, &executor, row, explicit_key).await
+}
+
+/// The columns an upsert overwrites on a conflict, as column names: those
+/// `update_columns` names, or else every column but those `exclude_columns`
+/// names, the key, the conflict columns and a managed `created_at`.
+fn update_column_names<M: Model>(
+    update_columns: Option<Vec<String>>,
+    exclude_columns: Option<Vec<String>>,
+    conflict_cols: &[String],
+    managed_created_at: &[&str],
+) -> Result<Vec<&'static str>> {
+    let table = M::table_name();
+    if let Some(columns) = update_columns {
+        return columns
+            .iter()
+            .map(|column| {
+                M::canonical_column_name(column).ok_or_else(|| {
+                    Error::query(format!("unknown update column '{column}' for {table}"))
+                })
+            })
+            .collect();
+    }
+    let exclude = exclude_columns
+        .unwrap_or_default()
+        .iter()
+        .map(|name| {
+            M::canonical_column_name(name).ok_or_else(|| {
+                Error::query(format!(
+                    "unknown column '{name}' in update_all_except() for {table}"
+                ))
+            })
+        })
+        .collect::<Result<Vec<&str>>>()?;
+    // The key and the conflict columns are what matched the stored row, so
+    // they stay as they are; so does a managed `created_at`, unless named.
+    Ok(M::column_names()
+        .iter()
+        .copied()
+        .filter(|column| {
+            !exclude.contains(column)
+                && !managed_created_at.contains(column)
+                && !M::primary_key_names().contains(column)
+                && !conflict_cols.iter().any(|conflict| conflict == column)
+        })
+        .collect())
 }
 
 /// The MySQL-family upsert. `ON DUPLICATE KEY UPDATE` fires on a conflict

@@ -145,10 +145,9 @@ pub(crate) fn ensure_active_values_storable<M: crate::model::Model>(
     if conn.get_database_backend() != OrmBackend::Sqlite {
         return Ok(());
     }
-    for name in M::column_names() {
-        let Some(column) = M::column_from_str(name) else {
-            continue;
-        };
+    // The generated entity's columns are `M::column_names()`, in that order,
+    // so every write goes through them without looking each name up.
+    for column in <M::Entity as EntityTrait>::Column::iter() {
         let invalid = match active.get(column).into_value() {
             Some(Value::Float(Some(value))) => !value.is_finite(),
             Some(Value::Double(Some(value))) => !value.is_finite(),
@@ -156,6 +155,7 @@ pub(crate) fn ensure_active_values_storable<M: crate::model::Model>(
             _ => false,
         };
         if invalid {
+            let name = crate::orm::IdenStatic::as_str(&column);
             return Err(Error::query(format!(
                 "SQLite value for {name} must be finite and within its readable model range"
             )));
@@ -561,11 +561,6 @@ pub(crate) fn translate_error(err: OrmError) -> Error {
     translate_engine_error(err).with_db_failure(failure)
 }
 
-/// Translate an engine error from reaching or probing the server.
-///
-/// Whatever the driver called it, such a failure is a connection failure; the
-/// structured driver detail is carried over so the SQLSTATE and the source
-/// chain survive the reclassification.
 /// Translate a failure to open a pool on `url`.
 ///
 /// The engine quotes a URL it cannot parse or has no driver for, password and
@@ -639,6 +634,11 @@ fn userinfo_end(rest: &str) -> Option<usize> {
         .find(|&at| rest[..at].contains(':') && host_follows(&rest[at + 1..]))
 }
 
+/// Translate an engine error from reaching or probing the server.
+///
+/// Whatever the driver called it, such a failure is a connection failure; the
+/// structured driver detail is carried over so the SQLSTATE and the source
+/// chain survive the reclassification.
 pub(crate) fn translate_connection_error(err: OrmError) -> Error {
     reclassify_error(err, |message, source| Error::Connection { message, source })
 }

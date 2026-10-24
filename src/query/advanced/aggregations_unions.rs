@@ -442,14 +442,17 @@ impl<M: Model> QueryBuilder<M> {
                     source_table == table && source_column == name
                 })
         });
-        if let Some((output, _)) = selected.or_else(|| {
-            outputs
-                .iter()
-                .find(|(output, _)| !column.contains('.') && output == column)
-        }) {
+        if let Some((output, _)) = selected {
             return Some(output.clone());
         }
         (!self.projection_is_closed() && table == M::table_name()).then(|| name.to_string())
+    }
+
+    /// Whether the query's rows are defined by what it selects: DISTINCT and
+    /// UNION preserve the projection, so an aggregate over them reads its
+    /// output names, which take precedence over model fields.
+    fn rows_fixed_by_projection(&self) -> bool {
+        self.is_distinct() || !self.clauses.unions.is_empty()
     }
 
     /// Reject builder state that a single-scalar aggregate cannot represent.
@@ -527,10 +530,11 @@ impl<M: Model> QueryBuilder<M> {
         db_type: DatabaseType,
         projections: impl Fn(&dyn Fn(&str) -> String) -> Vec<String>,
     ) -> Result<(String, Vec<Value>)> {
+        let rows_fixed_by_projection = self.rows_fixed_by_projection();
         let invalid = std::cell::RefCell::new(None);
         projections(&|column| {
             let column = column.trim();
-            let is_output_alias = (self.is_distinct() || !self.clauses.unions.is_empty())
+            let is_output_alias = rows_fixed_by_projection
                 && !column.contains('.')
                 && self
                     .projection_outputs()
@@ -557,67 +561,71 @@ impl<M: Model> QueryBuilder<M> {
             return Ok(self.build_plain_select_sql(db_type, &select_list.join(", ")));
         }
 
-        let rows_fixed_by_projection = self.is_distinct() || !self.clauses.unions.is_empty();
-        let occupied = self.projection_outputs();
-        let input_alias = |index: usize| {
-            db_sql::unused_name(&format!("tideorm_aggregate_input_{index}"), |name| {
-                occupied.iter().any(|(output, _)| output == name)
-                    || M::column_names().contains(&name)
-            })
-        };
-        let inputs = std::cell::RefCell::new(Vec::<String>::new());
-        let unselected = std::cell::RefCell::new(None::<String>);
-        let select_list = projections(&|column| {
-            let column = column.trim();
-            if rows_fixed_by_projection {
+        let (select_list, (inner_sql, params)) = if rows_fixed_by_projection {
+            let unselected = std::cell::RefCell::new(None::<String>);
+            let select_list = projections(&|column| {
+                let column = column.trim();
                 let Some(name) = self.derived_output_name(column) else {
                     unselected
                         .borrow_mut()
                         .get_or_insert_with(|| column.to_string());
                     return String::new();
                 };
-                return db_sql::quote_ident(db_type, &name);
+                db_sql::quote_ident(db_type, &name)
+            });
+            if let Some(column) = unselected.into_inner() {
+                return Err(Error::query(format!(
+                    "an aggregate over a distinct() or union() query reads the columns the query selects, and '{}' is not one of them; select() it, or aggregate before distinct()/union()",
+                    column
+                )));
             }
-            let mut inputs = inputs.borrow_mut();
-            let index = inputs
-                .iter()
-                .position(|input| input == column)
-                .unwrap_or_else(|| {
-                    inputs.push(column.to_string());
-                    inputs.len() - 1
-                });
-            db_sql::quote_ident(db_type, &input_alias(index))
-        });
-        if let Some(column) = unselected.into_inner() {
-            return Err(Error::query(format!(
-                "an aggregate over a distinct() or union() query reads the columns the query selects, and '{}' is not one of them; select() it, or aggregate before distinct()/union()",
-                column
-            )));
-        }
-        let inputs = inputs.into_inner();
+            (
+                select_list,
+                self.build_select_sql_with_params_for_db(db_type),
+            )
+        } else {
+            let occupied = self.projection_outputs();
+            let input_alias = |index: usize| {
+                db_sql::unused_name(&format!("tideorm_aggregate_input_{index}"), |name| {
+                    occupied.iter().any(|(output, _)| output == name)
+                        || M::column_names().contains(&name)
+                })
+            };
+            let inputs = std::cell::RefCell::new(Vec::<String>::new());
+            let select_list = projections(&|column| {
+                let column = column.trim();
+                let mut inputs = inputs.borrow_mut();
+                let index = inputs
+                    .iter()
+                    .position(|input| input == column)
+                    .unwrap_or_else(|| {
+                        inputs.push(column.to_string());
+                        inputs.len() - 1
+                    });
+                db_sql::quote_ident(db_type, &input_alias(index))
+            });
 
-        let mut inner = self.clone();
-        if !rows_fixed_by_projection && !inputs.is_empty() {
             // Keep the original projection: ORDER BY may resolve its aliases,
             // even when an alias has the same name as another model column.
-            let aggregate_inputs = inputs
-                .iter()
-                .enumerate()
-                .map(|(index, column)| {
-                    format!(
-                        "{} AS {}",
-                        self.format_aggregate_column(db_type, column),
-                        db_sql::quote_ident(db_type, &input_alias(index))
-                    )
-                })
-                .collect::<Vec<_>>();
-            inner
-                .clauses
-                .raw_select_expressions
-                .extend(aggregate_inputs);
-        }
-
-        let (inner_sql, params) = inner.build_select_sql_with_params_for_db(db_type);
+            let mut inner = self.clone();
+            inner.clauses.raw_select_expressions.extend(
+                inputs
+                    .into_inner()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, column)| {
+                        format!(
+                            "{} AS {}",
+                            self.format_aggregate_column(db_type, column),
+                            db_sql::quote_ident(db_type, &input_alias(index))
+                        )
+                    }),
+            );
+            (
+                select_list,
+                inner.build_select_sql_with_params_for_db(db_type),
+            )
+        };
         Ok((
             db_sql::select_from_derived(
                 db_type,
@@ -656,16 +664,8 @@ impl<M: Model> QueryBuilder<M> {
             alias,
             render_expression,
         )?;
-        let output_types = if reads_as_column {
-            self.extreme_output_type(alias, column)
-        } else {
-            Vec::new()
-        };
-        let sources = if reads_as_column {
-            vec![(alias.to_string(), column.to_string())]
-        } else {
-            Vec::new()
-        };
+        let (output_types, sources) =
+            self.extreme_outputs(reads_as_column.then_some((alias, column)));
         let rows = self
             .fetch_aggregate_json(&sql, params, &output_types, &sources)
             .await?;
@@ -709,10 +709,11 @@ impl<M: Model> QueryBuilder<M> {
         self,
         column: impl crate::columns::IntoColumnName,
     ) -> Result<T> {
-        self.ensure_encrypted_column_is_comparable(&Self::own_column(&column), "SUM")?;
+        let column = Self::own_column(&column);
+        self.ensure_encrypted_column_is_comparable(&column, "SUM")?;
         self.decoded_aggregate(
             "sum()",
-            &Self::own_column(&column),
+            &column,
             AGGREGATE_RESULT_ALIAS,
             false,
             sum_expression,
@@ -744,14 +745,11 @@ impl<M: Model> QueryBuilder<M> {
         self,
         column: impl crate::columns::IntoColumnName,
     ) -> Result<Option<T>> {
-        self.ensure_encrypted_column_is_comparable(&Self::own_column(&column), "AVG")?;
-        self.decoded_aggregate(
-            "avg()",
-            &Self::own_column(&column),
-            AGGREGATE_RESULT_ALIAS,
-            false,
-            |column| format!("AVG({})", column),
-        )
+        let column = Self::own_column(&column);
+        self.ensure_encrypted_column_is_comparable(&column, "AVG")?;
+        self.decoded_aggregate("avg()", &column, AGGREGATE_RESULT_ALIAS, false, |column| {
+            format!("AVG({})", column)
+        })
         .await
     }
 
@@ -837,7 +835,7 @@ impl<M: Model> QueryBuilder<M> {
     /// Resolve the column actually read by an aggregate. DISTINCT and UNION
     /// preserve projections, so their aliases take precedence over model fields.
     pub(in crate::query) fn aggregate_source(&self, column: &str) -> Option<(String, String)> {
-        if self.is_distinct() || !self.clauses.unions.is_empty() {
+        if self.rows_fixed_by_projection() {
             let output = self.derived_output_name(column)?;
             if let Some((_, source)) = self
                 .projection_outputs()
@@ -861,7 +859,7 @@ impl<M: Model> QueryBuilder<M> {
         operation: &str,
     ) -> Result<()> {
         // Derived queries read output aliases; ordinary aggregates read source columns.
-        let output = if self.is_distinct() || !self.clauses.unions.is_empty() {
+        let output = if self.rows_fixed_by_projection() {
             self.derived_output_name(column)
         } else if self.aggregate_source(column).is_none() {
             Some(column.to_string())
@@ -947,7 +945,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     fn aggregate_column_type(&self, column: &str) -> Option<crate::orm::ColumnType> {
-        if (self.is_distinct() || !self.clauses.unions.is_empty())
+        if self.rows_fixed_by_projection()
             && let Some(output) = self.derived_output_name(column)
             && let Some(column_type) = self.projected_column_type(&output)
         {
@@ -957,17 +955,24 @@ impl<M: Model> QueryBuilder<M> {
         self.column_type(&format!("{table}.{field}"))
     }
 
-    /// The type a `MIN`/`MAX` of `column`, selected as `alias`, is decoded by:
-    /// the column's own, the model's or a joined model's, so a second `MAX`
-    /// of a timestamp, under an alias of its own, still reads as one.
-    fn extreme_output_type(
+    /// How the `MIN`/`MAX` outputs in `extremes`, each an alias and the column
+    /// it reads, are read back: decoded by the column's type, the model's or
+    /// a joined model's, so a second `MAX` of a timestamp, under an alias of
+    /// its own, still reads as one, and decrypted as that column.
+    #[allow(clippy::type_complexity)]
+    fn extreme_outputs<'a>(
         &self,
-        alias: &str,
-        column: &str,
-    ) -> Vec<(String, crate::orm::ColumnType)> {
-        self.aggregate_column_type(column)
-            .map(|column_type| vec![(alias.to_string(), column_type)])
-            .unwrap_or_default()
+        extremes: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> (Vec<(String, crate::orm::ColumnType)>, Vec<(String, String)>) {
+        let mut output_types = Vec::new();
+        let mut sources = Vec::new();
+        for (alias, column) in extremes {
+            if let Some(column_type) = self.aggregate_column_type(column) {
+                output_types.push((alias.to_string(), column_type));
+            }
+            sources.push((alias.to_string(), column.to_string()));
+        }
+        (output_types, sources)
     }
 
     /// The name a `MIN`/`MAX` over `column` is selected as: the model's own
@@ -1024,11 +1029,12 @@ impl<M: Model> QueryBuilder<M> {
     /// # }
     /// ```
     pub async fn count_distinct(self, column: impl crate::columns::IntoColumnName) -> Result<u64> {
-        self.ensure_encrypted_column_is_comparable(&Self::own_column(&column), "DISTINCT")?;
+        let column = Self::own_column(&column);
+        self.ensure_encrypted_column_is_comparable(&column, "DISTINCT")?;
         let value = self
             .execute_scalar_aggregate(
                 "count_distinct()",
-                &Self::own_column(&column),
+                &column,
                 COUNT_RESULT_ALIAS,
                 false,
                 |column_sql| format!("COUNT(DISTINCT {})", column_sql),
@@ -1112,23 +1118,14 @@ impl<M: Model> QueryBuilder<M> {
                 .collect()
         })?;
         // Every MIN or MAX reads as its column.
-        let output_types: Vec<(String, crate::orm::ColumnType)> = aggregates
-            .iter()
-            .zip(&aliases)
-            .filter_map(|(aggregate, alias)| {
-                aggregate.extreme_column().map(|column| (column, alias))
-            })
-            .flat_map(|(column, alias)| self.extreme_output_type(alias, column))
-            .collect();
-        let sources = aggregates
-            .iter()
-            .zip(&aliases)
-            .filter_map(|(aggregate, alias)| {
-                aggregate
-                    .extreme_column()
-                    .map(|column| (alias.clone(), column.to_string()))
-            })
-            .collect::<Vec<_>>();
+        let (output_types, sources) =
+            self.extreme_outputs(aggregates.iter().zip(&aliases).filter_map(
+                |(aggregate, alias)| {
+                    aggregate
+                        .extreme_column()
+                        .map(|column| (alias.as_str(), column))
+                },
+            ));
         let rows = self
             .fetch_aggregate_json(&sql, params, &output_types, &sources)
             .await?;
@@ -1148,14 +1145,15 @@ impl<M: Model> QueryBuilder<M> {
             })
             .collect::<Result<Vec<_>>>()?;
         // The MIN or MAX of a text column is text, even when it spells a number.
-        let retry = aggregates
+        let retry = aliases
             .iter()
             .zip(&values)
-            .map(|(aggregate, value)| {
+            .map(|(alias, value)| {
                 let reads_numbers = !matches!(
-                    aggregate
-                        .extreme_column()
-                        .and_then(|column| self.aggregate_column_type(column)),
+                    output_types
+                        .iter()
+                        .find(|(output, _)| output == alias)
+                        .map(|(_, column_type)| column_type),
                     Some(
                         crate::orm::ColumnType::String(_)
                             | crate::orm::ColumnType::Text
@@ -1195,7 +1193,6 @@ impl<M: Model> QueryBuilder<M> {
         other: &QueryBuilder<N>,
     ) -> Self {
         self.absorb_operand_error("operand", method, other);
-        self.clauses.dependencies.extend(other.cache_tables());
         let db_type = self.db_type_for_sql();
         let (query_sql, params) = other.build_compound_operand_sql_for_db(db_type);
         let mut operand = UnionClause::with_params(union_type, query_sql, params);

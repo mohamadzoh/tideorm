@@ -127,9 +127,7 @@ impl QueryCache {
                     cache.remove(key);
                     None
                 }
-                Some(_) if strategy == CacheStrategy::LRU => cache
-                    .touch(key, self.next_order())
-                    .map(|entry| entry.data.clone()),
+                Some(_) if strategy == CacheStrategy::LRU => cache.touch(key, self.next_order()),
                 Some(entry) => Some(entry.data.clone()),
                 None => None,
             }
@@ -177,13 +175,7 @@ impl QueryCache {
         ttl: Option<Duration>,
         model_name: &str,
     ) -> Result<()> {
-        self.store(
-            key,
-            value,
-            ttl,
-            HashSet::from([model_name.to_string()]),
-            None,
-        )
+        self.store(key, value, ttl, [model_name], None)
     }
 
     /// Set a cached value that is invalidated by writes to any of `tables`
@@ -199,7 +191,7 @@ impl QueryCache {
         ttl: Option<Duration>,
         tables: &[String],
     ) -> Result<()> {
-        self.store(key, value, ttl, tables.iter().cloned().collect(), None)
+        self.store(key, value, ttl, tables.iter().map(String::as_str), None)
     }
 
     /// Where a read that may fill the cache starts: pass it to
@@ -234,19 +226,19 @@ impl QueryCache {
             key,
             value,
             ttl,
-            tables.iter().cloned().collect(),
+            tables.iter().map(String::as_str),
             Some(fill_point),
         )
     }
 
     /// Store one entry tagged with every table it reads, unless it was read
     /// before an invalidation of one of them.
-    fn store<T: Serialize>(
+    fn store<'a, T: Serialize>(
         &self,
         key: &str,
         value: &T,
         ttl: Option<Duration>,
-        tables: HashSet<String>,
+        tables: impl IntoIterator<Item = &'a str>,
         fill_point: Option<FillPoint>,
     ) -> Result<()> {
         if !self.is_enabled() {
@@ -256,10 +248,7 @@ impl QueryCache {
         // Conservatively fold tags, including quoted identifiers. Different
         // case-sensitive tables may share an invalidation, but case-insensitive
         // SQL must never retain stale rows because of its spelling.
-        let tables = tables
-            .into_iter()
-            .map(|table| table.to_ascii_lowercase())
-            .collect();
+        let tables: HashSet<String> = tables.into_iter().map(str::to_ascii_lowercase).collect();
 
         // A cached copy has to be what the caller stored, or a hit hands
         // back different values than the database did.
@@ -310,7 +299,7 @@ impl QueryCache {
             }
         }
 
-        cache.insert(key.to_string(), entry);
+        cache.insert(key.into(), entry);
 
         Ok(())
     }

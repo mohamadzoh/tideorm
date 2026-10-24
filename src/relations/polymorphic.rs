@@ -272,6 +272,60 @@ fn morph_query<Related: Model, C>(
     ))
 }
 
+/// The plumbing [`MorphOne`] and [`MorphMany`] share, expanded inside each
+/// one's `impl` block: they differ only in what they cache.
+macro_rules! morph_owner_plumbing {
+    ($relation:literal) => {
+        fn query(&self, context: &str) -> Result<QueryBuilder<Related>> {
+            morph_query(
+                $relation,
+                self.morph_name,
+                self.local_key,
+                self.parent_table.as_deref(),
+                &self.state,
+                context,
+            )
+        }
+
+        /// Whether the relation names its columns and its owner's table, so
+        /// `load` can query.
+        fn is_configured(&self) -> bool {
+            ensure_relation_configured($relation, &[self.morph_name, self.local_key]).is_ok()
+                && self.parent_table.is_some()
+        }
+
+        /// Supply both halves of the polymorphic key: this model's
+        /// [`local_key`](Self::local_key) value and its table name, which is what
+        /// the `_type` column is matched against.
+        ///
+        /// The pk must be a scalar. Without this the wrapper is inert — every query
+        /// method errors with "Parent primary key not set for relation".
+        pub fn with_parent(mut self, pk: serde_json::Value, table: String) -> Self {
+            self.state.key = Some(pk);
+            self.parent_table = Some(table);
+            self
+        }
+
+        #[cfg(feature = "entity-manager")]
+        #[doc(hidden)]
+        pub fn attach_query_database(&mut self, database: &crate::database::Database) {
+            self.state.source.database = Some(database.clone());
+        }
+
+        #[doc(hidden)]
+        pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
+            self.state.preserve_from(
+                &previous.state,
+                self.morph_name == previous.morph_name
+                    && self.local_key == previous.local_key
+                    && self.parent_table == previous.parent_table
+                    && self.state.key == previous.state.key,
+                owner_is_unsaved(&previous.state.key),
+            );
+        }
+    };
+}
+
 /// The owning side of a polymorphic one-to-one relation: at most one row of
 /// `Related` whose `(type, id)` pair points back at this model.
 ///
@@ -303,17 +357,6 @@ pub struct MorphOne<Related: Model> {
 }
 
 impl<Related: Model> MorphOne<Related> {
-    fn query(&self, context: &str) -> Result<QueryBuilder<Related>> {
-        morph_query(
-            "MorphOne",
-            self.morph_name,
-            self.local_key,
-            self.parent_table.as_deref(),
-            &self.state,
-            context,
-        )
-    }
-
     /// Declare the morph prefix and the local key column.
     ///
     /// Both must be non-empty; loading a wrapper built by [`Default`] fails with
@@ -327,35 +370,7 @@ impl<Related: Model> MorphOne<Related> {
         }
     }
 
-    /// Supply both halves of the polymorphic key: this model's
-    /// [`local_key`](Self::local_key) value and its table name, which is what
-    /// the `_type` column is matched against.
-    ///
-    /// The pk must be a scalar. Without this the wrapper is inert — loading
-    /// errors with "Parent primary key not set for relation".
-    pub fn with_parent(mut self, pk: serde_json::Value, table: String) -> Self {
-        self.state.key = Some(pk);
-        self.parent_table = Some(table);
-        self
-    }
-
-    #[cfg(feature = "entity-manager")]
-    #[doc(hidden)]
-    pub fn attach_query_database(&mut self, database: &crate::database::Database) {
-        self.state.source.database = Some(database.clone());
-    }
-
-    #[doc(hidden)]
-    pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
-        self.state.preserve_from(
-            &previous.state,
-            self.morph_name == previous.morph_name
-                && self.local_key == previous.local_key
-                && self.parent_table == previous.parent_table
-                && self.state.key == previous.state.key,
-            owner_is_unsaved(&previous.state.key),
-        );
-    }
+    morph_owner_plumbing!("MorphOne");
 
     /// Fetch the related row, returning `Ok(None)` when there is none.
     ///
@@ -365,10 +380,8 @@ impl<Related: Model> MorphOne<Related> {
     /// eager-loaded row itself with [`get_cached`](Self::get_cached). An eager
     /// load that found no row is served as `Ok(None)`.
     pub async fn load(&self) -> Result<Option<Related>> {
-        let configured = ensure_relation_configured("MorphOne", &[self.morph_name, self.local_key])
-            .is_ok()
-            && self.parent_table.is_some();
-        if let Some(cached) = self.state.served(self.state.can_query(configured)) {
+        let can_query = self.state.can_query(self.is_configured());
+        if let Some(cached) = self.state.served(can_query) {
             return Ok(cached.map(|model| (**model).clone()));
         }
 
@@ -423,17 +436,6 @@ pub struct MorphMany<Related: Model> {
 }
 
 impl<Related: Model> MorphMany<Related> {
-    fn query(&self, context: &str) -> Result<QueryBuilder<Related>> {
-        morph_query(
-            "MorphMany",
-            self.morph_name,
-            self.local_key,
-            self.parent_table.as_deref(),
-            &self.state,
-            context,
-        )
-    }
-
     /// Declare the morph prefix and the local key column.
     ///
     /// Both must be non-empty; every method rejects a wrapper built by
@@ -447,35 +449,7 @@ impl<Related: Model> MorphMany<Related> {
         }
     }
 
-    /// Supply both halves of the polymorphic key: this model's
-    /// [`local_key`](Self::local_key) value and its table name, which is what
-    /// the `_type` column is matched against.
-    ///
-    /// The pk must be a scalar. Without this the wrapper is inert — every query
-    /// method errors with "Parent primary key not set for relation".
-    pub fn with_parent(mut self, pk: serde_json::Value, table: String) -> Self {
-        self.state.key = Some(pk);
-        self.parent_table = Some(table);
-        self
-    }
-
-    #[cfg(feature = "entity-manager")]
-    #[doc(hidden)]
-    pub fn attach_query_database(&mut self, database: &crate::database::Database) {
-        self.state.source.database = Some(database.clone());
-    }
-
-    #[doc(hidden)]
-    pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
-        self.state.preserve_from(
-            &previous.state,
-            self.morph_name == previous.morph_name
-                && self.local_key == previous.local_key
-                && self.parent_table == previous.parent_table
-                && self.state.key == previous.state.key,
-            owner_is_unsaved(&previous.state.key),
-        );
-    }
+    morph_owner_plumbing!("MorphMany");
 
     /// Fetch every related row, in no particular order.
     ///
@@ -484,10 +458,8 @@ impl<Related: Model> MorphMany<Related> {
     /// that arrived in a request body is never reported as stored rows; read
     /// eager-loaded rows themselves with [`get_cached`](Self::get_cached).
     pub async fn load(&self) -> Result<Vec<Related>> {
-        let configured =
-            ensure_relation_configured("MorphMany", &[self.morph_name, self.local_key]).is_ok()
-                && self.parent_table.is_some();
-        if let Some(cached) = self.state.served(self.state.can_query(configured)) {
+        let can_query = self.state.can_query(self.is_configured());
+        if let Some(cached) = self.state.served(can_query) {
             return Ok(cached.cloned().unwrap_or_default());
         }
 

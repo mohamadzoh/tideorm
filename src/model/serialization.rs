@@ -138,6 +138,11 @@ fn strip_hidden_from_non_column_payloads<M>(
 }
 
 fn unfilterable_flattened_field<M: ModelMeta>(global_hidden: &[String]) -> Option<&'static str> {
+    // Checked for every payload `to_json` filters, so a model that flattens
+    // nothing builds no lists for it.
+    if M::__flattened_fields().is_empty() {
+        return None;
+    }
     let hidden = M::hidden_attributes();
     let relations = M::relation_payload_filters();
     M::__flattened_fields().iter().copied().find(|field| {

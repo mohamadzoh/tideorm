@@ -323,7 +323,7 @@ impl EntityManager {
             // stable, so entries that tie on both still flush in registration
             // order.
             let order = managed::plan_flush_order(&entries);
-            entries.sort_by_key(|entry| managed::flush_sort_key(entry.as_ref(), &order));
+            entries.sort_by_cached_key(|entry| managed::flush_sort_key(entry.as_ref(), &order));
             managed::order_self_references(&mut entries);
 
             for entry in entries {
@@ -464,12 +464,14 @@ impl EntityManager {
             return existing;
         }
 
+        // Copied before taking the write lock, which every reader of the map
+        // waits on.
+        let stored: Arc<dyn Any + Send + Sync> = Arc::new(entity.clone());
         let mut map = self.identity_map.write();
         if let Some(existing) = map.get(&key).and_then(|value| value.downcast_ref::<T>()) {
             return existing.clone();
         }
 
-        let stored: Arc<dyn Any + Send + Sync> = Arc::new(entity.clone());
         map.insert(key.clone(), stored.clone());
         drop(map);
         let identity_map = self.identity_map.clone();

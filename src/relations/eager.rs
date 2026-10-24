@@ -105,7 +105,7 @@ impl<M: Model> WithRelations<M> {
     pub fn get_relation<R: for<'de> Deserialize<'de>>(&self, name: &str) -> Option<R> {
         self.relations
             .get(name)
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .and_then(|v| R::deserialize(v).ok())
     }
 
     /// Whether `name` was resolved by the eager load.
@@ -494,14 +494,9 @@ pub async fn __eager_keyed_many<R: EagerLoadModel>(
     morph_type: Option<(&'static str, &'static str)>,
 ) -> Result<Vec<Vec<R>>> {
     let by_key = R::__load_grouped_by_key(parent_keys, related_key, morph_type).await?;
-    Ok(parent_keys
-        .iter()
-        .map(|key| {
-            by_key
-                .get(&__relation_key(key))
-                .cloned()
-                .unwrap_or_default()
-        })
+    Ok(per_parent_key(parent_keys, by_key)
+        .into_iter()
+        .map(Option::unwrap_or_default)
         .collect())
 }
 
@@ -513,14 +508,37 @@ pub async fn __eager_keyed_one<R: EagerLoadModel>(
     morph_type: Option<(&'static str, &'static str)>,
 ) -> Result<Vec<Option<R>>> {
     let by_key = R::__load_grouped_by_key(parent_keys, related_key, morph_type).await?;
-    Ok(parent_keys
+    let first_by_key = by_key
+        .into_iter()
+        .filter_map(|(key, group)| Some((key, group.into_iter().next()?)))
+        .collect();
+    Ok(per_parent_key(parent_keys, first_by_key))
+}
+
+/// `by_key`'s value for each of `parent_keys`, in order. A value moves out at
+/// its key's last occurrence and is cloned for the ones before, so parents
+/// with distinct keys copy no rows.
+fn per_parent_key<V: Clone>(
+    parent_keys: &[serde_json::Value],
+    mut by_key: HashMap<String, V>,
+) -> Vec<Option<V>> {
+    let keys: Vec<String> = parent_keys.iter().map(__relation_key).collect();
+    // A repeated key's later positions overwrite its earlier ones.
+    let last: HashMap<&str, usize> = keys
         .iter()
-        .map(|key| {
-            by_key
-                .get(&__relation_key(key))
-                .and_then(|group| group.first().cloned())
+        .enumerate()
+        .map(|(position, key)| (key.as_str(), position))
+        .collect();
+    keys.iter()
+        .enumerate()
+        .map(|(position, key)| {
+            if last[key.as_str()] == position {
+                by_key.remove(key)
+            } else {
+                by_key.get(key).cloned()
+            }
         })
-        .collect())
+        .collect()
 }
 
 /// The related rows of a `HasManyThrough` per parent key: the live pivot rows

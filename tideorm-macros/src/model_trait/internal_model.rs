@@ -112,17 +112,17 @@ pub(super) fn generate_internal_model_impl(ctx: &BuildContext) -> TokenStream2 {
                 self.__wire_relations(Some(previous));
             }
 
+            // Here, in `copy_field_from` and in `set_field_json` an arm only
+            // picks the field: the code after the `match` is emitted once per
+            // model, not once per field.
             fn field_json_value(&self, field: &str) -> ::tideorm::Result<Option<::tideorm::serde_json::Value>> {
-                match field {
-                    #(#name_patterns => ::tideorm::serde_json::to_value(&self.#field_idents)
-                        .map(Some)
-                        .map_err(|e| ::tideorm::Error::query(format!(
-                            "Failed to serialize field '{}': {}",
-                            field,
-                            e
-                        ))),)*
-                    _ => Ok(None),
-                }
+                let value = match field {
+                    #(#name_patterns => ::tideorm::serde_json::to_value(&self.#field_idents),)*
+                    _ => return Ok(None),
+                };
+                value.map(Some).map_err(|e| {
+                    ::tideorm::Error::query(format!("Failed to serialize field '{}': {}", field, e))
+                })
             }
 
             #field_compare_value
@@ -131,26 +131,27 @@ pub(super) fn generate_internal_model_impl(ctx: &BuildContext) -> TokenStream2 {
                 match field {
                     #(#name_patterns => {
                         self.#field_idents = ::std::clone::Clone::clone(&source.#field_idents);
-                        Ok(true)
                     })*
-                    _ => Ok(false),
+                    _ => return Ok(false),
                 }
+                Ok(true)
             }
 
             fn set_field_json(&mut self, field: &str, value: ::tideorm::serde_json::Value) -> ::tideorm::Result<bool> {
-                match field {
-                    #(#name_patterns => {
-                        self.#field_idents = ::tideorm::serde_json::from_value(value).map_err(|e| {
-                            ::tideorm::Error::conversion(format!(
-                                "Failed to set field '{}': {}",
-                                field,
-                                e
-                            ))
-                        })?;
-                        Ok(true)
-                    })*
-                    _ => Ok(false),
-                }
+                let error = match field {
+                    #(#name_patterns => match ::tideorm::serde_json::from_value(value) {
+                        Ok(parsed) => {
+                            self.#field_idents = parsed;
+                            return Ok(true);
+                        }
+                        Err(error) => error,
+                    },)*
+                    _ => return Ok(false),
+                };
+                Err(::tideorm::Error::conversion(format!(
+                    "Failed to set field '{}': {}",
+                    field, error
+                )))
             }
         }
     }

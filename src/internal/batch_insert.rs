@@ -125,56 +125,14 @@ where
             // statements. Using the caller's connection would put baselines
             // outside the batch's rollback record, or in its parent's record.
             let batch_connection = scope.connection();
-            let inserted = match &strategy {
-                Strategy::Returning(order) => {
-                    let mut results = Vec::with_capacity(batch_size);
-                    let mut remaining = active_models.into_iter();
-                    loop {
-                        let chunk: Vec<_> = remaining.by_ref().take(rows_per_statement).collect();
-                        if chunk.is_empty() {
-                            break Ok(results);
-                        }
-                        let offset = results.len();
-                        match insert_returning::<M>(
-                            &batch_connection,
-                            chunk,
-                            order,
-                            offset,
-                            &error_context,
-                        )
-                        .await
-                        {
-                            Ok(rows) => results.extend(rows),
-                            Err(err) => break Err(err),
-                        }
-                    }
-                }
-                Strategy::InsertThenSelect(keys) => {
-                    let mut results = Vec::with_capacity(batch_size);
-                    let mut remaining = active_models.into_iter().peekable();
-                    loop {
-                        let chunk = mysql_chunk::<M, _>(&mut remaining, rows_per_statement);
-                        if chunk.is_empty() {
-                            break Ok(results);
-                        }
-                        let chunk_keys = &keys[results.len()..results.len() + chunk.len()];
-                        match insert_then_select::<M>(
-                            &batch_connection,
-                            chunk,
-                            chunk_keys,
-                            &error_context,
-                        )
-                        .await
-                        {
-                            Ok(rows) => results.extend(rows),
-                            Err(err) => break Err(err),
-                        }
-                    }
-                }
-                Strategy::PerRow => {
-                    insert_individually::<M>(&batch_connection, active_models, &error_context).await
-                }
-            };
+            let inserted = insert_by_strategy::<M>(
+                &batch_connection,
+                &strategy,
+                active_models,
+                rows_per_statement,
+                &error_context,
+            )
+            .await;
             // Of the keys stored, the largest numbered by the database is
             // below the sequence already, so the largest of all is the one
             // to move it past.
@@ -198,6 +156,55 @@ where
         || crate::cache::install_pending_invalidations(&record),
     )
     .await
+}
+
+/// Insert `active_models` as `strategy` says, at most `rows_per_statement` in
+/// one statement, and return them as stored, in input order.
+async fn insert_by_strategy<M>(
+    connection: &crate::database::ConnectionRef,
+    strategy: &Strategy,
+    active_models: Vec<M::ActiveModel>,
+    rows_per_statement: usize,
+    error_context: &ErrorContext,
+) -> Result<Vec<M>>
+where
+    M: InternalModel + crate::model::Model,
+    EntityModel<M>: IntoActiveModel<M::ActiveModel>,
+{
+    let count = active_models.len();
+    match strategy {
+        Strategy::Returning(order) => {
+            let mut results = Vec::with_capacity(count);
+            let mut remaining = active_models.into_iter();
+            loop {
+                let chunk: Vec<_> = remaining.by_ref().take(rows_per_statement).collect();
+                if chunk.is_empty() {
+                    return Ok(results);
+                }
+                let offset = results.len();
+                results.extend(
+                    insert_returning::<M>(connection, chunk, order, offset, error_context).await?,
+                );
+            }
+        }
+        Strategy::InsertThenSelect(keys) => {
+            let mut results = Vec::with_capacity(count);
+            let mut remaining = active_models.into_iter().peekable();
+            loop {
+                let chunk = mysql_chunk::<M, _>(&mut remaining, rows_per_statement);
+                if chunk.is_empty() {
+                    return Ok(results);
+                }
+                let chunk_keys = &keys[results.len()..results.len() + chunk.len()];
+                results.extend(
+                    insert_then_select::<M>(connection, chunk, chunk_keys, error_context).await?,
+                );
+            }
+        }
+        Strategy::PerRow => {
+            insert_individually::<M>(connection, active_models, error_context).await
+        }
+    }
 }
 
 /// How many of `active_models` hold their auto-increment key.

@@ -102,7 +102,7 @@ impl TranslationsData {
             .into_iter()
             .flatten()
             .filter_map(|(field, translations)| {
-                let translations = serde_json::from_value(translations.clone()).ok()?;
+                let translations = FieldTranslations::deserialize(translations).ok()?;
                 Some((field.clone(), translations))
             })
             .collect();

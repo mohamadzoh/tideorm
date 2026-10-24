@@ -1,6 +1,10 @@
 use super::*;
 
+use std::fmt::Write;
+
+use crate::config::DatabaseType;
 use crate::internal::push_param;
+use crate::orm::ColumnType;
 
 /// An SQLite expression that fails with "integer overflow" when evaluated. A
 /// `CASE` that reaches it aborts the whole UPDATE, rows already changed
@@ -119,13 +123,13 @@ fn sqlite_f32_round(expression: &str) -> String {
 }
 
 impl<M: Model> BatchUpdateBuilder<M> {
-    /// SQLite has one integer storage width; enforce the model's narrower type too.
-    fn sqlite_integer_bounds(column: &str) -> (i64, i64) {
-        use crate::orm::ColumnType;
+    /// SQLite has one integer storage width; enforce the model's narrower type
+    /// too. `kind` is the column's type.
+    fn sqlite_integer_bounds(column: &str, kind: Option<&ColumnType>) -> (i64, i64) {
         if let Some(bounds) = M::__sqlite_integer_bounds(column) {
             return bounds;
         }
-        match crate::internal::column_type_of::<M>(column) {
+        match kind {
             Some(ColumnType::TinyInteger) => (i8::MIN.into(), i8::MAX.into()),
             Some(ColumnType::SmallInteger) => (i16::MIN.into(), i16::MAX.into()),
             Some(ColumnType::Integer) => (i32::MIN.into(), i32::MAX.into()),
@@ -137,24 +141,41 @@ impl<M: Model> BatchUpdateBuilder<M> {
         }
     }
 
+    /// One SQLite integer expression, rendered three times so each use binds
+    /// parameters of its own, kept only when its result is an integer within
+    /// the column's range. SQLite promotes overflowing integer arithmetic to
+    /// REAL, and casting that REAL clamps it silently, so anything else fails
+    /// the statement: abs(i64::MIN) raises SQLite's integer-overflow error and
+    /// rolls back every row of this UPDATE.
+    fn sqlite_integer_checked(
+        column: &str,
+        kind: Option<&ColumnType>,
+        checked: &str,
+        bounded: &str,
+        result: &str,
+    ) -> String {
+        let (min, max) = Self::sqlite_integer_bounds(column, kind);
+        format!(
+            "CASE WHEN typeof({checked}) IN ('integer', 'null') AND COALESCE(({bounded}) BETWEEN {min} AND {max}, 1) THEN {result} ELSE {SQLITE_ABORT} END"
+        )
+    }
+
     /// Bind `value` with the type of the column it is assigned to, refusing a
     /// value the column cannot hold: SQLite stores whatever it is given, and
     /// the model could then no longer read the row.
     fn column_value(
         column: &str,
+        column_type: Option<&ColumnType>,
         value: &serde_json::Value,
-        db_type: crate::config::DatabaseType,
+        db_type: DatabaseType,
     ) -> Result<crate::internal::Value> {
-        use crate::config::DatabaseType;
         use crate::internal::Value;
-        use crate::orm::ColumnType;
 
         let refuse = |problem: &str| -> Result<Value> {
             Err(Error::query(format!("value for {column} {problem}")))
         };
-        let column_type = crate::internal::column_type_of::<M>(column);
         if !value.is_null() {
-            match column_type.as_ref() {
+            match column_type {
                 Some(ColumnType::Boolean) if !value.is_boolean() => {
                     return refuse("must be a boolean");
                 }
@@ -167,7 +188,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
                     return refuse("must be a UUID");
                 }
                 Some(ColumnType::Blob | ColumnType::Binary(_) | ColumnType::VarBinary(_))
-                    if serde_json::from_value::<Vec<u8>>(value.clone()).is_err() =>
+                    if <Vec<u8> as serde::Deserialize>::deserialize(value).is_err() =>
                 {
                     return refuse("must be an array of bytes in 0..=255");
                 }
@@ -203,7 +224,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
                                 .and_then(|n| i64::try_from(n as i128).ok())
                         }),
                     };
-                    let (min, max) = Self::sqlite_integer_bounds(column);
+                    let (min, max) = Self::sqlite_integer_bounds(column, column_type);
                     if !integer.is_some_and(|integer| (min..=max).contains(&integer)) {
                         return refuse("is outside the model's integer range or is not an integer");
                     }
@@ -214,7 +235,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
         if matches!(column_type, Some(ColumnType::Json | ColumnType::JsonBinary)) {
             return Ok(Value::from(value.clone()));
         }
-        let bound = crate::internal::json_to_assignment_value(value, column_type.as_ref());
+        let bound = crate::internal::json_to_assignment_value(value, column_type);
         match column_type {
             Some(ColumnType::Decimal(_) | ColumnType::Money(_)) => match &bound {
                 Value::Decimal(None) => {}
@@ -250,22 +271,23 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// SQLite otherwise accepts infinity (or a value too wide for f32), which
     /// cannot round-trip through JSON and typed reads. The error aborts the
     /// entire statement, including rows already updated; NULL stays NULL.
+    /// `kind` is the column's type.
     fn sqlite_float_arithmetic(
-        column: &str,
+        kind: Option<&ColumnType>,
         col: &str,
         operator: &str,
         operand: crate::internal::Value,
         params: &mut Vec<crate::internal::Value>,
     ) -> Option<String> {
-        let maximum = match crate::internal::column_type_of::<M>(column) {
-            Some(crate::orm::ColumnType::Float) => f64::from(f32::MAX),
-            Some(crate::orm::ColumnType::Double) => f64::MAX,
-            Some(crate::orm::ColumnType::Decimal(_) | crate::orm::ColumnType::Money(_)) => {
+        let maximum = match kind {
+            Some(ColumnType::Float) => f64::from(f32::MAX),
+            Some(ColumnType::Double) => f64::MAX,
+            Some(ColumnType::Decimal(_) | ColumnType::Money(_)) => {
                 crate::internal::SQLITE_DECIMAL_MAX
             }
             _ => return None,
         };
-        let db_type = crate::config::DatabaseType::SQLite;
+        let db_type = DatabaseType::SQLite;
         let bounded = push_param(db_type, params, operand.clone());
         let result = push_param(db_type, params, operand);
         let expression = format!(
@@ -286,47 +308,36 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// no decimal arithmetic, as a fraction of two integers. SQLite would
     /// otherwise store the REAL product, after which the model cannot read
     /// the row. A decimal column takes the factor as a decimal too, where the
-    /// backend has one, and floating-point columns take an `f64`.
+    /// backend has one, and floating-point columns take an `f64`. `kind` is
+    /// the column's type.
     fn scaled(
         column: &str,
+        kind: Option<&ColumnType>,
         col: &str,
-        db_type: crate::config::DatabaseType,
+        db_type: DatabaseType,
         params: &mut Vec<crate::internal::Value>,
         factor: f64,
         divide: bool,
     ) -> Result<String> {
-        use crate::config::DatabaseType;
-        use crate::orm::ColumnType;
-
         if !factor.is_finite() || (divide && factor == 0.0) {
             return Err(Error::query(
                 "bulk arithmetic requires a finite factor and a nonzero divisor",
             ));
         }
-        let column_type = crate::internal::column_type_of::<M>(column);
-        let integral = column_type
-            .as_ref()
-            .is_some_and(crate::internal::is_integer);
-        let decimal = matches!(
-            column_type,
-            Some(ColumnType::Decimal(_) | ColumnType::Money(_))
-        );
+        let integral = kind.is_some_and(crate::internal::is_integer);
+        let decimal = matches!(kind, Some(ColumnType::Decimal(_) | ColumnType::Money(_)));
         let operator = if divide { "/" } else { "*" };
 
         match (db_type, exact_decimal(factor)) {
             (DatabaseType::SQLite, Some(exact)) if integral => {
                 if let Some(scaled) = sqlite_integer_scale(col, exact, divide, db_type, params) {
-                    // SQLite promotes overflowing integer arithmetic to REAL.
-                    // Casting that REAL clamps it silently. Fail the statement
-                    // instead; abs(i64::MIN) raises SQLite's integer-overflow
-                    // error and rolls back every row of this UPDATE.
-                    let bounded = sqlite_integer_scale(col, exact, divide, db_type, params)
-                        .expect("the same exact factor was already accepted");
-                    let (min, max) = Self::sqlite_integer_bounds(column);
-                    let result = sqlite_integer_scale(col, exact, divide, db_type, params)
-                        .expect("the same exact factor was already accepted");
-                    return Ok(format!(
-                        "CASE WHEN typeof({scaled}) IN ('integer', 'null') AND COALESCE(({bounded}) BETWEEN {min} AND {max}, 1) THEN {result} ELSE {SQLITE_ABORT} END"
+                    let mut again = || {
+                        sqlite_integer_scale(col, exact, divide, db_type, params)
+                            .expect("the same exact factor was already accepted")
+                    };
+                    let (bounded, result) = (again(), again());
+                    return Ok(Self::sqlite_integer_checked(
+                        column, kind, &scaled, &bounded, &result,
                     ));
                 }
             }
@@ -350,7 +361,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
         }
         if db_type == DatabaseType::SQLite
             && let Some(expression) = Self::sqlite_float_arithmetic(
-                column,
+                kind,
                 col,
                 operator,
                 crate::internal::Value::Double(Some(factor)),
@@ -371,273 +382,304 @@ impl<M: Model> BatchUpdateBuilder<M> {
     fn build_assignment_sql(
         column: &str,
         value: &UpdateValue,
-        db_type: crate::config::DatabaseType,
+        db_type: DatabaseType,
         params: &mut Vec<crate::internal::Value>,
     ) -> Result<String> {
         let col = Self::quote_update_column(column, db_type)?;
+        let kind = crate::internal::column_type_of::<M>(column);
+        let kind = kind.as_ref();
+        Self::ensure_setter_fits_column(column, value, db_type, kind)?;
 
-        if matches!(
-            value,
-            UpdateValue::ArrayAppend(_) | UpdateValue::ArrayRemove(_) | UpdateValue::JsonSet(..)
-        ) {
-            let kind = crate::internal::column_type_of::<M>(column);
-            let supported = matches!(
-                (value, db_type, kind.as_ref()),
-                (
-                    UpdateValue::JsonSet(..),
-                    _,
-                    Some(crate::orm::ColumnType::Json | crate::orm::ColumnType::JsonBinary),
-                ) | (
-                    UpdateValue::ArrayAppend(_) | UpdateValue::ArrayRemove(_),
-                    crate::config::DatabaseType::Postgres,
-                    Some(crate::orm::ColumnType::Array(_)),
-                ) | (
-                    _,
-                    crate::config::DatabaseType::SQLite
-                        | crate::config::DatabaseType::MySQL
-                        | crate::config::DatabaseType::MariaDB,
-                    Some(crate::orm::ColumnType::Json | crate::orm::ColumnType::JsonBinary),
-                )
-            );
-            if !supported {
-                return Err(Error::query(format!(
-                    "structured setter requires a compatible JSON or array column; {column} is not supported"
-                )));
-            }
-        }
-
-        if matches!(
-            value,
-            UpdateValue::Increment(_)
-                | UpdateValue::Decrement(_)
-                | UpdateValue::Multiply(_)
-                | UpdateValue::Divide(_)
-        ) {
-            use crate::orm::ColumnType;
-            let numeric = crate::internal::column_type_of::<M>(column).is_some_and(|kind| {
-                crate::internal::is_integer(&kind)
-                    || matches!(
-                        kind,
-                        ColumnType::Float
-                            | ColumnType::Double
-                            | ColumnType::Decimal(_)
-                            | ColumnType::Money(_)
-                    )
-            });
-            if !numeric {
-                return Err(Error::query(format!(
-                    "bulk arithmetic requires a numeric column; {column} is not numeric"
-                )));
-            }
-        }
-
-        match value {
+        let assigned = match value {
             UpdateValue::SqlNull | UpdateValue::CoalesceSqlNull => {
-                let null = crate::internal::json_to_column_value(
-                    &serde_json::Value::Null,
-                    crate::internal::column_type_of::<M>(column).as_ref(),
-                );
+                let null = crate::internal::json_to_column_value(&serde_json::Value::Null, kind);
                 let parameter = push_param(db_type, params, null);
-                Ok(if matches!(value, UpdateValue::SqlNull) {
-                    format!("{col} = {parameter}")
+                if matches!(value, UpdateValue::SqlNull) {
+                    parameter
                 } else {
-                    format!("{col} = COALESCE({col}, {parameter})")
-                })
-            }
-            UpdateValue::Value(value) => {
-                let placeholder =
-                    push_param(db_type, params, Self::column_value(column, value, db_type)?);
-                Ok(format!("{} = {}", col, placeholder))
-            }
-            UpdateValue::UnsafeRaw(expression) => Ok(format!("{} = {}", col, expression)),
-            UpdateValue::Increment(by) | UpdateValue::Decrement(by) => {
-                let operator = if matches!(value, UpdateValue::Increment(_)) {
-                    "+"
-                } else {
-                    "-"
-                };
-                if db_type == crate::config::DatabaseType::SQLite
-                    && let Some(expression) = Self::sqlite_float_arithmetic(
-                        column,
-                        &col,
-                        operator,
-                        crate::internal::Value::BigInt(Some(*by)),
-                        params,
-                    )
-                {
-                    return Ok(format!("{col} = {expression}"));
-                }
-                let placeholder =
-                    push_param(db_type, params, crate::internal::Value::BigInt(Some(*by)));
-                let expression = format!("{col} {operator} {placeholder}");
-                if db_type == crate::config::DatabaseType::SQLite
-                    && crate::internal::column_type_of::<M>(column)
-                        .as_ref()
-                        .is_some_and(crate::internal::is_integer)
-                {
-                    let bounded_parameter =
-                        push_param(db_type, params, crate::internal::Value::BigInt(Some(*by)));
-                    let (min, max) = Self::sqlite_integer_bounds(column);
-                    let result_parameter =
-                        push_param(db_type, params, crate::internal::Value::BigInt(Some(*by)));
-                    Ok(format!(
-                        "{col} = CASE WHEN typeof({expression}) IN ('integer', 'null') AND COALESCE(({col} {operator} {bounded_parameter}) BETWEEN {min} AND {max}, 1) THEN {col} {operator} {result_parameter} ELSE {SQLITE_ABORT} END"
-                    ))
-                } else {
-                    Ok(format!("{col} = {expression}"))
+                    format!("COALESCE({col}, {parameter})")
                 }
             }
-            UpdateValue::Multiply(by) => Ok(format!(
-                "{col} = {}",
-                Self::scaled(column, &col, db_type, params, *by, false)?
-            )),
-            UpdateValue::Divide(by) => Ok(format!(
-                "{col} = {}",
-                Self::scaled(column, &col, db_type, params, *by, true)?
-            )),
-            UpdateValue::ArrayAppend(value) => Ok(match db_type {
-                crate::config::DatabaseType::Postgres => {
-                    let placeholder = push_param(
-                        db_type,
-                        params,
-                        crate::internal::json_to_array_element(
-                            value,
-                            crate::internal::column_type_of::<M>(column).as_ref(),
-                        ),
-                    );
-                    format!("{} = array_append({}, {})", col, col, placeholder)
-                }
-                // The element is bound as its JSON text and read back as JSON,
-                // so an object stays an object rather than becoming a string,
-                // and a NULL column starts a new array.
-                crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => {
-                    let placeholder = push_param(
-                        db_type,
-                        params,
-                        crate::query::db_sql::json_scalar_parameter(value),
-                    );
-                    format!(
-                        "{} = JSON_ARRAY_APPEND(COALESCE({}, JSON_ARRAY()), '$', JSON_EXTRACT({}, '$'))",
-                        col, col, placeholder
-                    )
-                }
-                // A document that is no array becomes the first element of
-                // one, as MySQL's `JSON_ARRAY_APPEND` wraps it.
-                crate::config::DatabaseType::SQLite => {
-                    let mut element = || {
-                        push_param(
-                            db_type,
-                            params,
-                            crate::query::db_sql::json_scalar_parameter(value),
-                        )
-                    };
-                    let (first, appended, wrapped) = (element(), element(), element());
-                    format!(
-                        "{col} = CASE WHEN {col} IS NULL THEN json_array(json({first})) \
-                         WHEN json_type({col}) = 'array' THEN json_insert({col}, '$[#]', json({appended})) \
-                         ELSE json_array(json({col}), json({wrapped})) END"
-                    )
-                }
-            }),
-            UpdateValue::ArrayRemove(value) => Ok(match db_type {
-                crate::config::DatabaseType::Postgres => {
-                    let placeholder = push_param(
-                        db_type,
-                        params,
-                        crate::internal::json_to_array_element(
-                            value,
-                            crate::internal::column_type_of::<M>(column).as_ref(),
-                        ),
-                    );
-                    format!("{} = array_remove({}, {})", col, col, placeholder)
-                }
-                // Every element equal to the value goes, compared as JSON as
-                // `where_eq` compares a document (`1`, `"1"` and `true` differ,
-                // an object's key order does not, an array's order does), and
-                // the rest keep their order and types; a NULL column stays
-                // NULL. JSON_TABLE reads a JSON null as SQL NULL on MySQL,
-                // hence the extra test when null is what is removed.
-                crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => {
-                    let equal = crate::query::db_sql::json_equals_bound(
-                        db_type,
-                        "tideorm_element.v",
-                        value,
-                        false,
-                    );
-                    params.extend(equal.values);
-                    let null_guard = if value.is_null() {
-                        "tideorm_element.v IS NOT NULL AND "
-                    } else {
-                        ""
-                    };
-                    format!(
-                        "{col} = CASE WHEN {col} IS NULL THEN NULL WHEN JSON_TYPE({col}) <> 'ARRAY' THEN {col} ELSE (SELECT COALESCE(JSON_ARRAYAGG(JSON_EXTRACT(tideorm_element.v, '$')), JSON_ARRAY()) FROM JSON_TABLE({col}, '$[*]' COLUMNS (v JSON PATH '$')) AS tideorm_element WHERE {null_guard}NOT COALESCE({}, FALSE)) END",
-                        equal.sql
-                    )
-                }
-                // Extract JSON text, not json_each.value: SQL REAL rounds large
-                // integers and rebuilding from it would corrupt untouched values.
-                crate::config::DatabaseType::SQLite => {
-                    let equal =
-                        crate::query::db_sql::sqlite_json_element_equals("tideorm_element", value);
-                    params.extend(equal.values);
-                    let element = "json(tideorm_element.json -> tideorm_element.fullkey)";
-                    let source = format!(
-                        "{}.{}",
-                        crate::query::db_sql::quote_ident(db_type, M::table_name()),
-                        col
-                    );
-                    format!(
-                        "{col} = CASE WHEN {col} IS NULL THEN NULL WHEN json_type({col}) <> 'array' THEN {col} ELSE (SELECT json_group_array({element} ORDER BY tideorm_element.key) FROM json_each({source}) AS tideorm_element WHERE NOT {}) END",
-                        equal.sql
-                    )
-                }
-            }),
+            UpdateValue::Value(value) => push_param(
+                db_type,
+                params,
+                Self::column_value(column, kind, value, db_type)?,
+            ),
+            UpdateValue::UnsafeRaw(expression) => return Ok(format!("{col} = {expression}")),
+            UpdateValue::Increment(by) => {
+                Self::stepped(column, kind, &col, db_type, params, "+", *by)
+            }
+            UpdateValue::Decrement(by) => {
+                Self::stepped(column, kind, &col, db_type, params, "-", *by)
+            }
+            UpdateValue::Multiply(by) => {
+                Self::scaled(column, kind, &col, db_type, params, *by, false)?
+            }
+            UpdateValue::Divide(by) => {
+                Self::scaled(column, kind, &col, db_type, params, *by, true)?
+            }
+            UpdateValue::ArrayAppend(value) => {
+                Self::array_appended(&col, kind, value, db_type, params)
+            }
+            UpdateValue::ArrayRemove(value) => {
+                Self::array_removed(&col, kind, value, db_type, params)
+            }
             UpdateValue::JsonSet(path, value) => {
-                let steps = crate::query::db_sql::parse_json_path(path)
-                    .filter(|steps| !steps.is_empty())
-                    .ok_or_else(|| {
-                        Error::query(format!(
-                            "unsupported JSON path '{}': json_set takes `$` followed by `.key`, `.\"key\"`, `['key']` or `[index]` steps",
-                            path
-                        ))
-                    })?;
-                let mut bind = |value: crate::internal::Value| push_param(db_type, params, value);
-                let document = || crate::query::db_sql::json_scalar_parameter(value);
-                Ok(match db_type {
-                    crate::config::DatabaseType::Postgres => {
-                        let path = bind(crate::internal::Value::String(Some(
-                            crate::query::db_sql::postgres_json_path_array(&steps),
-                        )));
-                        let value = bind(document());
-                        format!(
-                            "{col} = jsonb_set({}, {path}::text[], CAST({value} AS jsonb))",
-                            crate::query::db_sql::postgres_jsonb(&col)
-                        )
-                    }
-                    // `JSON_EXTRACT(?, '$')` reads the text as JSON on both
-                    // servers; MariaDB has no `CAST(.. AS JSON)`.
-                    crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => {
-                        let path = bind(crate::internal::Value::String(Some(
-                            crate::query::db_sql::json_path_text(&steps),
-                        )));
-                        let value = bind(document());
-                        format!("{col} = JSON_SET({col}, {path}, JSON_EXTRACT({value}, '$'))")
-                    }
-                    crate::config::DatabaseType::SQLite => {
-                        Self::sqlite_json_set(&col, &steps, document, bind)
-                    }
-                })
+                Self::json_path_set(&col, path, value, db_type, params)?
             }
             UpdateValue::Coalesce(default) => {
                 let placeholder = push_param(
                     db_type,
                     params,
-                    Self::column_value(column, default, db_type)?,
+                    Self::column_value(column, kind, default, db_type)?,
                 );
-                Ok(format!("{} = COALESCE({}, {})", col, col, placeholder))
+                format!("COALESCE({col}, {placeholder})")
+            }
+        };
+        Ok(format!("{col} = {assigned}"))
+    }
+
+    /// Refuse a computed setter the column cannot take: the structured ones
+    /// need a JSON column, or a PostgreSQL array for the array setters, and
+    /// arithmetic a numeric one. `kind` is the column's type.
+    fn ensure_setter_fits_column(
+        column: &str,
+        value: &UpdateValue,
+        db_type: DatabaseType,
+        kind: Option<&ColumnType>,
+    ) -> Result<()> {
+        match value {
+            UpdateValue::ArrayAppend(_)
+            | UpdateValue::ArrayRemove(_)
+            | UpdateValue::JsonSet(..) => {
+                let supported = matches!(
+                    (value, db_type, kind),
+                    (
+                        UpdateValue::JsonSet(..),
+                        _,
+                        Some(ColumnType::Json | ColumnType::JsonBinary),
+                    ) | (
+                        UpdateValue::ArrayAppend(_) | UpdateValue::ArrayRemove(_),
+                        DatabaseType::Postgres,
+                        Some(ColumnType::Array(_)),
+                    ) | (
+                        _,
+                        DatabaseType::SQLite | DatabaseType::MySQL | DatabaseType::MariaDB,
+                        Some(ColumnType::Json | ColumnType::JsonBinary),
+                    )
+                );
+                if !supported {
+                    return Err(Error::query(format!(
+                        "structured setter requires a compatible JSON or array column; {column} is not supported"
+                    )));
+                }
+            }
+            UpdateValue::Increment(_)
+            | UpdateValue::Decrement(_)
+            | UpdateValue::Multiply(_)
+            | UpdateValue::Divide(_) => {
+                let numeric = kind.is_some_and(|kind| {
+                    crate::internal::is_integer(kind)
+                        || matches!(
+                            kind,
+                            ColumnType::Float
+                                | ColumnType::Double
+                                | ColumnType::Decimal(_)
+                                | ColumnType::Money(_)
+                        )
+                });
+                if !numeric {
+                    return Err(Error::query(format!(
+                        "bulk arithmetic requires a numeric column; {column} is not numeric"
+                    )));
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// `col` plus or minus `by`, as `operator` says. On SQLite the result has
+    /// to stay readable by the model: within its float range, as
+    /// [`sqlite_float_arithmetic`](Self::sqlite_float_arithmetic) keeps it,
+    /// or an integer within its integer range. `kind` is the column's type.
+    fn stepped(
+        column: &str,
+        kind: Option<&ColumnType>,
+        col: &str,
+        db_type: DatabaseType,
+        params: &mut Vec<crate::internal::Value>,
+        operator: &str,
+        by: i64,
+    ) -> String {
+        let operand = crate::internal::Value::BigInt(Some(by));
+        let sqlite = db_type == DatabaseType::SQLite;
+        if sqlite
+            && let Some(expression) =
+                Self::sqlite_float_arithmetic(kind, col, operator, operand.clone(), params)
+        {
+            return expression;
+        }
+        let mut step = || {
+            format!(
+                "{col} {operator} {}",
+                push_param(db_type, params, operand.clone())
+            )
+        };
+        let expression = step();
+        if !(sqlite && kind.is_some_and(crate::internal::is_integer)) {
+            return expression;
+        }
+        let (bounded, result) = (step(), step());
+        Self::sqlite_integer_checked(column, kind, &expression, &bounded, &result)
+    }
+
+    /// `col` with `value` appended. `kind` is the column's type.
+    fn array_appended(
+        col: &str,
+        kind: Option<&ColumnType>,
+        value: &serde_json::Value,
+        db_type: DatabaseType,
+        params: &mut Vec<crate::internal::Value>,
+    ) -> String {
+        match db_type {
+            DatabaseType::Postgres => {
+                let element = crate::internal::json_to_array_element(value, kind);
+                let placeholder = push_param(db_type, params, element);
+                format!("array_append({col}, {placeholder})")
+            }
+            // The element is bound as its JSON text and read back as JSON,
+            // so an object stays an object rather than becoming a string,
+            // and a NULL column starts a new array.
+            DatabaseType::MySQL | DatabaseType::MariaDB => {
+                let placeholder = push_param(
+                    db_type,
+                    params,
+                    crate::query::db_sql::json_scalar_parameter(value),
+                );
+                format!(
+                    "JSON_ARRAY_APPEND(COALESCE({col}, JSON_ARRAY()), '$', JSON_EXTRACT({placeholder}, '$'))"
+                )
+            }
+            // A document that is no array becomes the first element of
+            // one, as MySQL's `JSON_ARRAY_APPEND` wraps it.
+            DatabaseType::SQLite => {
+                let mut element = || {
+                    push_param(
+                        db_type,
+                        params,
+                        crate::query::db_sql::json_scalar_parameter(value),
+                    )
+                };
+                let (first, appended, wrapped) = (element(), element(), element());
+                format!(
+                    "CASE WHEN {col} IS NULL THEN json_array(json({first})) \
+                     WHEN json_type({col}) = 'array' THEN json_insert({col}, '$[#]', json({appended})) \
+                     ELSE json_array(json({col}), json({wrapped})) END"
+                )
             }
         }
+    }
+
+    /// `col` without the elements equal to `value`. `kind` is the column's
+    /// type.
+    fn array_removed(
+        col: &str,
+        kind: Option<&ColumnType>,
+        value: &serde_json::Value,
+        db_type: DatabaseType,
+        params: &mut Vec<crate::internal::Value>,
+    ) -> String {
+        match db_type {
+            DatabaseType::Postgres => {
+                let element = crate::internal::json_to_array_element(value, kind);
+                let placeholder = push_param(db_type, params, element);
+                format!("array_remove({col}, {placeholder})")
+            }
+            // Every element equal to the value goes, compared as JSON as
+            // `where_eq` compares a document (`1`, `"1"` and `true` differ,
+            // an object's key order does not, an array's order does), and
+            // the rest keep their order and types; a NULL column stays
+            // NULL. JSON_TABLE reads a JSON null as SQL NULL on MySQL,
+            // hence the extra test when null is what is removed.
+            DatabaseType::MySQL | DatabaseType::MariaDB => {
+                let equal = crate::query::db_sql::json_equals_bound(
+                    db_type,
+                    "tideorm_element.v",
+                    value,
+                    false,
+                );
+                params.extend(equal.values);
+                let null_guard = if value.is_null() {
+                    "tideorm_element.v IS NOT NULL AND "
+                } else {
+                    ""
+                };
+                format!(
+                    "CASE WHEN {col} IS NULL THEN NULL WHEN JSON_TYPE({col}) <> 'ARRAY' THEN {col} ELSE (SELECT COALESCE(JSON_ARRAYAGG(JSON_EXTRACT(tideorm_element.v, '$')), JSON_ARRAY()) FROM JSON_TABLE({col}, '$[*]' COLUMNS (v JSON PATH '$')) AS tideorm_element WHERE {null_guard}NOT COALESCE({}, FALSE)) END",
+                    equal.sql
+                )
+            }
+            // Extract JSON text, not json_each.value: SQL REAL rounds large
+            // integers and rebuilding from it would corrupt untouched values.
+            DatabaseType::SQLite => {
+                let equal =
+                    crate::query::db_sql::sqlite_json_element_equals("tideorm_element", value);
+                params.extend(equal.values);
+                let element = "json(tideorm_element.json -> tideorm_element.fullkey)";
+                let source = format!(
+                    "{}.{}",
+                    crate::query::db_sql::quote_ident(db_type, M::table_name()),
+                    col
+                );
+                format!(
+                    "CASE WHEN {col} IS NULL THEN NULL WHEN json_type({col}) <> 'array' THEN {col} ELSE (SELECT json_group_array({element} ORDER BY tideorm_element.key) FROM json_each({source}) AS tideorm_element WHERE NOT {}) END",
+                    equal.sql
+                )
+            }
+        }
+    }
+
+    /// `col` with the member or element at `path` set to `value`.
+    fn json_path_set(
+        col: &str,
+        path: &str,
+        value: &serde_json::Value,
+        db_type: DatabaseType,
+        params: &mut Vec<crate::internal::Value>,
+    ) -> Result<String> {
+        let steps = crate::query::db_sql::parse_json_path(path)
+            .filter(|steps| !steps.is_empty())
+            .ok_or_else(|| {
+                Error::query(format!(
+                    "unsupported JSON path '{}': json_set takes `$` followed by `.key`, `.\"key\"`, `['key']` or `[index]` steps",
+                    path
+                ))
+            })?;
+        let mut bind = |value: crate::internal::Value| push_param(db_type, params, value);
+        let document = || crate::query::db_sql::json_scalar_parameter(value);
+        Ok(match db_type {
+            DatabaseType::Postgres => {
+                let path = bind(crate::internal::Value::String(Some(
+                    crate::query::db_sql::postgres_json_path_array(&steps),
+                )));
+                let value = bind(document());
+                format!(
+                    "jsonb_set({}, {path}::text[], CAST({value} AS jsonb))",
+                    crate::query::db_sql::postgres_jsonb(col)
+                )
+            }
+            // `JSON_EXTRACT(?, '$')` reads the text as JSON on both
+            // servers; MariaDB has no `CAST(.. AS JSON)`.
+            DatabaseType::MySQL | DatabaseType::MariaDB => {
+                let path = bind(crate::internal::Value::String(Some(
+                    crate::query::db_sql::json_path_text(&steps),
+                )));
+                let value = bind(document());
+                format!("JSON_SET({col}, {path}, JSON_EXTRACT({value}, '$'))")
+            }
+            DatabaseType::SQLite => Self::sqlite_json_set(col, &steps, document, bind),
+        })
     }
 
     /// `json_set` on SQLite, writing what PostgreSQL's `jsonb_set` and MySQL's
@@ -659,7 +701,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
         let (last, parent) = steps.split_last().expect("json_set paths have a step");
         // `json_type` of a missing parent is NULL, which `IS NOT` counts as
         // another type.
-        let set = match last {
+        match last {
             JsonPathStep::Member(_) => {
                 let parent_path = bind(path(parent, ""));
                 let target = bind(path(steps, ""));
@@ -683,8 +725,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
                      ELSE json_insert({col}, {end}, json({appended})) END"
                 )
             }
-        };
-        format!("{col} = {set}")
+        }
     }
 
     fn build_set_clause_with_params_for_db(
@@ -837,42 +878,31 @@ impl<M: Model> BatchUpdateBuilder<M> {
 
         let table = crate::query::db_sql::quote_table::<M>(db_type);
         let mut sql = format!("UPDATE {} SET {}", table, set_parts.join(", "));
-        // The rows a limit keeps are the first in the query's order, as a
-        // read of them would have it.
-        let order_by = match self.limit_value {
-            Some(_) => query.order_by_sql(db_type),
-            None => String::new(),
-        };
-
-        match self.limit_value {
-            // Postgres and SQLite reject `UPDATE .. LIMIT`, so the cap is
-            // enforced by scoping the update to a bounded primary-key subquery.
-            // `limit()` is a blast-radius control; dropping it on those
-            // backends would widen exactly what the caller asked to contain.
-            Some(limit) if !Self::backend_supports_update_limit(db_type) => {
-                let primary_key = Self::limit_scope_primary_key(db_type)?;
-                sql.push_str(&format!(
-                    " WHERE {} IN (SELECT {} FROM {}",
-                    primary_key, primary_key, table
-                ));
-                if !where_sql.is_empty() {
-                    sql.push_str(" WHERE ");
-                    sql.push_str(&where_sql);
-                }
-                sql.push_str(&order_by);
-                // `limit` is a `u64`, so it can only ever render as digits.
-                sql.push_str(&format!(" LIMIT {})", limit));
-            }
-            limit => {
-                if !where_sql.is_empty() {
-                    sql.push_str(" WHERE ");
-                    sql.push_str(&where_sql);
-                }
-                if let Some(limit) = limit {
-                    sql.push_str(&order_by);
-                    sql.push_str(&format!(" LIMIT {}", limit));
-                }
-            }
+        // Postgres and SQLite reject `UPDATE .. LIMIT`, so the cap is
+        // enforced by scoping the update to a bounded primary-key subquery.
+        // `limit()` is a blast-radius control; dropping it on those
+        // backends would widen exactly what the caller asked to contain.
+        let scoped = self.limit_value.is_some() && !Self::backend_supports_update_limit(db_type);
+        if scoped {
+            let primary_key = Self::limit_scope_primary_key(db_type)?;
+            let _ = write!(
+                sql,
+                " WHERE {primary_key} IN (SELECT {primary_key} FROM {table}"
+            );
+        }
+        if !where_sql.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&where_sql);
+        }
+        if let Some(limit) = self.limit_value {
+            // The rows a limit keeps are the first in the query's order, as a
+            // read of them would have it. `limit` is a `u64`, so it can only
+            // ever render as digits.
+            sql.push_str(&query.order_by_sql(db_type));
+            let _ = write!(sql, " LIMIT {limit}");
+        }
+        if scoped {
+            sql.push(')');
         }
 
         Ok((sql, params))

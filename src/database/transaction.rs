@@ -544,12 +544,21 @@ impl ConnectionRef {
         Backend::from(self.executor().get_database_backend())
     }
 
+    /// The identity of the pool this connection's statements run on, read
+    /// without building the whole [`source`](Self::source).
+    pub(crate) fn origin(&self) -> Option<u64> {
+        match self {
+            Self::Database(pool) => Some(super::state::connection_identity(pool)),
+            Self::Transaction(_, source) => source.origin,
+        }
+    }
+
     /// The pool this connection's statements run on: the pool itself, or the
     /// one the transaction was begun on.
     pub(crate) fn source(&self) -> TransactionSource {
         match self {
             Self::Database(pool) => TransactionSource {
-                origin: Some(super::state::connection_identity(pool)),
+                origin: self.origin(),
                 cache_scope: pool.cache_scope.clone(),
                 mariadb: pool.is_mariadb(),
                 record: None,

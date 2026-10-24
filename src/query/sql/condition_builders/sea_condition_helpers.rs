@@ -83,12 +83,6 @@ impl<M: Model> QueryBuilder<M> {
         format!("'{}'", rendered)
     }
 
-    /// Bind `value` with the type of `column` when it is one of `M`'s columns,
-    /// or a column of a joined model's table.
-    pub(crate) fn column_value(&self, column: &str, value: &serde_json::Value) -> Value {
-        crate::internal::json_to_column_value(value, self.column_type(column).as_ref())
-    }
-
     /// The type a model declares for a filter's column: the query's own
     /// model's, else a joined model's.
     pub(in crate::query) fn column_type(&self, column: &str) -> Option<crate::orm::ColumnType> {
@@ -121,10 +115,7 @@ impl<M: Model> QueryBuilder<M> {
     /// UUID or timestamp column is bound as one, not as text.
     fn joined_model_column_type(&self, column: &str) -> Option<crate::orm::ColumnType> {
         let (qualifier, name) = column.rsplit_once('.')?;
-        let join = self.clauses.joins.iter().find(|join| {
-            join.qualifier() == qualifier || (join.alias.is_none() && join.table == qualifier)
-        })?;
-        crate::sync::registered_column_type(&join.table, name)
+        crate::sync::registered_column_type(&self.join_named(qualifier)?.table, name)
     }
 
     pub(crate) fn sea_column_expr(&self, db_type: DatabaseType, column: &str) -> SimpleExpr {
@@ -282,9 +273,10 @@ impl<M: Model> QueryBuilder<M> {
     /// one. Surfacing it as a query error at render time keeps an unrenderable
     /// filter from ever becoming a missing filter.
     pub(in crate::query::sql) fn ensure_conditions_are_representable(&self) -> Result<()> {
+        let mut db_type = None;
         for condition in self.all_conditions() {
             Self::ensure_condition_is_representable(condition)?;
-            let db_type = self.db_type_for_sql();
+            let db_type = *db_type.get_or_insert_with(|| self.db_type_for_sql());
             if db_type == DatabaseType::SQLite
                 && matches!(condition.operator, Operator::LikeEscaped)
                 && matches!(&condition.value, ConditionValue::Single(serde_json::Value::String(text)) if text.contains('\0'))

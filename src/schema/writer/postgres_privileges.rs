@@ -119,9 +119,15 @@ fn grantor_access(
 }
 
 fn revoke(target: &str, privileges: &str, lookup: &str) -> String {
+    revoke_each(&format!("REVOKE {privileges} ON {target} FROM "), lookup)
+}
+
+/// A `DO` block running `revoke`, a `REVOKE` up to its `FROM`, with
+/// `CASCADE` for every grantee the `grantees` query returns.
+fn revoke_each(revoke: &str, grantees: &str) -> String {
     let body = format!(
-        "DECLARE grantee_name text; BEGIN FOR grantee_name IN {lookup} LOOP EXECUTE {} || grantee_name || ' CASCADE'; END LOOP; END",
-        postgres_dependencies::literal(&format!("REVOKE {privileges} ON {target} FROM "))
+        "DECLARE grantee_name text; BEGIN FOR grantee_name IN {grantees} LOOP EXECUTE {} || grantee_name || ' CASCADE'; END LOOP; END",
+        postgres_dependencies::literal(revoke)
     );
     format!("DO {}", postgres_dependencies::literal(&body))
 }
@@ -212,9 +218,10 @@ async fn default_privileges(conn: &impl ConnectionTrait) -> Result<Vec<String>> 
         let kind: String = get(&row, "kind")?;
         let lookup: String = get(&row, "lookup")?;
         let owner: String = get(&row, "owner_name")?;
-        let revoke = postgres_dependencies::literal(&format!("{prefix} REVOKE ALL ON {kind} FROM "));
-        let body = format!("DECLARE grantee_name text; BEGIN FOR grantee_name IN SELECT CASE WHEN a.grantee=0 THEN 'PUBLIC' ELSE quote_ident(pg_catalog.pg_get_userbyid(a.grantee)) END FROM pg_catalog.pg_default_acl,LATERAL pg_catalog.aclexplode(defaclacl) a WHERE {lookup} LOOP EXECUTE {revoke} || grantee_name || ' CASCADE'; END LOOP; END");
-        output.push(format!("DO {}", postgres_dependencies::literal(&body)));
+        output.push(revoke_each(
+            &format!("{prefix} REVOKE ALL ON {kind} FROM "),
+            &format!("SELECT CASE WHEN a.grantee=0 THEN 'PUBLIC' ELSE quote_ident(pg_catalog.pg_get_userbyid(a.grantee)) END FROM pg_catalog.pg_default_acl,LATERAL pg_catalog.aclexplode(defaclacl) a WHERE {lookup}"),
+        ));
         // When no destination entry exists, built-in grants still apply.
         output.push(format!("{prefix} REVOKE ALL ON {kind} FROM PUBLIC, {owner}"));
         let source: Vec<Grant> = serde_json::from_value(get::<Option<serde_json::Value>>(&row, "grants")?.unwrap_or_else(||serde_json::json!([])))

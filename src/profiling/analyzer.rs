@@ -24,7 +24,6 @@ impl QueryAnalyzer {
             operation,
             crate::logging::QueryOperation::Update | crate::logging::QueryOperation::Delete
         ) && !crate::internal::sql_lexer::top_words(sql)
-            .iter()
             .any(|word| word.eq_ignore_ascii_case("where"))
         {
             suggestions.push(QuerySuggestion::new(

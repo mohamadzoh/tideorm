@@ -24,9 +24,10 @@ impl<M: Model> QueryBuilder<M> {
         high: &serde_json::Value,
         negated: bool,
     ) -> SimpleExpr {
+        let column_type = self.column_type(column);
         let (low, high) = (
-            self.column_value(column, low),
-            self.column_value(column, high),
+            crate::internal::json_to_column_value(low, column_type.as_ref()),
+            crate::internal::json_to_column_value(high, column_type.as_ref()),
         );
         if negated {
             column_expr.not_between(low, high)
@@ -74,73 +75,26 @@ impl<M: Model> QueryBuilder<M> {
         }
         match db_type {
             DatabaseType::Postgres => {
-                let (sql, bound) = match operator {
-                    ArrayOperator::Contains => (
-                        db_sql::postgres_array_contains(
-                            column_sql,
-                            &db_sql::placeholders(db_type, values.len()),
-                        ),
-                        values.to_vec(),
-                    ),
-                    ArrayOperator::ContainedBy => {
-                        let json_elements = matches!(self.column_type(column),
-                            Some(crate::orm::ColumnType::Array(element))
-                                if matches!(element.as_ref(), crate::orm::ColumnType::Json | crate::orm::ColumnType::JsonBinary));
-                        let (listed, null_allowed) = if json_elements {
-                            (values.to_vec(), false)
-                        } else {
-                            split_nulls(values)
-                        };
-                        let operands = db_sql::placeholders(db_type, listed.len());
-                        (
-                            db_sql::postgres_array_contained_by(
-                                column_sql,
-                                &operands,
-                                null_allowed,
-                            ),
-                            listed,
-                        )
-                    }
-                    ArrayOperator::Overlaps => (
-                        db_sql::postgres_array_overlaps(
-                            column_sql,
-                            &db_sql::placeholders(db_type, values.len()),
-                        ),
-                        values.to_vec(),
-                    ),
-                };
-                self.build_custom_expression(
-                    sql,
-                    bound
-                        .iter()
-                        .map(|value| {
-                            crate::internal::json_to_array_element(
-                                value,
-                                self.column_type(column).as_ref(),
-                            )
-                        })
-                        .collect(),
-                )
+                self.build_postgres_array_expression(column_sql, operator, column, values)
             }
             // A JSON array column is contained in or contains the list as a
             // JSON document, with the guards that make `JSON_CONTAINS` read
             // as PostgreSQL does: a column holding an object is contained by
             // no list. An overlap is a containment of any one value.
             DatabaseType::MySQL | DatabaseType::MariaDB => {
-                let list = serde_json::Value::Array(values.to_vec());
                 let bound = match operator {
-                    ArrayOperator::Contains => db_sql::json_containment_bound(
-                        db_type,
-                        column_sql,
-                        &list,
-                        db_sql::JsonContainment::Contains,
-                    ),
-                    ArrayOperator::ContainedBy => db_sql::json_containment_bound(
-                        db_type,
-                        column_sql,
-                        &list,
-                        db_sql::JsonContainment::ContainedBy,
-                    ),
+                    ArrayOperator::Contains | ArrayOperator::ContainedBy => {
+                        db_sql::json_containment_bound(
+                            db_type,
+                            column_sql,
+                            &serde_json::Value::Array(values.to_vec()),
+                            if matches!(operator, ArrayOperator::Contains) {
+                                db_sql::JsonContainment::Contains
+                            } else {
+                                db_sql::JsonContainment::ContainedBy
+                            },
+                        )
+                    }
                     ArrayOperator::Overlaps => {
                         let check = format!("JSON_CONTAINS({column_sql}, ?)");
                         db_sql::BoundSql::new(
@@ -193,15 +147,45 @@ impl<M: Model> QueryBuilder<M> {
             }
         }
     }
+
+    /// [`build_array_expression`](Self::build_array_expression) on
+    /// PostgreSQL: a native array operator, each value bound as an element of
+    /// the column's array type.
+    fn build_postgres_array_expression(
+        &self,
+        column_sql: &str,
+        operator: ArrayOperator,
+        column: &str,
+        values: &[serde_json::Value],
+    ) -> SimpleExpr {
+        let column_type = self.column_type(column);
+        let json_elements = matches!(&column_type,
+            Some(crate::orm::ColumnType::Array(element)) if is_json_type(Some(element.as_ref())));
+        let (listed, null_allowed) = match operator {
+            ArrayOperator::ContainedBy if !json_elements => split_nulls(values),
+            _ => (values.iter().collect(), false),
+        };
+        let operands = db_sql::placeholders(DatabaseType::Postgres, listed.len());
+        let sql = match operator {
+            ArrayOperator::Contains => db_sql::postgres_array_contains(column_sql, &operands),
+            ArrayOperator::ContainedBy => {
+                db_sql::postgres_array_contained_by(column_sql, &operands, null_allowed)
+            }
+            ArrayOperator::Overlaps => db_sql::postgres_array_overlaps(column_sql, &operands),
+        };
+        self.build_custom_expression(
+            sql,
+            listed
+                .into_iter()
+                .map(|value| crate::internal::json_to_array_element(value, column_type.as_ref()))
+                .collect(),
+        )
+    }
 }
 
 /// The non-NULL values of a list, and whether it also held a NULL.
-fn split_nulls(values: &[serde_json::Value]) -> (Vec<serde_json::Value>, bool) {
-    let listed: Vec<serde_json::Value> = values
-        .iter()
-        .filter(|value| !value.is_null())
-        .cloned()
-        .collect();
+fn split_nulls(values: &[serde_json::Value]) -> (Vec<&serde_json::Value>, bool) {
+    let listed: Vec<&serde_json::Value> = values.iter().filter(|value| !value.is_null()).collect();
     let null_allowed = listed.len() < values.len();
     (listed, null_allowed)
 }
