@@ -16,7 +16,7 @@ pub struct CompiledModelRegistration {
     /// Physical column names used to resolve wildcard projections.
     pub column_names: fn() -> &'static [&'static str],
     /// Encryption metadata used by projections of a joined model.
-    pub encrypted_column: fn(&str) -> crate::Result<Option<crate::model::EncryptedColumn>>,
+    pub encrypted_column: fn(&str) -> Option<crate::model::EncryptedColumn>,
     /// The model's type for one of its columns, which binds a filter value on
     /// that column when another model's query joins the table.
     pub column_type: ColumnTypeOf,
@@ -56,16 +56,11 @@ pub(crate) fn registered_encrypted_column(
     schema: Option<&str>,
     table: &str,
     column: &str,
-) -> crate::Result<Option<crate::model::EncryptedColumn>> {
-    for model in inventory::iter::<CompiledModelRegistration> {
-        if (model.table_name)() == table
-            && (model.schema_name)() == schema
-            && let Some(source) = (model.encrypted_column)(column)?
-        {
-            return Ok(Some(source));
-        }
-    }
-    Ok(None)
+) -> Option<crate::model::EncryptedColumn> {
+    inventory::iter::<CompiledModelRegistration>
+        .into_iter()
+        .filter(|model| (model.table_name)() == table && (model.schema_name)() == schema)
+        .find_map(|model| (model.encrypted_column)(column))
 }
 
 pub(super) fn register_compiled_models_matching(pattern: &str) -> usize {

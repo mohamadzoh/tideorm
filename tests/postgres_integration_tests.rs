@@ -48,6 +48,9 @@ mod schema_script;
 #[path = "support/integration_parity.rs"]
 mod parity;
 
+#[path = "support/catalog_parity.rs"]
+mod catalog_parity;
+
 #[path = "support/review_backend.rs"]
 mod review_backend;
 

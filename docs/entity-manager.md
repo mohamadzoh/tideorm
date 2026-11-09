@@ -10,7 +10,7 @@ Create one per request or unit of work. Its identity map keeps every model it ha
 
 ```toml
 [dependencies]
-tideorm = { version = "0.16.2", features = ["postgres", "entity-manager"] }
+tideorm = { version = "0.17.0", features = ["postgres", "entity-manager"] }
 ```
 
 Use the backend feature you need (`postgres`, `mysql`, or `sqlite`) alongside `entity-manager`.
@@ -108,6 +108,14 @@ Managed entities expose:
 `merge(...)` attaches a detached instance into the current context. `detach(...)` keeps the in-memory value but removes it from future flushes. `clear()` detaches the whole context. Persisting or merging an entity the context was about to remove takes the removal back and writes it; merging one a `persist()` has not flushed keeps it an insert.
 
 When the context saves a row it also holds as a managed entity, through `entity_manager.save(..)` or a relation sync, the managed entity moves onto what was stored: the fields it has not changed take the stored values, the ones it changed keep its edits, so a later flush does not write the values it loaded back over the newer save. A relation copy of the row, loaded before, is not moved; reload it.
+
+Generic code names one bound for the models a manager handles, `ManagedModel`, which every model derives with this feature on:
+
+```rust
+fn track<M: ManagedModel>(entity_manager: &Arc<EntityManager>, model: M) -> Managed<M> {
+    entity_manager.persist(model)
+}
+```
 
 A managed entity keeps the primary key it was loaded or saved with: a flush refuses one whose key was changed, rather than write it over the row holding the new key. Detach it and persist a new entity instead.
 

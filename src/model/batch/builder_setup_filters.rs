@@ -65,29 +65,51 @@ impl<M: Model> BatchUpdateBuilder<M> {
 
     /// Assign a literal value to a column.
     ///
-    /// `None` writes SQL NULL; a JSON null value writes a JSON null document
-    /// when the destination is a JSON column.
-    /// The value is bound as a parameter. Setting the same column twice keeps
-    /// the last assignment.
-    /// Boolean columns require booleans; binary columns require arrays of
-    /// bytes in `0..=255`. Values assigned to `f32` fields must be within their
-    /// finite range. UUID, date, time and timestamp values must parse as their
-    /// destination type. Invalid values fail before any rows are changed.
-    /// Decimal values must parse and, on SQLite, remain within the model's
-    /// readable range after conversion to REAL.
+    /// A typed column takes the values a filter on it takes (see
+    /// [`ColumnValue`](crate::columns::ColumnValue)), so
+    /// `.set(User::ACTIVE, "yes")` does not compile; a column named by a
+    /// string takes any value, and [`set_value`](Self::set_value) any
+    /// [`UpdateValue`] for either.
+    ///
+    /// The value is bound as the column's type, as a filter value is: a
+    /// `None` of any type writes SQL NULL, and a `serde_json::Value` or text
+    /// is read as the column's type (a UUID or timestamp written as text).
+    /// A JSON column takes the value as a document, so text stays a JSON
+    /// string and the JSON `null` writes the `null` document.
+    /// Setting the same column twice keeps the last assignment.
+    /// Boolean, UUID and binary columns require a value of their type, and
+    /// `f32` fields one within their finite range. Date, time, timestamp and
+    /// decimal values must parse as their destination type; on SQLite a
+    /// decimal must stay within the model's readable range after conversion
+    /// to REAL, and an integer within the field's own range. A NaN or
+    /// infinite float is refused. Invalid values fail before any rows change.
     #[must_use]
-    pub fn set(self, field: impl IntoColumnName, value: impl serde::Serialize) -> Self {
-        match crate::query::checked_assignment_value(value) {
-            Ok((_, true)) => self.assign(field, UpdateValue::SqlNull),
-            Ok((value, false)) => self.assign(field, UpdateValue::Value(value)),
-            Err(reason) => self.invalidate(format!("set(): {}", reason)),
-        }
+    pub fn set<C, V>(self, field: C, value: V) -> Self
+    where
+        C: crate::columns::ColumnValue<V>,
+    {
+        self.assign_checked("set", field, C::convert_value(value), UpdateValue::Value)
     }
 
     /// Keep the first reason the update cannot run.
     fn invalidate(mut self, reason: String) -> Self {
         self.invalid_reason.get_or_insert(reason);
         self
+    }
+
+    /// Assign what `update` builds from `value`, refusing a NaN or infinite
+    /// float, which no column can hold.
+    fn assign_checked(
+        self,
+        setter: &str,
+        field: impl IntoColumnName,
+        value: impl Into<crate::DbValue>,
+        update: impl FnOnce(crate::DbValue) -> UpdateValue,
+    ) -> Self {
+        match crate::query::comparable_value(value) {
+            Ok(value) => self.assign(field, update(value)),
+            Err(reason) => self.invalidate(format!("{setter}(): {reason}")),
+        }
     }
 
     /// Assign a raw SQL expression, spliced into the `SET` clause verbatim.
@@ -102,6 +124,33 @@ impl<M: Model> BatchUpdateBuilder<M> {
     #[must_use]
     pub fn set_trusted_raw(self, field: impl IntoColumnName, expression: &str) -> Self {
         self.assign(field, UpdateValue::UnsafeRaw(expression.to_string()))
+    }
+
+    /// Assign a prebuilt [`UpdateValue`], for an assignment chosen at run
+    /// time; each named setter builds one variant.
+    ///
+    /// The value goes through the same checks as its setter's. An
+    /// [`UpdateValue::UnsafeRaw`] is spliced in verbatim, as with
+    /// [`set_trusted_raw`](Self::set_trusted_raw).
+    ///
+    /// ```ignore
+    /// let change = if reset { UpdateValue::Value(0.into()) } else { UpdateValue::Increment(1) };
+    /// Counter::update_all().set_value(Counter::HITS, change).where_eq(Counter::ID, 1);
+    /// ```
+    #[must_use]
+    pub fn set_value(self, field: impl IntoColumnName, value: UpdateValue) -> Self {
+        match value {
+            UpdateValue::Value(value) => {
+                self.assign_checked("set", field, value, UpdateValue::Value)
+            }
+            UpdateValue::ArrayAppend(value) => self.array_append(field, value),
+            UpdateValue::ArrayRemove(value) => self.array_remove(field, value),
+            UpdateValue::JsonSet(path, value) => self.json_set(field, &path, value),
+            UpdateValue::Coalesce(value) => {
+                self.assign_checked("coalesce", field, value, UpdateValue::Coalesce)
+            }
+            value => self.assign(field, value),
+        }
     }
 
     /// Add `by` to the column's current value in the database.
@@ -147,13 +196,16 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// Append a value to an array or JSON array column.
     ///
     /// Renders to each backend's own function, so the column has to be a real
-    /// array type on PostgreSQL and a JSON array elsewhere.
+    /// array type on PostgreSQL and a JSON array elsewhere. The element is
+    /// bound as the array's element type on PostgreSQL and as its JSON
+    /// document elsewhere, where a `None` appends `null`.
     #[must_use]
-    pub fn array_append(self, field: impl IntoColumnName, value: impl serde::Serialize) -> Self {
-        match crate::query::checked_assignment_value(value) {
-            Ok((value, _)) => self.assign(field, UpdateValue::ArrayAppend(value)),
-            Err(reason) => self.invalidate(format!("array_append(): {}", reason)),
-        }
+    pub fn array_append(
+        self,
+        field: impl IntoColumnName,
+        value: impl Into<crate::DbValue>,
+    ) -> Self {
+        self.assign_checked("array_append", field, value, UpdateValue::ArrayAppend)
     }
 
     /// Remove a value from an array or JSON array column.
@@ -161,11 +213,12 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// Every backend drops all matching elements. Non-array JSON documents and
     /// SQL NULL stay unchanged. Non-finite floats are rejected.
     #[must_use]
-    pub fn array_remove(self, field: impl IntoColumnName, value: impl serde::Serialize) -> Self {
-        match crate::query::checked_assignment_value(value) {
-            Ok((value, _)) => self.assign(field, UpdateValue::ArrayRemove(value)),
-            Err(reason) => self.invalidate(format!("array_remove(): {}", reason)),
-        }
+    pub fn array_remove(
+        self,
+        field: impl IntoColumnName,
+        value: impl Into<crate::DbValue>,
+    ) -> Self {
+        self.assign_checked("array_remove", field, value, UpdateValue::ArrayRemove)
     }
 
     /// Set one path inside a JSON column, leaving the rest of the document intact.
@@ -174,32 +227,37 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// `[index]` steps, as `where_json_path_exists` takes it; wildcards are
     /// rejected when the statement is built. Prefer this over reading the
     /// document into Rust and writing it back, which would clobber concurrent
-    /// edits to other keys.
+    /// edits to other keys. The value is written as its JSON document, so a
+    /// `None` sets `null`.
     #[must_use]
     pub fn json_set(
         self,
         field: impl IntoColumnName,
         path: &str,
-        value: impl serde::Serialize,
+        value: impl Into<crate::DbValue>,
     ) -> Self {
-        match crate::query::checked_assignment_value(value) {
-            Ok((value, _)) => self.assign(field, UpdateValue::JsonSet(path.to_string(), value)),
-            Err(reason) => self.invalidate(format!("json_set(): {}", reason)),
-        }
+        self.assign_checked("json_set", field, value, |value| {
+            UpdateValue::JsonSet(path.to_string(), value)
+        })
     }
 
     /// Fill the column with `default` only where it is currently `NULL`.
     ///
     /// This is the backfill setter: rows that already hold a value keep it, so
     /// the update is safe to re-run.
-    /// Defaults follow the same type checks as [`set`](Self::set).
+    /// Defaults are typed, bound and checked as [`set`](Self::set) types and
+    /// binds its value.
     #[must_use]
-    pub fn coalesce(self, field: impl IntoColumnName, default: impl serde::Serialize) -> Self {
-        match crate::query::checked_assignment_value(default) {
-            Ok((_, true)) => self.assign(field, UpdateValue::CoalesceSqlNull),
-            Ok((default, false)) => self.assign(field, UpdateValue::Coalesce(default)),
-            Err(reason) => self.invalidate(format!("coalesce(): {}", reason)),
-        }
+    pub fn coalesce<C, V>(self, field: C, default: V) -> Self
+    where
+        C: crate::columns::ColumnValue<V>,
+    {
+        self.assign_checked(
+            "coalesce",
+            field,
+            C::convert_value(default),
+            UpdateValue::Coalesce,
+        )
     }
 
     /// Cap how many rows the update may touch.

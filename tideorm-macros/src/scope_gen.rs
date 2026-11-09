@@ -16,18 +16,22 @@ use syn::{
 /// types, so the names are listed here; a unit test compares the list with
 /// TideORM's source.
 pub(crate) const QUERY_BUILDER_METHODS: &[&str] = &[
+    "add_select",
     "aggregates",
     "apply",
     "avg",
     "begin_or",
     "build_sql_preview",
+    "build_sql_preview_for",
     "cache",
     "cache_with_key",
     "chunk",
+    "chunks",
     "consolidate",
     "count",
     "count_distinct",
     "debug",
+    "debug_for",
     "delete",
     "delete_all",
     "dense_rank",
@@ -48,10 +52,15 @@ pub(crate) const QUERY_BUILDER_METHODS: &[&str] = &[
     "has_no_related_at_all",
     "has_related",
     "having",
+    "having_raw",
+    "having_raw_with",
     "inner_join",
     "inner_join_as",
+    "join",
+    "join_as",
     "lag",
     "latest",
+    "latest_by",
     "lead",
     "left_join",
     "left_join_as",
@@ -63,12 +72,13 @@ pub(crate) const QUERY_BUILDER_METHODS: &[&str] = &[
     "ntile",
     "offset",
     "oldest",
+    "oldest_by",
     "only_trashed",
-    "or_where",
     "or_where_array_contained_by",
     "or_where_array_contains",
     "or_where_array_overlaps",
     "or_where_between",
+    "or_where_col",
     "or_where_column_eq",
     "or_where_column_gt",
     "or_where_column_gte",
@@ -90,6 +100,7 @@ pub(crate) const QUERY_BUILDER_METHODS: &[&str] = &[
     "or_where_like",
     "or_where_lt",
     "or_where_lte",
+    "or_where_ne",
     "or_where_not",
     "or_where_not_between",
     "or_where_not_in",
@@ -121,16 +132,19 @@ pub(crate) const QUERY_BUILDER_METHODS: &[&str] = &[
     "soft_delete",
     "sort",
     "sum",
-    "to_subquery_sql",
     "union",
     "union_all",
     "union_all_raw",
+    "union_all_raw_with",
     "union_raw",
+    "union_raw_with",
     "update_all",
     "validate",
     "value",
     "when",
     "when_some",
+    "where_all",
+    "where_any",
     "where_array_contained_by",
     "where_array_contains",
     "where_array_overlaps",
@@ -161,6 +175,7 @@ pub(crate) const QUERY_BUILDER_METHODS: &[&str] = &[
     "where_like",
     "where_lt",
     "where_lte",
+    "where_ne",
     "where_not",
     "where_not_between",
     "where_not_exists",
@@ -177,6 +192,7 @@ pub(crate) const QUERY_BUILDER_METHODS: &[&str] = &[
     "with_cte",
     "with_many",
     "with_query",
+    "with_query_columns",
     "with_recursive_cte",
     "with_trashed",
 ];
@@ -205,14 +221,11 @@ pub(crate) fn generate_query_scope_support(item_impl: ItemImpl) -> syn::Result<T
     let mut extension_methods = Vec::new();
 
     for item in &item_impl.items {
-        let method = match item {
-            ImplItem::Fn(method) => method,
-            _ => {
-                return Err(syn::Error::new_spanned(
-                    item,
-                    "#[tideorm::scopes] impl blocks may only contain scope methods",
-                ));
-            }
+        let ImplItem::Fn(method) = item else {
+            return Err(syn::Error::new_spanned(
+                item,
+                "#[tideorm::scopes] impl blocks may only contain scope methods",
+            ));
         };
 
         let generated = generate_scope_method(method, model_ty)?;
@@ -336,14 +349,14 @@ fn generate_scope_method(
             continue;
         };
 
-        let arg_ident = match pat_type.pat.as_ref() {
-            Pat::Ident(PatIdent { ident, .. }) => ident,
-            _ => {
-                return Err(syn::Error::new_spanned(
-                    &pat_type.pat,
-                    "scope parameters after the query argument must use simple identifiers",
-                ));
-            }
+        let Pat::Ident(PatIdent {
+            ident: arg_ident, ..
+        }) = pat_type.pat.as_ref()
+        else {
+            return Err(syn::Error::new_spanned(
+                &pat_type.pat,
+                "scope parameters after the query argument must use simple identifiers",
+            ));
         };
 
         // The trait method has no body, where a `mut` binding is an error, and

@@ -148,7 +148,7 @@ fn binary_filters_bind_bytes_and_preserve_invalid_input_for_database_errors() {
     for ty in [
         ColumnType::Blob,
         ColumnType::Binary(2),
-        ColumnType::VarBinary(crate::orm::sea_query::StringLen::N(2)),
+        ColumnType::VarBinary(crate::orm::sql_builder::StringLen::N(2)),
     ] {
         assert_eq!(
             json_to_column_value(&json!([1, 2]), Some(&ty)),
@@ -223,11 +223,127 @@ fn native_array_filters_bind_the_same_type_as_assignments() {
             Value::from(vec![json!("a"), json!(1), json!(true)]),
         ),
     ] {
-        let column = ColumnType::Array(crate::orm::sea_query::RcOrArc::new(element));
+        let column = ColumnType::Array(std::sync::Arc::new(element));
         assert_eq!(json_to_column_value(&value, Some(&column)), expected);
+    }
+}
+
+#[test]
+fn array_items_bind_as_the_element_type_at_its_width() {
+    let array = |element| ColumnType::Array(std::sync::Arc::new(element));
+    let id = uuid::Uuid::new_v4();
+    let day = NaiveDate::from_ymd_opt(2024, 2, 29).unwrap();
+    for (element, value, expected) in [
+        (
+            ColumnType::SmallInteger,
+            json!([1, 2]),
+            Value::from(vec![1i16, 2]),
+        ),
+        (
+            ColumnType::Float,
+            json!([1.5, 2]),
+            Value::from(vec![1.5f32, 2.0]),
+        ),
+        (
+            ColumnType::Double,
+            json!([1, 2.5]),
+            Value::from(vec![1.0f64, 2.5]),
+        ),
+        (ColumnType::Uuid, json!([id]), Value::from(vec![id])),
+        (
+            ColumnType::Decimal(None),
+            json!(["12.50"]),
+            Value::from(vec!["12.50".parse::<Decimal>().unwrap()]),
+        ),
+        (
+            ColumnType::Date,
+            json!(["2024-02-29"]),
+            Value::from(vec![day]),
+        ),
+        (
+            ColumnType::TimestampWithTimeZone,
+            json!(["2024-02-29 00:00:00+00:00"]),
+            Value::from(vec![day.and_hms_opt(0, 0, 0).unwrap().and_utc()]),
+        ),
+    ] {
         assert_eq!(
-            json_to_column_value(&json!([]), Some(&column)),
-            json_to_assignment_value(&json!([]), Some(&column))
+            json_to_column_value(&value, Some(&array(element.clone()))),
+            expected,
+            "{element:?}"
+        );
+    }
+
+    assert_eq!(
+        json_to_column_value(&json!(null), Some(&array(ColumnType::Uuid))),
+        Value::Array(ArrayType::Uuid, None)
+    );
+    // An item the element type cannot hold leaves the array to the generic
+    // binding, so the database reports the mismatch.
+    assert_eq!(
+        json_to_column_value(&json!([70000]), Some(&array(ColumnType::SmallInteger))),
+        json_to_db_value(&json!([70000]))
+    );
+}
+
+#[test]
+fn an_array_of_another_element_type_is_read_as_the_columns() {
+    let small = ColumnType::Array(std::sync::Arc::new(ColumnType::SmallInteger));
+    assert_eq!(
+        column_value(&Value::from(vec![1i32, 2]), Some(&small)),
+        Value::from(vec![1i16, 2])
+    );
+    let held = Value::from(vec![1i16, 2]);
+    assert_eq!(column_value(&held, Some(&small)), held);
+}
+
+/// A JSON `null` item is the element type's NULL, so the array keeps the
+/// column's array type instead of binding as text.
+#[test]
+fn null_array_items_are_nulls_of_the_element_type() {
+    let array = |element| ColumnType::Array(std::sync::Arc::new(element));
+    let id = uuid::Uuid::new_v4();
+    for (element, value, array_type, items) in [
+        (
+            ColumnType::SmallInteger,
+            json!([1, null]),
+            ArrayType::SmallInt,
+            vec![Value::SmallInt(Some(1)), Value::SmallInt(None)],
+        ),
+        (
+            ColumnType::Integer,
+            json!([null]),
+            ArrayType::Int,
+            vec![Value::Int(None)],
+        ),
+        (
+            ColumnType::BigUnsigned,
+            json!([null, 7]),
+            ArrayType::BigUnsigned,
+            vec![Value::BigUnsigned(None), Value::BigUnsigned(Some(7))],
+        ),
+        (
+            ColumnType::Float,
+            json!([1.5, null]),
+            ArrayType::Float,
+            vec![Value::Float(Some(1.5)), Value::Float(None)],
+        ),
+        (
+            ColumnType::Uuid,
+            json!([id, null]),
+            ArrayType::Uuid,
+            vec![Value::from(id), Value::from(None::<uuid::Uuid>)],
+        ),
+        (
+            ColumnType::Text,
+            json!([null, "a"]),
+            ArrayType::String,
+            vec![Value::String(None), Value::from("a")],
+        ),
+    ] {
+        assert_eq!(
+            json_to_column_value(&value, Some(&array(element))),
+            Value::Array(array_type, Some(Box::new(items))),
+            "{value}"
         );
     }
 }

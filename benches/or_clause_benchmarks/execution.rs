@@ -13,7 +13,7 @@ pub(super) fn bench_or_clause_query_execution(c: &mut Criterion) {
             rt.block_on(async {
                 let _results = OrBenchUser::query()
                     .where_eq("active", true)
-                    .or_where(|q| {
+                    .where_any(|q| {
                         q.where_eq("role", "admin")
                             .where_eq("role", "moderator")
                             .where_eq("role", "editor")
@@ -32,7 +32,7 @@ pub(super) fn bench_or_clause_query_execution(c: &mut Criterion) {
             rt.block_on(async {
                 let _results = OrBenchUser::query()
                     .where_eq("active", true)
-                    .or_where(|q| {
+                    .where_any(|q| {
                         q.where_eq("status", "active")
                             .nested_and(|inner| inner.where_eq("role", "admin").where_gt("age", 30))
                     })
@@ -48,7 +48,7 @@ pub(super) fn bench_or_clause_query_execution(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 let _count = OrBenchUser::query()
-                    .or_where(|q| q.where_eq("status", "active").where_eq("status", "pending"))
+                    .where_any(|q| q.where_eq("status", "active").where_eq("status", "pending"))
                     .count()
                     .await
                     .unwrap();
@@ -94,7 +94,7 @@ pub(super) fn bench_or_clause_scaling(c: &mut Criterion) {
                 b.iter(|| {
                     rt.block_on(async {
                         let _results = OrBenchUser::query()
-                            .or_where(|q| {
+                            .where_any(|q| {
                                 q.where_eq("status", "active").where_eq("status", "pending")
                             })
                             .where_eq("active", true)
@@ -123,7 +123,7 @@ pub(super) fn bench_or_conditions_count(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 let _results = OrBenchUser::query()
-                    .or_where(|q| q.where_eq("role", "admin").where_eq("role", "moderator"))
+                    .where_any(|q| q.where_eq("role", "admin").where_eq("role", "moderator"))
                     .get()
                     .await
                     .unwrap();
@@ -136,7 +136,7 @@ pub(super) fn bench_or_conditions_count(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 let _results = OrBenchUser::query()
-                    .or_where(|q| {
+                    .where_any(|q| {
                         q.where_eq("role", "admin")
                             .where_eq("role", "moderator")
                             .where_eq("role", "editor")
@@ -155,7 +155,7 @@ pub(super) fn bench_or_conditions_count(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 let _results = OrBenchUser::query()
-                    .or_where(|q| {
+                    .where_any(|q| {
                         q.where_eq("role", "admin")
                             .where_eq("role", "moderator")
                             .where_eq("status", "active")

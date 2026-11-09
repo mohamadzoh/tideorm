@@ -1,12 +1,19 @@
-use std::collections::HashSet;
-
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{format_ident, quote};
-use syn::Type;
+use quote::{format_ident, quote, quote_spanned};
+use syn::spanned::Spanned;
 
 use crate::context::BuildContext;
 use crate::meta_support::has_managed_timestamp_columns;
-use crate::parse::{ModelField, RelationKind, is_optional_type, type_string, variant_ident};
+use crate::orm::derives::{expand_column, expand_primary_key};
+use crate::parse::{ModelField, RelationKind, type_string};
+
+mod columns;
+mod engine;
+mod relations;
+
+use columns::{generate_columns_impl, generate_sync_impl};
+use engine::{engine_model_parts, nested_visibility};
+use relations::{build_entity_manager_meta, build_relation_checks, build_relation_payload_filters};
 
 pub(crate) fn generate_entity_support(ctx: &BuildContext) -> syn::Result<TokenStream2> {
     // `ModelMeta`'s checks run first: a model failing one there and one in the
@@ -15,7 +22,17 @@ pub(crate) fn generate_entity_support(ctx: &BuildContext) -> syn::Result<TokenSt
     let entity_module = generate_entity_module(ctx)?;
     let sync_impl = generate_sync_impl(ctx);
     let columns_impl = generate_columns_impl(ctx);
+    // Item types are checked before bodies and in this order, so a field type
+    // no column can hold is reported as that, ahead of the entity's own errors.
+    let column_type_checks = ctx.db_fields.iter().map(|field| {
+        let ty = field.stored_type(ctx.is_encrypted(field));
+        quote_spanned! {field.ty.span()=>
+            const _: ::core::marker::PhantomData<::tideorm::model::__ColumnType<#ty>> =
+                ::core::marker::PhantomData;
+        }
+    });
     Ok(quote! {
+        #(#column_type_checks)*
         #entity_module
         #model_meta_impl
         #sync_impl
@@ -23,25 +40,23 @@ pub(crate) fn generate_entity_support(ctx: &BuildContext) -> syn::Result<TokenSt
     })
 }
 
-/// The hidden module holding the SeaORM entity the typed CRUD paths run on.
+/// The hidden module holding the engine entity the typed CRUD paths run on.
 fn generate_entity_module(ctx: &BuildContext) -> syn::Result<TokenStream2> {
     let internal_entity_mod = &ctx.internal_entity_mod;
-    let table_name = &ctx.table_name;
-    // Declared on both sides: the engine's entity qualifies the typed CRUD
-    // statements, `ModelMeta` the ones TideORM renders itself.
-    let entity_schema_name = ctx
-        .schema_name
-        .as_ref()
-        .map(|schema| quote!(fn schema_name(&self) -> Option<&str> { Some(#schema) }));
     let pk_type = &ctx.pk_type;
-    let pk_column_names = &ctx.pk_column_names;
-    let pk_column_variants = &ctx.pk_column_variants;
     let pk_auto_increment = ctx.pk_auto_increment;
-    let column_names = &ctx.column_names;
     let column_variants = &ctx.column_variants;
     let column_types = &ctx.column_types;
-    let sea_orm_field_defs = ctx.db_fields.iter().map(sea_orm_field_def);
-    let entity_relations: Vec<&ModelField> = ctx
+    let column_impls = expand_column(
+        &format_ident!("Column"),
+        &ctx.column_variants,
+        &ctx.column_names,
+    );
+    let primary_key_impls = expand_primary_key(&ctx.pk_column_variants, &ctx.pk_column_names);
+    let pk_column_variants = &ctx.pk_column_variants;
+    let (active_model, engine_impls) = engine_model_parts(ctx);
+    let vis = nested_visibility(&ctx.vis);
+    let relation_checks = ctx
         .relation_fields
         .iter()
         .filter(|field| {
@@ -49,72 +64,39 @@ fn generate_entity_module(ctx: &BuildContext) -> syn::Result<TokenStream2> {
                 .relation_kind()
                 .is_some_and(RelationKind::is_entity_relation)
         })
-        .collect();
-    let relation_variants = entity_relations
-        .iter()
-        .map(|field| variant_ident(field.ident()));
-    let relation_defs = entity_relations
-        .iter()
-        .map(|field| build_relation_def(ctx, field))
+        .map(|field| build_relation_checks(ctx, field))
         .collect::<syn::Result<Vec<_>>>()?;
-    let related_impls = build_related_impls(&entity_relations)?;
-    let relation_def_body = if relation_defs.is_empty() {
-        quote!(match *self {})
-    } else {
-        quote!(match self { #(#relation_defs),* })
-    };
 
     Ok(quote! {
         #[doc(hidden)]
-        #[allow(non_snake_case, clippy::derivable_impls, clippy::enum_variant_names, clippy::redundant_closure)]
+        #[allow(non_snake_case, clippy::derivable_impls, clippy::enum_variant_names)]
         mod #internal_entity_mod {
             use super::*;
-            // The engine's derives write a bare `Result<_, DbErr>`, which the glob
-            // above would resolve to `tideorm::Result` in a module that imports it.
-            use ::core::result::Result;
-            use ::tideorm::orm as sea_orm;
             // Deliberately NOT `use ::tideorm::orm::entity::prelude::*;`. That glob
             // and the `use super::*;` above both bring `Json` and `DateTime` into
             // scope, so any model field spelled with one of those names became an
             // ambiguous-glob error (rust-lang #114095, a future hard error) even
             // though the code was correct. The user's `super::*` stays the only glob.
             use ::tideorm::orm::entity::prelude::{
-                ActiveModelBehavior, ColumnDef, ColumnTrait, ColumnTypeTrait, DeriveColumn,
-                DerivePrimaryKey, EntityName, EntityTrait, EnumIter, PrimaryKeyTrait,
-                RelationDef, RelationTrait,
+                ColumnDef, ColumnTrait, ColumnTypeTrait, PrimaryKeyTrait,
             };
-            use ::tideorm::orm::{DeriveActiveModel, DeriveEntity, DeriveModel};
 
-            #[derive(Copy, Clone, Default, Debug, DeriveEntity)]
-            pub struct Entity;
+            #[derive(Copy, Clone, Default, Debug)]
+            #vis struct Entity;
 
-            impl EntityName for Entity {
-                #entity_schema_name
-                fn table_name(&self) -> &'static str {
-                    #table_name
-                }
+            #[derive(Copy, Clone, Debug)]
+            #vis enum Column {
+                #(#column_variants),*
             }
 
-            #[derive(Clone, Debug, PartialEq, DeriveModel, DeriveActiveModel)]
-            pub struct Model {
-                #(#sea_orm_field_defs),*
+            #[derive(Copy, Clone, Debug)]
+            #vis enum PrimaryKey {
+                #(#pk_column_variants),*
             }
 
-            #[derive(Copy, Clone, Debug, EnumIter, DeriveColumn)]
-            pub enum Column {
-                #(
-                    #[sea_orm(column_name = #column_names)]
-                    #column_variants
-                ),*
-            }
+            #column_impls
 
-            #[derive(Copy, Clone, Debug, EnumIter, DerivePrimaryKey)]
-            pub enum PrimaryKey {
-                #(
-                    #[sea_orm(column_name = #pk_column_names)]
-                    #pk_column_variants
-                ),*
-            }
+            #primary_key_impls
 
             impl PrimaryKeyTrait for PrimaryKey {
                 type ValueType = #pk_type;
@@ -130,21 +112,19 @@ fn generate_entity_module(ctx: &BuildContext) -> syn::Result<TokenStream2> {
                 }
             }
 
-            #[derive(Copy, Clone, Debug, EnumIter)]
-            pub enum Relation {
-                #(#relation_variants),*
-            }
+            #(#relation_checks)*
 
-            impl RelationTrait for Relation {
-                fn def(&self) -> RelationDef {
-                    #relation_def_body
-                }
-            }
-
-            #(#related_impls)*
-
-            impl ActiveModelBehavior for ActiveModel {}
+            #active_model
         }
+
+        // The impls naming the model sit beside it: one declared in a
+        // function body cannot be named from a module inside that body.
+        // Their locals are named after its fields.
+        #[allow(non_snake_case)]
+        const _: () = {
+            use #internal_entity_mod::{ActiveModel, Column, Entity, PrimaryKey};
+            #engine_impls
+        };
     })
 }
 
@@ -158,10 +138,11 @@ fn generate_model_meta_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
     let pk_type = &ctx.pk_type;
     let pk_column_names = &ctx.pk_column_names;
     let column_names = &ctx.column_names;
+    // An encrypted integer is stored as its payload's text.
     let integer_bounds = ctx
         .db_fields
         .iter()
-        .filter(|field| field.is_integer())
+        .filter(|field| field.is_integer() && !ctx.is_encrypted(field))
         .map(|field| {
             let name = field.column_name();
             let ty = field.validation_base_type();
@@ -201,8 +182,11 @@ fn generate_model_meta_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
         }
     });
     let translatable_fields = &ctx.translatable_fields;
-    let encrypted_fields = &ctx.encrypted_fields;
-    let encrypted_column_names = &ctx.encrypted_column_names;
+    let encrypted: Vec<_> = ctx
+        .db_fields
+        .iter()
+        .filter(|field| ctx.is_encrypted(field))
+        .collect();
     let has_one_files = &ctx.has_one_files;
     let has_many_files = &ctx.has_many_files;
     let searchable_fields = &ctx.searchable_fields;
@@ -266,10 +250,20 @@ fn generate_model_meta_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
             }
         )
     });
-    let encrypted_fields_impl = (!encrypted_fields.is_empty()).then(|| {
+    let encrypted_fields_impl = (!encrypted.is_empty()).then(|| {
+        let names: Vec<_> = encrypted.iter().map(|field| field.name()).collect();
+        let columns = encrypted.iter().map(|field| field.column_name());
+        let types = encrypted.iter().map(|field| &field.ty);
         quote! {
-            fn encrypted_fields() -> Vec<&'static str> { vec![#(#encrypted_fields),*] }
-            fn encrypted_column_names() -> Vec<&'static str> { vec![#(#encrypted_column_names),*] }
+            fn encrypted_fields() -> &'static [(&'static str, &'static str)] {
+                &[#((#names, #columns)),*]
+            }
+            fn __encrypted_field_holds(field: &str, document: &::tideorm::serde_json::Value) -> bool {
+                match field {
+                    #(#names => <#types as ::tideorm::serde::Deserialize>::deserialize(document).is_ok(),)*
+                    _ => false,
+                }
+            }
         }
     });
     let attached_files_impl =
@@ -294,15 +288,6 @@ fn generate_model_meta_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
             }
         }
     });
-    let driver_limited_fields = ctx.driver_limited_fields();
-    let driver_limited_fields_impl = (!driver_limited_fields.is_empty()).then(|| {
-        let (fields, types): (Vec<_>, Vec<_>) = driver_limited_fields.into_iter().unzip();
-        quote! {
-            fn driver_limited_fields() -> &'static [(&'static str, &'static str)] {
-                &[#((#fields, #types)),*]
-            }
-        }
-    });
     let serde_round_trips_impl = (!ctx.serde_round_trips).then(|| {
         quote! {
             fn __serde_round_trips() -> bool {
@@ -323,6 +308,7 @@ fn generate_model_meta_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
     });
     let primary_key_display_impl = build_primary_key_display_impl(ctx);
     let primary_key_is_new_impl = build_primary_key_is_new_impl(ctx);
+    let entity_manager_meta_impl = build_entity_manager_meta(ctx);
 
     Ok(quote! {
         impl ::tideorm::model::ModelMeta for #struct_name {
@@ -356,13 +342,13 @@ fn generate_model_meta_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
             #translatable_fields_impl
             #translation_payload_impl
             #encrypted_fields_impl
-            #driver_limited_fields_impl
             #allowed_languages_impl
             #fallback_language_impl
             #attached_files_impl
             #soft_delete_impl
             #has_timestamps_impl
             #indexes_impl
+            #entity_manager_meta_impl
         }
     })
 }
@@ -450,18 +436,6 @@ fn build_morph_owner_key_impl(ctx: &BuildContext) -> syn::Result<Option<TokenStr
     }))
 }
 
-fn sea_orm_field_def(field: &ModelField) -> TokenStream2 {
-    let ident = field.ident();
-    let ty = &field.ty;
-    let column_name = field.column_name();
-    let primary_key = field.primary_key.then(|| quote!(primary_key,));
-    let auto_increment = field.auto_increment.then(|| quote!(auto_increment,));
-    // SeaORM's derives would name the `Column` variant themselves, splitting
-    // digits their own way (`s3key` is `S3key` to them, `S3Key` here).
-    let enum_name = variant_ident(ident).to_string();
-    quote!(#[sea_orm(#primary_key #auto_increment column_name = #column_name, enum_name = #enum_name)] pub #ident: #ty)
-}
-
 fn build_primary_key_display_impl(ctx: &BuildContext) -> TokenStream2 {
     let pk_column_names = &ctx.pk_column_names;
     let (bind, components) = ctx.primary_key_components();
@@ -500,338 +474,5 @@ fn build_primary_key_is_new_impl(ctx: &BuildContext) -> TokenStream2 {
         // partial key routes to `update()` and quietly affects zero rows. ORing routes it
         // to `create()`, where a real collision surfaces loudly as a duplicate-key error.
         false #(|| ::tideorm::model::__is_default(#components))*
-    }
-}
-
-/// Per-relation hidden-attribute filters for `ModelMeta::relation_payload_filters`.
-///
-/// An eager-loaded relation payload is untagged JSON by the time `to_json` sees it,
-/// so the only way it can be filtered by the *target* model's hidden list is for the
-/// derive — which does know the target type — to hand over a function pointer to it.
-///
-/// `MorphTo` is skipped: its generic parameter carries no `Model` bound because the
-/// target is chosen at runtime, so there is no single type to capture. Those payloads
-/// keep falling back to the owning model's hidden list.
-fn build_relation_payload_filters(ctx: &BuildContext) -> Vec<TokenStream2> {
-    ctx.relation_fields
-        .iter()
-        .filter(|field| field.relation_kind() != Some(RelationKind::MorphTo))
-        .filter_map(|field| {
-            let target = field.related_types().into_iter().next()?;
-            let key = ctx.serialized_key(field);
-            Some(quote! {
-                (
-                    #key,
-                    <#target as ::tideorm::model::ModelMeta>::__strip_hidden_payload
-                        as ::tideorm::model::RelationPayloadFilter
-                )
-            })
-        })
-        .collect()
-}
-
-fn missing_related_type(field: &ModelField) -> syn::Error {
-    syn::Error::new_spanned(
-        &field.ty,
-        "relation field must specify a related model type",
-    )
-}
-
-fn missing_pivot_type(field: &ModelField) -> syn::Error {
-    syn::Error::new_spanned(
-        &field.ty,
-        "has_many_through relations must specify both related and pivot model types",
-    )
-}
-
-/// The `RelationTrait::def` arm for one entity relation: the join from this model
-/// to the related model, or to the pivot for `HasManyThrough`.
-fn build_relation_def(ctx: &BuildContext, field: &ModelField) -> syn::Result<TokenStream2> {
-    let ident = field.ident();
-    let name = field.name();
-    let related_types = field.related_types();
-    let related_ty = related_types
-        .first()
-        .ok_or_else(|| missing_related_type(field))?;
-    let foreign_key = field
-        .foreign_key
-        .as_deref()
-        .expect("validated relation foreign_key");
-
-    let (target, local_ident, remote_key, relation_type, error) = match field.relation_kind() {
-        Some(RelationKind::HasManyThrough) => (
-            related_types
-                .get(1)
-                .ok_or_else(|| missing_pivot_type(field))?,
-            ctx.relation_local_ident(field)?,
-            foreign_key,
-            quote!(HasMany),
-            format!(
-                "many-to-many relation '{}' references an unknown pivot foreign key '{}'",
-                name, foreign_key
-            ),
-        ),
-        Some(RelationKind::BelongsTo) => {
-            let owner_key = field.owner_key.as_deref().unwrap_or("id");
-            (
-                related_ty,
-                ctx.resolve_required_db_field_ident(foreign_key, ident)?,
-                owner_key,
-                quote!(HasOne),
-                remote_column_error(&name, owner_key),
-            )
-        }
-        kind => (
-            related_ty,
-            ctx.relation_local_ident(field)?,
-            foreign_key,
-            if kind == Some(RelationKind::HasMany) {
-                quote!(HasMany)
-            } else {
-                quote!(HasOne)
-            },
-            remote_column_error(&name, foreign_key),
-        ),
-    };
-
-    let variant = variant_ident(ident);
-    let local_column = variant_ident(&local_ident);
-    let remote_assert = compile_time_column_assert(target, remote_key, &error);
-    let target_entity = related_entity_value(target);
-    Ok(quote! {
-        Self::#variant => {
-            #remote_assert
-            let mut relation: RelationDef = Entity::belongs_to(#target_entity)
-                .from(Column::#local_column)
-                .to(<#target as ::tideorm::internal::InternalModel>::column_from_str(#remote_key)
-                    .unwrap_or_else(|| unreachable!(#error)))
-                .into();
-            relation.rel_type = ::tideorm::orm::RelationType::#relation_type;
-            relation
-        }
-    })
-}
-
-fn remote_column_error(relation: &str, column: &str) -> String {
-    format!(
-        "relation '{}' references an unknown remote column '{}'",
-        relation, column
-    )
-}
-
-fn related_entity_value(ty: &Type) -> TokenStream2 {
-    quote!(<<#ty as ::tideorm::internal::InternalModel>::Entity as Default>::default())
-}
-
-/// `Related` impls, one per related entity.
-///
-/// `to()` and `via()` return the `RelationTrait::def` arm — as SeaORM's own
-/// `DeriveRelated` does — so each relation's columns are resolved and checked in
-/// exactly one place. Only `HasManyThrough::to()` builds a join of its own, from
-/// the pivot to the related model, which no `def` arm describes.
-///
-/// Rust allows one `Related<X>` impl per entity pair, so a second relation to
-/// the same model (an `author` and an `editor`, both `BelongsTo<User>`) gets
-/// none. TideORM reads no relation through `Related`: every `with(..)` and
-/// `load()` goes by the field's own keys, so both relations load their own
-/// rows. Each field keeps its `Relation` variant and `def` arm, and its
-/// column checks.
-fn build_related_impls(relations: &[&ModelField]) -> syn::Result<Vec<TokenStream2>> {
-    let mut related_entities = HashSet::new();
-    let mut impls = Vec::new();
-
-    for field in relations {
-        let ident = field.ident();
-        let related_types = field.related_types();
-        let related_ty = related_types
-            .first()
-            .ok_or_else(|| missing_related_type(field))?;
-        let first_to_target = related_entities.insert(type_string(related_ty));
-
-        let variant = variant_ident(ident);
-        let related_entity_ty = quote!(<#related_ty as ::tideorm::internal::InternalModel>::Entity);
-
-        if field.relation_kind() != Some(RelationKind::HasManyThrough) {
-            if !first_to_target {
-                continue;
-            }
-            impls.push(quote! {
-                impl ::tideorm::orm::Related<#related_entity_ty> for Entity {
-                    fn to() -> RelationDef {
-                        Relation::#variant.def()
-                    }
-                }
-            });
-            continue;
-        }
-
-        let pivot_ty = related_types
-            .get(1)
-            .ok_or_else(|| missing_pivot_type(field))?;
-        let name = field.name();
-        let related_key = field.related_key.as_deref().expect("validated related_key");
-        let related_local_key = field.owner_key.as_deref().unwrap_or("id");
-        let pivot_related_error = format!(
-            "many-to-many relation '{}' references an unknown pivot related column '{}'",
-            name, related_key
-        );
-        let related_column_error = format!(
-            "many-to-many relation '{}' references an unknown related column '{}'",
-            name, related_local_key
-        );
-        let pivot_related_assert =
-            compile_time_column_assert(pivot_ty, related_key, &pivot_related_error);
-        let related_column_assert =
-            compile_time_column_assert(related_ty, related_local_key, &related_column_error);
-        let related_entity = related_entity_value(related_ty);
-
-        if !first_to_target {
-            impls.push(quote! {
-                #pivot_related_assert
-                #related_column_assert
-            });
-            continue;
-        }
-
-        impls.push(quote! {
-            impl ::tideorm::orm::Related<#related_entity_ty> for Entity {
-                fn to() -> RelationDef {
-                    #pivot_related_assert
-                    #related_column_assert
-                    <#pivot_ty as ::tideorm::internal::InternalModel>::Entity::belongs_to(#related_entity)
-                        .from(<#pivot_ty as ::tideorm::internal::InternalModel>::column_from_str(#related_key)
-                            .unwrap_or_else(|| unreachable!(#pivot_related_error)))
-                        .to(<#related_ty as ::tideorm::internal::InternalModel>::column_from_str(#related_local_key)
-                            .unwrap_or_else(|| unreachable!(#related_column_error)))
-                        .into()
-                }
-
-                fn via() -> Option<RelationDef> {
-                    Some(Relation::#variant.def())
-                }
-            }
-        });
-    }
-
-    Ok(impls)
-}
-
-fn compile_time_column_assert(ty: &Type, column: &str, message: &str) -> TokenStream2 {
-    quote! {
-        const _: () = assert!(<#ty>::__has_column_name(#column), #message);
-    }
-}
-
-fn generate_sync_impl(ctx: &BuildContext) -> TokenStream2 {
-    let struct_name = &ctx.struct_name;
-    let table_name = &ctx.table_name;
-    let schema_call = ctx
-        .schema_name
-        .as_ref()
-        .map(|schema| quote!(.schema(#schema)));
-    let pk_column_names = &ctx.pk_column_names;
-    let columns = ctx.db_fields.iter().map(|field| {
-        let column_name = field.column_name();
-        let rust_type = type_string(&field.ty);
-        let primary_key = field.primary_key.then(|| quote!(.primary_key()));
-        let auto_increment = field.auto_increment.then(|| quote!(.auto_increment()));
-        let not_null =
-            (!field.nullable && !is_optional_type(&field.ty)).then(|| quote!(.not_null()));
-        let default = field
-            .default
-            .as_ref()
-            .map(|default| quote!(.default(#default)));
-        quote! {
-            ::tideorm::sync::ColumnDef::new(#column_name, #rust_type)
-                #primary_key #auto_increment #not_null #default
-        }
-    });
-
-    quote! {
-        impl #struct_name {
-            #[doc(hidden)]
-            pub fn __get_sync_schema() -> ::tideorm::sync::ModelSchema {
-                ::tideorm::sync::ModelSchema::new(#table_name)
-                    #schema_call
-                    .primary_keys(vec![#(#pk_column_names.to_string()),*])
-                    .indexes(
-                        <Self as ::tideorm::model::ModelMeta>::indexes()
-                            .into_iter()
-                            .chain(<Self as ::tideorm::model::ModelMeta>::unique_indexes())
-                            .collect(),
-                    )
-                    #(.column(#columns))*
-            }
-        }
-
-        impl ::tideorm::sync::SyncModel for #struct_name {
-            fn sync_schema() -> ::tideorm::sync::ModelSchema {
-                Self::__get_sync_schema()
-            }
-        }
-
-        ::tideorm::inventory::submit! {
-            ::tideorm::sync::CompiledModelRegistration {
-                source_path: file!(),
-                sync_schema: #struct_name::__get_sync_schema,
-                table_name: <#struct_name as ::tideorm::model::ModelMeta>::table_name,
-                column_type: ::tideorm::internal::__column_type_of::<#struct_name>,
-                schema_name: <#struct_name as ::tideorm::model::ModelMeta>::schema_name,
-                column_names: <#struct_name as ::tideorm::model::ModelMeta>::column_names,
-                encrypted_column: ::tideorm::model::__encrypted_column::<#struct_name>,
-            }
-        }
-    }
-}
-
-fn generate_columns_impl(ctx: &BuildContext) -> TokenStream2 {
-    let struct_name = &ctx.struct_name;
-    let columns_struct_name = &ctx.columns_struct_name;
-    let field_idents = &ctx.field_idents;
-    let field_types = &ctx.field_types;
-    let column_names = &ctx.column_names;
-    let table_name = &ctx.table_name;
-    let schema = ctx
-        .schema_name
-        .as_ref()
-        .map_or_else(|| quote!(None), |schema| quote!(Some(#schema)));
-
-    // A field's constant is its name, `r#` removed, in upper case.
-    let constant_ident = |name: &str| format_ident!("{}", name.to_uppercase());
-    let constant_idents: Vec<_> = ctx
-        .field_names
-        .iter()
-        .map(|name| constant_ident(name))
-        .collect();
-    let relation_constants = ctx.relation_fields.iter().map(|field| {
-        let name = field.name();
-        let ident = constant_ident(&name);
-        quote! {
-            #[doc = concat!("The `", #name, "` relation for eager loading.")]
-            pub const #ident: &'static str = #name;
-        }
-    });
-
-    quote! {
-        // Its fields are the model's, which may be `camelCase`.
-        #[allow(non_camel_case_types, non_snake_case)]
-        #[derive(Clone)]
-        pub struct #columns_struct_name {
-            #(pub #field_idents: ::tideorm::columns::Column<#field_types>),*
-        }
-
-        impl #struct_name {
-            #(
-                #[doc = concat!("Typed reference to the `", #column_names, "` column.")]
-                pub const #constant_idents: ::tideorm::columns::Column<#field_types> =
-                    ::tideorm::columns::Column::of_schema(#schema, #table_name, #column_names);
-            )*
-            #(#relation_constants)*
-
-            #[allow(non_upper_case_globals)]
-            pub const columns: #columns_struct_name = #columns_struct_name {
-                #(#field_idents: Self::#constant_idents),*
-            };
-        }
     }
 }

@@ -17,8 +17,8 @@ async fn main() -> tideorm::Result<()> {
         .sync(true)
         .connect()
         .await?;
-    User::transaction(|_tx| {
-        Box::pin(async {
+    require_db()?
+        .atomically(async {
             User {
                 id: 0,
                 name: "Ada".into(),
@@ -26,11 +26,10 @@ async fn main() -> tideorm::Result<()> {
             }
             .save()
             .await?;
-            // Returning Err here rolls back all writes in this closure.
+            // Returning Err here rolls back all writes in this future.
             Ok(())
         })
-    })
-    .await?;
+        .await?;
     assert_eq!(User::query().count().await?, 1);
     Ok(())
 }

@@ -19,13 +19,16 @@ async fn unsafe_sql_is_rejected_before_db_lookup() {
             "unsafe WHERE raw SQL",
         ),
         (
-            |q| q.group_by("id").having("COUNT(*) > 0; DROP TABLE users"),
+            |q| {
+                q.group_by("id")
+                    .having_raw("COUNT(*) > 0; DROP TABLE users")
+            },
             "unsafe HAVING raw SQL",
         ),
         (
             |q| {
                 q.group_by("id")
-                    .having("1 = 1 OR (SELECT password FROM users LIMIT 1)::text = 'x'")
+                    .having_raw("1 = 1 OR (SELECT password FROM users LIMIT 1)::text = 'x'")
             },
             "unsafe HAVING raw SQL",
         ),
@@ -105,14 +108,13 @@ async fn unsafe_sql_is_rejected_before_db_lookup() {
         ),
         (
             |q| {
-                q.lag(
-                    "previous_id",
-                    "id",
-                    1,
-                    Some("0; DROP TABLE users"),
-                    "name",
-                    "id",
-                    Order::Asc,
+                q.window(
+                    WindowFunction::new(
+                        WindowFunctionType::lag_with_raw_default("id", 1, "0; DROP TABLE users"),
+                        "previous_id",
+                    )
+                    .partition_by("name")
+                    .order_by("id", Order::Asc),
                 )
             },
             "unsafe LAG/LEAD default expression",
@@ -391,7 +393,6 @@ fn test_window_validation_uses_final_join_qualifiers() {
             "previous_profile_score",
             "profiles.score",
             1,
-            Some("0"),
             "profiles.user_id",
             "profiles.created_at",
             Order::Asc,
@@ -595,7 +596,8 @@ fn test_a_joined_query_qualifies_its_model_columns() {
     let (where_sql, _) = QueryTestUser::query()
         .inner_join("profiles", "query_test_users.id", "profiles.user_id")
         .where_eq("name", "a")
-        .build_where_clause_with_condition_for_db(DatabaseType::Postgres);
+        .build_where_clause_with_condition_for_db(DatabaseType::Postgres)
+        .unwrap();
     assert_eq!(where_sql, "\"query_test_users\".\"name\" = $1");
 }
 
@@ -620,8 +622,9 @@ fn test_having_takes_typed_aggregate_comparisons_and_raw_sql() {
         .group_by("name")
         .having(crate::Aggregate::count().gte(2))
         .having(crate::Aggregate::max("id").lt(100))
-        .having("COUNT(*) < 50")
-        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
+        .having_raw("COUNT(*) < 50")
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres)
+        .unwrap();
 
     assert!(
         sql.contains(
@@ -640,14 +643,18 @@ fn test_where_raw_with_binds_its_values_per_backend() {
             .where_raw_with("LOWER(name) = LOWER(?) AND name <> '?'", vec!["Ann".into()])
     };
 
-    let (sql, params) = query().build_select_sql_with_params_for_db(DatabaseType::Postgres);
+    let (sql, params) = query()
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres)
+        .unwrap();
     assert!(
         sql.contains("LOWER(name) = LOWER($2) AND name <> '?'"),
         "{sql}"
     );
     assert_eq!(params.len(), 2);
 
-    let (sql, _) = query().build_select_sql_with_params_for_db(DatabaseType::MySQL);
+    let (sql, _) = query()
+        .build_select_sql_with_params_for_db(DatabaseType::MySQL)
+        .unwrap();
     assert!(
         sql.contains("LOWER(name) = LOWER(?) AND name <> '?'"),
         "{sql}"
@@ -712,7 +719,7 @@ fn test_a_mismatched_raw_template_renders_without_panicking() {
     let info = query.debug();
     assert!(info.error.is_some());
     let _ = query.build_select_sql_with_params_for_db(DatabaseType::Postgres);
-    let _ = QueryTestUser::query()
-        .where_in_subquery("id", query)
-        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
+    let outer = QueryTestUser::query().where_in_subquery("id", query);
+    assert!(outer.validate().is_err());
+    let _ = outer.build_select_sql_with_params_for_db(DatabaseType::Postgres);
 }

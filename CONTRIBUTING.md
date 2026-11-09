@@ -7,6 +7,31 @@ This repository is a Rust workspace with two crates:
 - `tideorm` for the runtime ORM API
 - `tideorm-macros` for proc-macro parsing and code generation
 
+It depends on three crates that live in repositories of their own and come from crates.io:
+
+- [`tideorm-engine`](https://github.com/rust-ocean/tideorm-engine) for the execution engine behind `tideorm::orm`
+- [`tideorm-sql-builder`](https://github.com/rust-ocean/tideorm-sql-builder) for the SQL statement builder the
+  engine renders with, and its `Iden` derives (`tideorm-sql-builder-derive`)
+- [`tideorm-driver`](https://github.com/rust-ocean/tideorm-driver), a workspace of `tideorm-driver` and its
+  backends `tideorm-driver-core`, `tideorm-driver-postgres`, `tideorm-driver-mysql` and
+  `tideorm-driver-sqlite`, for the database drivers the engine runs on
+
+To change one of them together with this crate, clone it next to this one and point cargo at the
+checkout with a `[patch.crates-io]` table in a config file kept outside the repositories, passed as
+`cargo --config <file> ...`. Keep the `Cargo.lock` changes it makes out of commits.
+
+```toml
+[patch.crates-io]
+tideorm-engine = { path = "/absolute/path/to/tideorm-engine" }
+tideorm-sql-builder = { path = "/absolute/path/to/tideorm-sql-builder" }
+tideorm-sql-builder-derive = { path = "/absolute/path/to/tideorm-sql-builder/tideorm-sql-builder-derive" }
+tideorm-driver = { path = "/absolute/path/to/tideorm-driver" }
+tideorm-driver-core = { path = "/absolute/path/to/tideorm-driver/tideorm-driver-core" }
+tideorm-driver-postgres = { path = "/absolute/path/to/tideorm-driver/tideorm-driver-postgres" }
+tideorm-driver-mysql = { path = "/absolute/path/to/tideorm-driver/tideorm-driver-mysql" }
+tideorm-driver-sqlite = { path = "/absolute/path/to/tideorm-driver/tideorm-driver-sqlite" }
+```
+
 Before contributing, please read the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Before You Start
@@ -17,25 +42,28 @@ Before contributing, please read the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Development Setup
 
-- Both manifests declare `rust-version = "1.94"`. Treat that as the supported minimum. The `msrv` CI
-  job installs exactly 1.94.0 and runs `cargo check --workspace`, so a post-1.94 API in the library
-  or the proc-macro crate fails the build.
-- The MSRV is not a free choice — it is the ceiling of the dependency tree, and `resolver = "3"`
-  enforces it. `sea-orm` 2.x declares `rust-version = "1.94.0"`, so cargo refuses to build this
-  workspace on anything older regardless of what our own code uses. Raising the floor is what
-  tracking a sea-orm release costs; lowering it means not tracking one.
-- Raising the MSRV touches **five** places, and they must move in the same change. Missing one
-  leaves the crate advertising support it does not have:
+- Every manifest, here and in the sibling repositories, declares `rust-version = "1.94"`. Treat
+  that as the supported minimum. Each repository's `msrv` CI job installs exactly 1.94.0 and runs
+  `cargo check`, so a post-1.94 API in any of the crates fails the build.
+- The floor is bounded by the dependency tree: `resolver = "3"` refuses a dependency whose own
+  `rust-version` is newer than the running toolchain, and the drivers use recent standard-library
+  APIs. Lowering it means checking that every dependency and every crate here builds on the older
+  toolchain; the `msrv` job is the proof.
+- Raising the MSRV touches **eight** places, and they must move in the same change. Missing one
+  leaves a crate advertising support it does not have:
   1. `rust-version` in `Cargo.toml`
   2. `rust-version` in `tideorm-macros/Cargo.toml`
-  3. the `dtolnay/rust-toolchain@<ver>` ref in `.github/workflows/ci.yml` (and the comment above the
-     `msrv` job, which repeats the literal)
-  4. the `rust-<ver>+` badge at the top of `README.md`
-  5. this section of `CONTRIBUTING.md`
+  3. `rust-version` in `../tideorm-engine/Cargo.toml`
+  4. `rust-version` in the two manifests of `../tideorm-sql-builder`
+  5. `rust-version` in the five manifests of `../tideorm-driver`
+  6. the `dtolnay/rust-toolchain@<ver>` ref of the `msrv` job in each repository's
+     `.github/workflows/ci.yml` (and the comment above this repository's, which repeats the literal)
+  7. the `rust-<ver>+` badge at the top of `README.md`
+  8. this section of `CONTRIBUTING.md`
 - The MSRV covers the published crates only. The `msrv` job intentionally omits `--all-targets`, so
   dev-dependencies (criterion, trybuild, tokio) are free to require a newer toolchain.
 - Raising `rust-version` also raises the floor clippy lints against, so lints that were suppressed
-  as MSRV-incompatible switch on. Re-run `cargo clippy --workspace --all-targets -- -D warnings`
+  as MSRV-incompatible switch on. Re-run `cargo clippy --workspace --all-targets -- -D warnings` in each repository
   after any MSRV change; a bump is not lint-neutral.
 - There is deliberately **no `rust-toolchain.toml`**. It would pin every contributor's `cargo` in
   this tree to a single toolchain: pinned to the MSRV you would lint and format with an old
@@ -95,17 +123,57 @@ these suites safe to run as parallel jobs against one database instance.
 
 - `src/` contains the main TideORM runtime.
 - `tideorm-macros/src/` contains the proc-macro crate.
+- `../tideorm-engine` (its own repository) contains the execution engine; `src/orm.rs` is the only
+  file here that names it.
+- `../tideorm-sql-builder` contains the SQL statement builder, re-exported as `tideorm::orm::sql_builder`, with its `Iden` derives in `tideorm-sql-builder-derive`.
+- `../tideorm-driver` contains the database drivers, re-exported as `tideorm::orm::driver`; each
+  crate's unit tests are in its own `tests/unit/`.
 - `tests/` contains integration, compile-fail, and shared support coverage.
 - `tests/support/` contains shared backend test helpers and setup utilities.
 - `docs/` contains the mdBook source.
 - `site/` is generated output and should not be edited directly.
+
+### Adding a database backend
+
+A backend spans every layer, and so every repository, each behind its own cargo feature:
+
+1. **Driver**: a `tideorm-driver-<name>` crate in the `tideorm-driver` workspace, implementing `driver_core`'s `Database`,
+   `Connection`, `Executor`, `Row`, `Value`, `Arguments` and `TransactionManager` traits, plus
+   `Type`/`Encode`/`Decode` for the value types the ORM binds and reads. The `Database`
+   implementation declares its `NAME`, `URL_SCHEMES`
+   and `MAX_BIND_PARAMETERS` (the protocol's maximum) alongside its associated types, and
+   its `QueryResult` implements `driver_core::database::QueryResult` (`None` when the
+   protocol reports no insert identifier). Re-export the driver from `tideorm-driver` behind
+   a feature, as `driver::<name>`.
+2. **SQL dialect**: a builder module in `../tideorm-sql-builder/src/backend/` implementing its
+   `QueryBuilder` trait (quoting, placeholders, `RETURNING`, upserts) and `SqlDialect` (the
+   fragments TideORM writes itself: JSON, arrays, paging), returned by `DbBackend::dialect()`.
+   DDL is not the builder's: migrations render it (`src/migration/`).
+3. **Engine**: a `DbBackend` variant (`../tideorm-engine/src/database/backend.rs`, which TideORM
+   re-exports as `DatabaseType`, so the compiler lists every `match` that needs it), a
+   connector module in `../tideorm-engine/src/connector/`
+   implementing its `Driver` trait (argument binding, result wrapping, transaction begin), an
+   `InnerConnection` and `DatabaseConnectionType` variant, and the binder in
+   `../tideorm-engine/src/binding.rs`. Wire `DbBackend::max_bind_parameters()` to the driver's
+   constant behind the backend feature; disabled drivers return an error. Keep
+   `supports_returning()` aligned with the dialect and supported server versions: it describes
+   what the engine can execute, not just whether some server version has the syntax. In
+   particular, MySQL has no `RETURNING`, MariaDB's `INSERT .. RETURNING` is used where the
+   connection reports `DbBackend::MariaDB` (from the server's handshake), and SQLite
+   connections require a version supporting it.
+4. **ORM**: URL detection and the per-backend strategies in `src/` (batch insert ordering
+   and readback, upsert, JSON, full-text, migrations).
+   Batch insert obtains its parameter limit through `DbBackend`, not another backend match.
+   Add driver contract tests under that crate's `tests/unit/`, and add the backend to the
+   shared parity suites in `tests/support/` and to CI. Cover parameter-boundary chunking,
+   result counts and identifiers, and the backend's actual transaction behavior.
 
 ## Coding Guidelines
 
 - Prefer minimal, targeted edits over broad refactors.
 - Keep public APIs stable unless the change intentionally introduces a breaking change.
 - Preserve feature gating with `#[cfg(feature = "...")]` across code, tests, exports, and docs.
-- Do not expose SeaORM internals through TideORM’s public API unless the change explicitly requires it.
+- Do not expose engine internals through TideORM’s public API unless the change explicitly requires it.
 - Reuse existing helper layers instead of duplicating SQL generation or backend-specific behavior.
 - Do not build SQL with interpolated identifiers or values. Use the shared safety helpers and parameterized paths already used by the project.
 - Avoid introducing `unsafe`; the crate denies unsafe code.

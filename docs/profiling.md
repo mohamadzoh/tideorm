@@ -9,15 +9,16 @@ Use `GlobalProfiler` when you want to observe real query execution with minimal 
 
 ## Global Profiling
 
-`GlobalProfiler` records aggregate timing data for real executed queries when it is enabled.
+`GlobalProfiler` records aggregate timing data for real executed queries when it is enabled: every statement the database engine runs, raw SQL, query-builder and migration statements included, timed around the driver call. Transaction control (`BEGIN`, `COMMIT`, savepoints) is not counted.
 
 ```rust
+use std::time::Duration;
 use tideorm::prelude::*;
 use tideorm::profiling::GlobalProfiler;
 
 GlobalProfiler::enable();
 GlobalProfiler::reset();
-GlobalProfiler::set_slow_threshold(200);
+GlobalProfiler::set_slow_threshold(Duration::from_millis(200));
 
 let users = User::query()
     .where_eq("active", true)
@@ -97,5 +98,5 @@ Use this alongside `Profiler` when you want human-readable guidance about indexi
 ## Related Features
 
 - Query logging is covered in [Queries](queries.md).
-- Slow-query thresholds for logs and profiler statistics are separate settings, both 100ms by default. `ProfileReport::suggestions()` counts slow queries against the profiler's threshold (`GlobalProfiler::set_slow_threshold`).
+- Slow-query thresholds for logs and profiler statistics are separate settings, both 100ms by default. `ProfileReport::suggestions()` counts slow queries against the profiler's threshold (`GlobalProfiler::set_slow_threshold`), and `suggestions_with(threshold)` against one you give it.
 - The global profiler is process-wide, so reset it between tests when you need deterministic assertions.

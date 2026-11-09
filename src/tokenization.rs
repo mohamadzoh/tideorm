@@ -33,13 +33,12 @@
 //!
 //! | Method | Description |
 //! |--------|-------------|
-//! | `user.to_token()` | Convert record to token (instance method) |
-//! | `user.to_token()` | Alias for `tokenize()` |
+//! | `user.to_token()` | Encode the record's key; the default encoder uses a fresh nonce each call |
 //! | `User::tokenize_id(42)` | Tokenize an ID without having the record |
-//! | `User::decode_token(&token)` | Decode token to the model's primary key type |
-//! | `User::decode_token(&token)` | Alias for `decode_token()` |
-//! | `User::from_token(&token).await` | Decode token and fetch record from DB |
-//! | `user.to_token()` | Generate a fresh token; default encoding uses a new random nonce |
+//! | `User::decode_token(&token)` | Decode a token to the primary key; an invalid one is an `Error::InvalidToken` |
+//! | `User::try_decode_token(&token)` | The same, with `Ok(None)` for an invalid token |
+//! | `User::from_token(&token).await` | Decode a token and load the record; a missing row is an `Error::NotFound` |
+//! | `User::find_by_token(&token).await` | The same, with `Ok(None)` for an invalid token or a missing row |
 //!
 //! Override `token_encoder()` and `token_decoder()` on the model only when you
 //! need a model-specific token format. Otherwise, keep the default encrypted
@@ -58,6 +57,7 @@
 use parking_lot::RwLock;
 #[cfg(feature = "encrypted-fields")]
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, Generate, KeyInit, Payload};
@@ -65,17 +65,18 @@ use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 
 use crate::error::{Error, Result};
 
-/// Function signature for token encoders.
+/// A token encoder.
 ///
 /// Receives the serialized primary-key payload plus the model name and returns
-/// the external token string.
-pub type TokenEncoder = fn(record_id: &str, model_name: &str) -> Result<String>;
+/// the external token string. It may capture what it needs, such as a key
+/// read at startup.
+pub type TokenEncoder = Arc<dyn Fn(&str, &str) -> Result<String> + Send + Sync>;
 
-/// Function signature for token decoders.
+/// A token decoder, receiving the token and the model name.
 ///
 /// Returns `Ok(None)` for invalid or mismatched tokens and `Err(...)` when
 /// decoding cannot proceed because configuration is missing.
-pub type TokenDecoder = fn(token: &str, model_name: &str) -> Result<Option<String>>;
+pub type TokenDecoder = Arc<dyn Fn(&str, &str) -> Result<Option<String>> + Send + Sync>;
 
 /// The schema, when the model names one, and the table that
 /// [`Tokenizable::token_table`] binds a model's tokens to.
@@ -94,7 +95,6 @@ static TOKENIZATION_STATE: RwLock<TokenizationState> = RwLock::new(TokenizationS
 });
 
 struct ConfiguredEncryptionKey {
-    raw: String,
     derived: [u8; 32],
     #[cfg(feature = "encrypted-fields")]
     scoped_derived: RwLock<HashMap<String, [u8; 32]>>,
@@ -103,7 +103,6 @@ struct ConfiguredEncryptionKey {
 impl ConfiguredEncryptionKey {
     fn new(raw: &str) -> Self {
         Self {
-            raw: raw.to_string(),
             derived: derive_encryption_key(raw),
             #[cfg(feature = "encrypted-fields")]
             scoped_derived: RwLock::new(HashMap::new()),
@@ -161,13 +160,6 @@ impl TokenConfig {
         TOKENIZATION_STATE.write().encryption_key = configured_key;
     }
 
-    /// Return the configured raw encryption key.
-    ///
-    /// Fails when no global key has been configured yet.
-    pub fn get_encryption_key() -> Result<String> {
-        configured_key(|configured| configured.raw.clone())
-    }
-
     pub(crate) fn get_derived_encryption_key() -> Result<[u8; 32]> {
         configured_key(|configured| configured.derived)
     }
@@ -185,18 +177,34 @@ impl TokenConfig {
         TOKENIZATION_STATE.read().encryption_key.is_some()
     }
 
-    /// Set a global token encoder override.
+    /// Set a global token encoder override, a function of the serialized
+    /// primary key and the model name.
     ///
     /// Model-level encoders still take precedence over this setting.
-    pub fn set_encoder(encoder: TokenEncoder) {
-        TOKENIZATION_STATE.write().encoder = Some(encoder);
+    pub fn set_encoder(encoder: impl Fn(&str, &str) -> Result<String> + Send + Sync + 'static) {
+        TOKENIZATION_STATE.write().encoder = Some(Arc::new(encoder));
     }
 
-    /// Set a global token decoder override.
+    /// Set a global token decoder override, a function of the token and the
+    /// model name.
     ///
     /// Model-level decoders still take precedence over this setting.
-    pub fn set_decoder(decoder: TokenDecoder) {
-        TOKENIZATION_STATE.write().decoder = Some(decoder);
+    pub fn set_decoder(
+        decoder: impl Fn(&str, &str) -> Result<Option<String>> + Send + Sync + 'static,
+    ) {
+        TOKENIZATION_STATE.write().decoder = Some(Arc::new(decoder));
+    }
+
+    /// Install the codecs a [`TideConfig`](crate::TideConfig) collected,
+    /// leaving each one it did not set as it is.
+    pub(crate) fn install_codecs(encoder: Option<TokenEncoder>, decoder: Option<TokenDecoder>) {
+        let mut state = TOKENIZATION_STATE.write();
+        if encoder.is_some() {
+            state.encoder = encoder;
+        }
+        if decoder.is_some() {
+            state.decoder = decoder;
+        }
     }
 
     /// Clear the global key and any global encoder or decoder overrides.
@@ -209,12 +217,14 @@ impl TokenConfig {
 
     /// Return the active global encoder, falling back to the default implementation.
     pub fn get_encoder() -> TokenEncoder {
-        TOKENIZATION_STATE.read().encoder.unwrap_or(default_encode)
+        let encoder = TOKENIZATION_STATE.read().encoder.clone();
+        encoder.unwrap_or_else(|| Arc::new(default_encode))
     }
 
     /// Return the active global decoder, falling back to the default implementation.
     pub fn get_decoder() -> TokenDecoder {
-        TOKENIZATION_STATE.read().decoder.unwrap_or(default_decode)
+        let decoder = TOKENIZATION_STATE.read().decoder.clone();
+        decoder.unwrap_or_else(|| Arc::new(default_decode))
     }
 }
 
@@ -437,7 +447,10 @@ fn token_codecs<T: Tokenizable>() -> (Option<TokenEncoder>, Option<TokenDecoder>
     let encoder = T::token_encoder();
     let decoder = T::token_decoder();
     let state = TOKENIZATION_STATE.read();
-    (encoder.or(state.encoder), decoder.or(state.decoder))
+    (
+        encoder.or_else(|| state.encoder.clone()),
+        decoder.or_else(|| state.decoder.clone()),
+    )
 }
 
 /// The default decoder for a model that names its table. A token without the
@@ -482,7 +495,9 @@ pub trait Tokenizable: Sized + Send + Sync {
     /// Return the primary key value that should be encoded into the token.
     fn token_primary_key(&self) -> Self::TokenPrimaryKey;
 
-    /// Return a model-specific encoder override.
+    /// Return a model-specific encoder override, such as
+    /// `Some(Arc::new(my_encoder))` for a `fn my_encoder(id: &str, model: &str)
+    /// -> Result<String>`.
     ///
     /// Return `None` to use the global encoder path instead.
     fn token_encoder() -> Option<TokenEncoder> {
@@ -521,12 +536,28 @@ pub trait Tokenizable: Sized + Send + Sync {
         })?;
         match (encoder, decoder, Self::token_table()) {
             (None, None, Some(table)) => encode_for_table(&payload, table),
-            (encoder, ..) => encoder.unwrap_or(default_encode)(&payload, Self::token_model_name()),
+            (Some(encoder), ..) => encoder(&payload, Self::token_model_name()),
+            (None, ..) => default_encode(&payload, Self::token_model_name()),
         }
     }
 
     /// Decode a token and load the matching record.
+    ///
+    /// An invalid token is an [`Error::InvalidToken`] and a token whose row
+    /// is gone an [`Error::NotFound`];
+    /// [`find_by_token`](Self::find_by_token) gives `Ok(None)` for both.
     async fn from_token(token: &str) -> Result<Self>;
+
+    /// [`from_token`](Self::from_token), with `Ok(None)` for an invalid,
+    /// tampered or foreign token and for one whose row is gone, as for a token
+    /// read from a request. Missing configuration is still an `Err`.
+    async fn find_by_token(token: &str) -> Result<Option<Self>> {
+        match Self::from_token(token).await {
+            Ok(model) => Ok(Some(model)),
+            Err(Error::InvalidToken { .. } | Error::NotFound { .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
 
     /// Decode a token into the model primary key without loading the record.
     ///
@@ -537,7 +568,8 @@ pub trait Tokenizable: Sized + Send + Sync {
         let model_name = Self::token_model_name();
         let payload = match (encoder, decoder, Self::token_table()) {
             (None, None, Some(table)) => decode_for_table(token, table, model_name)?,
-            (_, decoder, _) => decoder.unwrap_or(default_decode)(token, model_name)?,
+            (_, Some(decoder), _) => decoder(token, model_name)?,
+            (_, None, _) => default_decode(token, model_name)?,
         }
         .ok_or_else(|| Error::invalid_token("Failed to decode token"))?;
 
@@ -548,6 +580,16 @@ pub trait Tokenizable: Sized + Send + Sync {
                 "The decoded token does not hold a primary key of model {model_name}"
             ))
         })
+    }
+
+    /// [`decode_token`](Self::decode_token), with `Ok(None)` for an invalid,
+    /// tampered or foreign token. Missing configuration is still an `Err`.
+    fn try_decode_token(token: &str) -> Result<Option<Self::TokenPrimaryKey>> {
+        match Self::decode_token(token) {
+            Ok(key) => Ok(Some(key)),
+            Err(Error::InvalidToken { .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 }
 

@@ -3,11 +3,17 @@
 #[path = "queries/aggregates.rs"]
 mod aggregates;
 
+#[path = "queries/builder_api.rs"]
+mod builder_api;
+
 #[path = "queries/chunk.rs"]
 mod chunk;
 
 #[path = "queries/distinct.rs"]
 mod distinct;
+
+#[path = "queries/decimals.rs"]
+mod decimals;
 
 #[path = "queries/filters.rs"]
 mod filters;

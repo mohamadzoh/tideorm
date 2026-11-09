@@ -82,11 +82,11 @@ User::query().where_col(User::columns.deleted_at.is_null())
 
 A typed column names its model's table, so in another model's query it means that model's column: `Post::query().inner_join("users", ..).where_eq(User::columns.active, true)` filters `users.active`.
 
-Values are anything `serde::Serialize`, and they are bound as the column's own type, so pass the native value: a `Uuid`, a `chrono` date or timestamp, or a `Decimal` compares correctly on every backend (`where_eq("id", user_id)`, `where_gt("created_at", since)`). A few rules worth knowing:
+Values are any type a model field can hold (`impl Into<DbValue>`: numbers, text, `bool`, `Uuid`, `chrono` dates and timestamps, `Decimal`, bytes, `serde_json::Value`, an `Option` of one, a reference to one), and each is bound as its own type, so pass the native value: `where_eq("id", user_id)`, `where_gt("created_at", since)`. A value of another type than the column's, such as a UUID or a timestamp as text, or a `serde_json::Value`, is read as the column's type, so `where_eq("id", "42")` still compares an integer. A few rules worth knowing:
 
 - **NULL.** `where_eq(col, None::<T>)` is `IS NULL`. `where_not` and `where_not_in` follow SQL and never match a NULL column. A `None` inside `where_in` also matches NULL rows, and one inside `where_not_in` keeps the non-NULL rows outside the list.
 - **JSON `null`.** On a JSON column, `where_eq(col, serde_json::Value::Null)` (or `Some(Value::Null)`) matches the rows holding the JSON `null` document, and `None` the SQL NULL ones; inside `where_in` and `where_not_in` the two read the same way.
-- **NaN and infinity.** A filter value holding a NaN or infinite float fails the query, as does `set()` or `having()` given one: JSON has no such number, and the `null` it would become means SQL NULL. Check a float parsed from a request with `is_finite()`.
+- **NaN and infinity.** A filter value holding a NaN or infinite float fails the query, as does `set()` or `having()` given one: no SQL comparison can take it. Check a float parsed from a request with `is_finite()`.
 - **Columns are identifiers.** The column argument is a column, `table.column`, or a typed column; anything else is rejected when the query runs. SQL expressions go through `where_raw()`, whose SQL you vouch for — never pass user input to it. When the expression needs a value, write a `?` for it and pass the value to `where_raw_with()`, which binds it: `where_raw_with("LOWER(email) = LOWER(?)", vec![email.into()])`. The `?` works on every backend, and `or_where_raw_with`/`and_where_raw_with` join an OR group the same way.
 - **Long lists.** A `where_in`/`where_not_in` list of more than 1,000 values that share a type is bound as one array on PostgreSQL (`= ANY($1)`), and a list of more than 1,000 strings as one JSON value on SQLite (`IN (SELECT value FROM json_each(?))`); anywhere else a list of more than 1,000 integers is written inline instead of bound. So a list of ids or text of any length works. Other long lists, such as UUIDs or timestamps on SQLite and MySQL, are bound one parameter each, which caps them at the backend's limit: 32,766 on SQLite, 65,535 on PostgreSQL and MySQL.
 - **`LIKE` and case.** `where_contains`/`where_starts_with`/`where_ends_with` escape `%` and `_`, so they are safe for user input. Whether they are case-sensitive is the backend's: PostgreSQL is, MySQL (with its default collations) and SQLite (for ASCII) are not.
@@ -94,18 +94,75 @@ Values are anything `serde::Serialize`, and they are bound as the column's own t
 
 ### OR Conditions
 
-OR clauses are available as simple query-level helpers or grouped `begin_or()` / `end_or()` blocks. Both accept string column names and typed columns.
+Write an OR as a group: `where_any(|g| ..)` ORs the conditions it adds, and
+`where_all(|g| ..)` ANDs them. Every group is written in parentheses and ANDed
+with the rest of the query, so the SQL reads the way the chain does. The
+`or_where_*` helpers and `begin_or()` / `end_or()` blocks further down build the
+same groups in shorter forms. Everything here accepts string column names and
+typed columns.
+
+#### Grouped conditions (where_any / where_all)
+
+Each call adds a group of its own. Inside a group, `nested_or` and
+`nested_and` add a group in turn:
+
+```rust
+// WHERE active = true AND (role = 'admin' OR role = 'moderator')
+User::query()
+    .where_eq(User::columns.active, true)
+    .where_any(|g| g.where_eq(User::columns.role, "admin").where_eq(User::columns.role, "moderator"))
+    .get()
+    .await?;
+
+// WHERE (active = true OR role = 'admin')
+// An OR across what would otherwise be two filters goes in one group.
+User::query()
+    .where_any(|g| g.where_eq(User::columns.active, true).where_eq(User::columns.role, "admin"))
+    .get()
+    .await?;
+
+// WHERE (plan = 'pro' OR (plan = 'trial' AND verified = true))
+User::query()
+    .where_any(|g| {
+        g.where_eq(User::columns.plan, "pro")
+            .nested_and(|t| t.where_eq(User::columns.plan, "trial").where_eq(User::columns.verified, true))
+    })
+    .get()
+    .await?;
+
+// WHERE (active = true AND (name = 'Ada' OR name = 'Grace'))
+User::query()
+    .where_all(|g| {
+        g.where_eq(User::columns.active, true)
+            .nested_or(|o| o.where_eq(User::columns.name, "Ada").where_eq(User::columns.name, "Grace"))
+    })
+    .get()
+    .await?;
+```
+
+Call `debug()` on a query to see the WHERE clause it builds before running it.
 
 #### Simple OR Methods
 
 All `or_where_*` calls on one query are combined into one OR group, ANDed with
-the rest of the query: `.where_eq("active", true).or_where_eq("role", "admin").or_where_eq("role", "moderator")`
-matches `active = true AND (role = 'admin' OR role = 'moderator')`. Use
-`or_where(|group| ..)` or `begin_or()` / `end_or()` for further, separate OR
+the rest of the query. They never OR with a plain `where_*` filter:
+
+```rust
+// WHERE active = true AND (role = 'admin' OR role = 'moderator')
+// not: active = true OR role = 'admin' OR role = 'moderator'
+User::query()
+    .where_eq(User::columns.active, true)
+    .or_where_eq(User::columns.role, "admin")
+    .or_where_eq(User::columns.role, "moderator")
+    .get()
+    .await?;
+```
+
+Use `where_any` (above) or `begin_or()` / `end_or()` for further, separate OR
 groups.
 
 ```rust
-// Basic OR conditions (applied at query level)
+// WHERE (role = 'admin' OR role = 'moderator')
 // Works with both strings and typed columns:
 User::query()
     .or_where_eq("role", "admin")                    // String-based
@@ -313,7 +370,11 @@ User::query().order_asc(User::columns.name)        // ORDER BY name ASC
 User::query().order_desc(User::columns.created_at) // ORDER BY created_at DESC
 User::query().latest()                              // ORDER BY created_at DESC
 User::query().oldest()                              // ORDER BY created_at ASC
+Post::query().latest_by(Post::columns.published_at) // ORDER BY published_at DESC
+Post::query().oldest_by("published_at")             // ORDER BY published_at ASC
 ```
+
+`Order::reverse()` gives the other direction, for a sort a request flips.
 
 Take a request's sort string with `sort()`: terms separated by commas, each a column with an optional direction — `name`, `name desc`, or `-created_at` for descending. Every column is checked as `order_by` checks one, so the string cannot smuggle an expression in:
 
@@ -371,9 +432,19 @@ User::query()
         Ok(())
     })
     .await?;
+
+// Or pull the batches yourself, holding any state across `.await`s
+let mut emails = Vec::new();
+let mut batches = User::query().chunks(500)?;
+while let Some(batch) = batches.next().await? {
+    for user in batch {
+        emails.push(user.email.clone());
+        process(user).await?;
+    }
+}
 ```
 
-`chunk()` walks the current query by a single-column primary-key cursor instead of loading the full result set into memory at once. That means callbacks may safely update or delete already-processed rows without later batches skipping records. Existing filters, `limit()`, and cache settings remain in effect. If you want descending traversal, order explicitly by the primary key before calling `chunk()`. `chunk()` rejects `offset()` and other custom ordering because those conflict with stable cursor traversal. On a join that repeats a key, the rows that share it are handed over in one batch, so only a key repeated more often than the chunk size fails.
+`chunk()` and `chunks()` walk the current query by a single-column primary-key cursor instead of loading the full result set into memory at once. That means callbacks may safely update or delete already-processed rows without later batches skipping records. Existing filters, `limit()`, and cache settings remain in effect. If you want descending traversal, order explicitly by the primary key before calling `chunk()`. `chunk()` rejects `offset()` and other custom ordering because those conflict with stable cursor traversal. On a join that repeats a key, the rows that share it are handed over in one batch, so only a key repeated more often than the chunk size fails.
 
 ### Execution Methods
 
@@ -416,7 +487,7 @@ let deleted = User::query()
 
 // Rows as JSON, for projections that are not a whole model
 let rows = User::query()
-    .select(vec!["id", "email"])
+    .select(["id", "email"])
     .get_json()
     .await?;  // Vec<serde_json::Value>
 
@@ -432,9 +503,11 @@ Use `lock_for_update()` inside a transaction before changing what you read; see 
 
 A query reads the model's columns by name rather than `SELECT *`, so a column added to the table while the application runs does not disturb it.
 
+`select()` takes column names, field names or typed columns, as an array, a `Vec`, or a tuple of typed columns of different types (`(User::columns.id, User::columns.email)`); `add_select(column)` adds one column to the projection so far.
+
 `get()` builds complete models, so it refuses a `select()` that leaves model columns out: the missing ones would read as `None` or a default, and saving such a model would write those back over the stored values. Read a partial row with `get_json()`.
 
-`get_json()` uses the model's column types to decode its columns on every backend — SQLite stores booleans as integers and JSON and dates as text, and the model's types are what put them back. Other columns (aliases, aggregates, window values) are decoded by the type the database declares: text comes back verbatim, binary as an array of bytes, `NUMERIC`/`DECIMAL` as a decimal string. SQLite declares no type for an expression, so it is read by what SQLite stores: a float sum or a running total is a number, and text is a string however it looks, unless a document-returning SQLite JSON function or `->` computed an object or array. A single-path `json_extract` returns a string member as plain SQL text, so its text cannot tell `"[2]"` from `[2]` and stays a string; read a document with `->` instead (`doc -> '$.tags'`), which always returns JSON, in any form: chained, after another call, or with a parameter as its path. With multiple paths, `json_extract` returns a JSON array and is decoded as one. Any other expression over a JSON value, such as `COALESCE`, `CASE`, `MAX` or a scalar subquery reading a JSON column, reads as text. `Database::raw_json` has no model, so it reports what the database declares and stores: on SQLite a boolean expression is `0`/`1` and a `JSON` column's object or array is a document, while MariaDB declares JSON columns as text and returns their text, and a MySQL `DATETIME` has no offset. A MySQL `TIME` is a signed duration, such as `-01:30:00` or `100:00:00`. PostgreSQL types with no Rust counterpart come back as the server prints them: an `INTERVAL` as its ISO 8601 duration, `TIMETZ`, `INET`, `CIDR` and the built-in ranges as their text, a `MONEY` as a decimal string; an array keeps its `NULL`s and dimensions. A value TideORM cannot read fails the call rather than reading as `null`.
+`get_json()` uses the model's column types to decode its columns on every backend — SQLite stores booleans as integers and JSON and dates as text, and the model's types are what put them back. Other columns (aliases, aggregates, window values) are decoded by the type the database declares: text comes back verbatim, binary as an array of bytes, `NUMERIC`/`DECIMAL` as a decimal string. SQLite declares no type for an expression, so it is read by what SQLite stores: a float sum or a running total is a number, and text is a string however it looks, unless a document-returning SQLite JSON function or `->` computed an object or array. A single-path `json_extract` returns a string member as plain SQL text, so its text cannot tell `"[2]"` from `[2]` and stays a string; read a document with `->` instead (`doc -> '$.tags'`), which always returns JSON, in any form: chained, after another call, or with a parameter as its path. With multiple paths, `json_extract` returns a JSON array and is decoded as one. Any other expression over a JSON value, such as `COALESCE`, `CASE`, `MAX` or a scalar subquery reading a JSON column, reads as text. `Database::raw_json` has no model, so it reports what the database declares and stores: on SQLite a boolean expression is `0`/`1` and a `JSON` column's object or array is a document, a MariaDB `JSON` or `UUID` column reads as one, as MySQL's do, and a MySQL `DATETIME` has no offset. A MySQL `TIME` is a signed duration, such as `-01:30:00` or `100:00:00`. PostgreSQL types with no Rust counterpart come back as the server prints them: an `INTERVAL` as its ISO 8601 duration, `TIMETZ`, `INET`, `CIDR` and the built-in ranges as their text, a `MONEY` as a decimal string; an array keeps its `NULL`s and dimensions. A value TideORM cannot read fails the call rather than reading as `null`.
 
 Floating-point NaN and infinities are returned as the strings `"NaN"`, `"inf"`, and
 `"-inf"`, including inside PostgreSQL arrays. They remain distinct from SQL NULL,
@@ -457,6 +530,16 @@ Name both sides of a join as `table.column` (or `alias.column`); a bare column n
 let posts = Post::query()
     .inner_join("users", "posts.user_id", "users.id")
     .where_eq("users.active", true)
+    .get()
+    .await?;
+```
+
+`join::<R>(JoinType::Inner, left, right)` joins model `R`'s table, its columns typed, and `join_as::<R>(join_type, alias, left, right)` joins it under an alias, writing `R`'s typed columns with the alias:
+
+```rust
+let posts = Post::query()
+    .join::<User>(JoinType::Inner, Post::columns.user_id, User::columns.id)
+    .where_eq(User::columns.active, true)
     .get()
     .await?;
 ```
@@ -505,7 +588,7 @@ let (orders, revenue, largest): (u64, Decimal, Option<Decimal>) = Sale::query()
 
 ### Grouping
 
-`group_by` groups the rows, and `having` keeps the groups whose aggregate passes a comparison, with the value bound; several `having` calls must all hold. A raw condition works too, as trusted SQL:
+`group_by` groups the rows, and `having` keeps the groups whose aggregate passes a comparison, with the value bound; several `having` calls must all hold. `having_raw` takes a raw condition, as trusted SQL:
 
 ```rust
 let busy_regions: Vec<RegionTotal> = Sale::query()
@@ -516,7 +599,10 @@ let busy_regions: Vec<RegionTotal> = Sale::query()
     .get_as()
     .await?;
 
-Sale::query().group_by("rep").having("COUNT(DISTINCT region) > 1");
+Sale::query().group_by("rep").having_raw("COUNT(DISTINCT region) > 1");
+
+// Values a raw condition compares with are bound, so they may come from a request
+Sale::query().group_by("rep").having_raw_with("SUM(revenue) > ?", [params.min_revenue.into()]);
 ```
 
 `Aggregate` offers `gt`, `gte`, `lt`, `lte`, `eq` and `ne`.
@@ -593,71 +679,90 @@ let results = User::query()
     .union_raw("SELECT * FROM archived_users WHERE year = 2023")
     .get()
     .await?;
+
+// The same with its values bound; write `?` on every backend
+let results = User::query()
+    .union_raw_with("SELECT * FROM archived_users WHERE year = ?", [year.into()])
+    .get()
+    .await?;
 ```
 
 A union's `order_by` sorts the combined rows, so a column is written by its bare output name there even when a query of the union joins another table.
 
 ### Window Functions
 
-Perform calculations across sets of rows:
+Perform calculations across sets of rows. Every shorthand takes the output column's alias, the function's own arguments, the `PARTITION BY` columns (one column, a tuple or array of them, or `()` for none), and the window's `ORDER BY` column and direction:
 
 ```rust
 use tideorm::prelude::*;
 
 // ROW_NUMBER - assign sequential numbers
 let products = Product::query()
-    .row_number("row_num", Some("category"), "price", Order::Desc)
+    .row_number("row_num", "category", "price", Order::Desc)
     .get_json()
     .await?;
 // SQL: ROW_NUMBER() OVER (PARTITION BY "category" ORDER BY "price" DESC) AS "row_num"
 
 // RANK - rank with gaps for ties
 let employees = Employee::query()
-    .rank("salary_rank", Some("department_id"), "salary", Order::Desc)
+    .rank("salary_rank", Employee::columns.department_id, Employee::columns.salary, Order::Desc)
     .get_json()
     .await?;
 
-// DENSE_RANK - rank without gaps
+// DENSE_RANK - rank without gaps, over the whole result
 let students = Student::query()
-    .dense_rank("score_rank", None, "score", Order::Desc)
+    .dense_rank("score_rank", (), "score", Order::Desc)
     .get_json()
     .await?;
 
-// Running totals with SUM window
+// Running totals with SUM window, per region
 let sales = Sale::query()
-    .running_sum("running_total", "amount", "date", Order::Asc)
+    .running_sum("running_total", "amount", "region", "date", Order::Asc)
     .get_json()
     .await?;
 
-// LAG - access previous row value
+// LAG - access previous row value (NULL for each user's first order)
 let orders = Order::query()
-    .lag("prev_total", "total", 1, Some("0"), "user_id", "created_at", Order::Asc)
+    .lag("prev_total", "total", 1, "user_id", "created_at", Order::Asc)
     .get_json()
     .await?;
 
 // LEAD - access next row value
 let appointments = Appointment::query()
-    .lead("next_date", "date", 1, None, "patient_id", "date", Order::Asc)
+    .lead("next_date", "date", 1, "patient_id", "date", Order::Asc)
     .get_json()
     .await?;
 
-// NTILE - distribute into buckets
+// NTILE - distribute into buckets, per category and brand
 let products = Product::query()
-    .ntile("price_quartile", 4, "price", Order::Asc)
+    .ntile("price_quartile", 4, ("category", "brand"), "price", Order::Asc)
     .get_json()
     .await?;
 
 // Custom window function with full control
 let results = Order::query()
     .window(
-        WindowFunction::new(WindowFunctionType::Sum("amount".to_string()), "total_sales")
+        WindowFunction::new(WindowFunctionType::sum("amount"), "total_sales")
             .partition_by("region")
             .order_by("month", Order::Asc)
             .frame(FrameType::Rows, FrameBound::UnboundedPreceding, FrameBound::CurrentRow)
     )
     .get_json()
     .await?;
+
+// LAG with a value where there is no earlier row. The default is trusted SQL,
+// written in as given, hence the `_raw` in the name.
+let orders = Order::query()
+    .window(
+        WindowFunction::new(WindowFunctionType::lag_with_raw_default("total", 1, "0"), "prev_total")
+            .partition_by("user_id")
+            .order_by("created_at", Order::Asc)
+    )
+    .get_json()
+    .await?;
 ```
+
+`WindowFunctionType::sum`, `avg`, `min`, `max`, `count`, `first_value`, `last_value`, `nth_value`, `lag` and `lead` take a column name or a typed column (`Sale::columns.amount`), which is written with its table.
 
 ### Common Table Expressions (CTEs)
 
@@ -670,7 +775,7 @@ use tideorm::prelude::*;
 let orders = Order::query()
     .with_cte(CTE::new(
         "high_value_orders",
-        "SELECT * FROM orders WHERE total > 1000".to_string()
+        "SELECT * FROM orders WHERE total > 1000",
     ))
     .where_raw("id IN (SELECT id FROM high_value_orders)")
     .get()
@@ -679,7 +784,7 @@ let orders = Order::query()
 // CTE from another query builder
 let active_users = User::query()
     .where_eq("active", true)
-    .select(vec!["id", "name", "email"]);
+    .select(["id", "name", "email"]);
 
 let posts = Post::query()
     .with_query("active_users", active_users)
@@ -691,8 +796,8 @@ let posts = Post::query()
 let stats = Sale::query()
     .with_cte(CTE::with_columns(
         "daily_stats",
-        vec!["sale_date", "total_sales", "order_count"],
-        "SELECT DATE(created_at), SUM(amount), COUNT(*) FROM sales GROUP BY DATE(created_at)".to_string(),
+        ["sale_date", "total_sales", "order_count"],
+        "SELECT DATE(created_at), SUM(amount), COUNT(*) FROM sales GROUP BY DATE(created_at)",
     ))
     .where_raw("date IN (SELECT sale_date FROM daily_stats WHERE total_sales > 10000)")
     .get()
@@ -702,7 +807,7 @@ let stats = Sale::query()
 let employees = Employee::query()
     .with_recursive_cte(
         "org_tree",
-        vec!["id", "name", "manager_id", "level"],
+        ["id", "name", "manager_id", "level"],
         // Base case: top-level managers
         "SELECT id, name, manager_id, 0 FROM employees WHERE manager_id IS NULL",
         // Recursive: employees under managers
@@ -727,7 +832,7 @@ TideORM provides full-text search capabilities across PostgreSQL (tsvector/tsque
 Enable the feature explicitly when you need the full-text search API:
 
 ```toml
-tideorm = { version = "0.16.2", features = ["postgres", "fulltext"] }
+tideorm = { version = "0.17.0", features = ["postgres", "fulltext"] }
 ```
 
 ### Search Basics
@@ -765,6 +870,8 @@ let first = Article::search(&["title"], "rust")
     .first()
     .await?;
 ```
+
+`search` takes its columns as names (`["title", "content"]`) or typed columns (`(Article::TITLE, Article::CONTENT)`), as `select` does.
 
 ### Search Modes
 
@@ -824,7 +931,7 @@ let results = Article::search(&["title", "summary", "content"], "rust programmin
 
 ```rust
 let config = FullTextConfig::new()
-    .stop_words(vec!["the".into(), "a".into()])
+    .stop_words(["the", "a"])
     .min_word_length(3);
 // Searches for "rust" and "ownership" only.
 let results = Article::search(&["content"], "the rust of ownership")
@@ -835,21 +942,34 @@ let results = Article::search(&["content"], "the rust of ownership")
 
 ### Text Highlighting
 
-`highlight()` marks the whole-word matches in the searched columns of each `get_ranked()` result. The record's text is HTML-escaped around the tags, so a stored `<script>` reaches the page as text; set `escape_html: false` for tags that are not HTML:
+`highlight()` marks the whole-word matches in the searched columns of each `get_ranked()` result. The record's text is HTML-escaped around the tags, so a stored `<script>` reaches the page as text; call `escape_html(false)` for tags that are not HTML:
 
 ```rust
 use tideorm::fulltext::HighlightConfig;
 
-let ranked = Article::search(&["title", "content"], "rust async")
+let ranked = Article::search((Article::TITLE, Article::CONTENT), "rust async")
     .highlight(HighlightConfig::default()) // `<mark>` tags, 10 words around the first match
     .get_ranked()
     .await?;
+
+// `<b>` tags, 5 words around the match, at most 200 characters
+let config = HighlightConfig::default().tags("<b>", "</b>").fragment_words(5).max_length(200);
+
 for field in &ranked[0].highlights {
     println!("{}: {}", field.field, field.highlighted);
 }
 ```
 
-The same marking is available on any text, without the escaping:
+`HighlightConfig::highlight` marks any text the same way, escaping it as a search does:
+
+```rust
+use tideorm::fulltext::HighlightConfig;
+
+let marked = HighlightConfig::default().whole_text().highlight(&comment.body, "fox");
+// "a &lt;script&gt; about the <mark>fox</mark>" for "a <script> about the fox"
+```
+
+`highlight_text` and `generate_snippet` mark text without escaping it, so keep them for text that is not HTML:
 
 ```rust
 use tideorm::fulltext::{highlight_text, generate_snippet};
@@ -876,7 +996,7 @@ use tideorm::config::DatabaseType;
 let index = FullTextIndex::new(
     "idx_articles_search",
     "articles",
-    vec!["title".to_string(), "content".to_string()]
+    ["title", "content"],
 )
 .language("english")
 .pg_index_type(PgFullTextIndexType::GIN);
@@ -908,14 +1028,19 @@ MySQL's boolean-mode operators (`+ - < > ( ) ~ * " @`) are sanitized before a qu
 ```rust
 use tideorm::fulltext::pg_headline_sql;
 
-// Generate ts_headline SQL for server-side highlighting
-let headline_sql = pg_headline_sql(
+// ts_headline for server-side highlighting, with its text bound as $1 to $3
+let (headline, params) = pg_headline_sql(
     "content",           // column
     "search query",      // search terms
     "english",           // language
     "<b>", "</b>"        // highlight tags
 );
-// Result: ts_headline('english', "content", plainto_tsquery(...), ...)
+// headline: ts_headline($1::regconfig, "content", plainto_tsquery($1::regconfig, $2), $3)
+let rows = Database::raw_json_with_params(
+    &format!("SELECT id, {headline} AS headline FROM articles"),
+    params,
+)
+.await?;
 ```
 
 ---
@@ -1071,9 +1196,19 @@ let affected = Database::execute_with_params(
     "DELETE FROM users WHERE status = $1",
     vec!["banned".into()]
 ).await?;
+
+// Rows of any shape, read as a type of your own
+#[derive(FromQueryResult)]
+struct Totals { country: String, users: i64 }
+
+let totals: Vec<Totals> = Database::raw_as(
+    "SELECT country, COUNT(*) AS users FROM users GROUP BY country"
+).await?;
 ```
 
-Name the columns in raw SQL rather than `SELECT *` when the table can change under a running application. Statements are prepared and cached per connection, and after a column is added PostgreSQL rejects a cached `SELECT *` (`cached plan must not change result type`) while SQLite can report the old column list, until the connection is replaced. The query builder is not affected: it always names the model's columns.
+`FromQueryResult` reads each field from the column of its name, as that field's type, the way a model reads its columns, so alias a computed column to its field (`AS users`); an `Option` field takes SQL `NULL`. `raw_as_with_params` binds values the same way, and a `Database` handle offers `query_raw_as` and `query_raw_as_with_params` to run on that database rather than the global one.
+
+Name the columns in raw SQL rather than `SELECT *` when the table can change under a running application. Statements are prepared and cached per connection (see `statement_cache_capacity` under [Driver Options](getting-started.md#driver-options)), and after a column is added PostgreSQL rejects a cached `SELECT *` (`cached plan must not change result type`) while SQLite can report the old column list, until the connection is replaced. The query builder is not affected: it always names the model's columns.
 
 Every raw statement invalidates cached reads of its database once it has run, reads included, and so does one that fails: its text cannot show which tables it writes, as a `SELECT` can write through a function, a view or a trigger, and a statement before a failing one may already have committed. Independent databases keep their cached results. Separate pools using the same SQLite file or the same PostgreSQL endpoint and database share invalidation; MySQL databases on one endpoint share it because triggers and foreign keys can cross schemas. SQLite handles that use `ATTACH`, and connections whose database cannot be identified, retain conservative global invalidation. Entries inserted manually with `QueryCache::set` or `set_tagged` have no database identity and are invalidated by any database write.
 
@@ -1089,6 +1224,29 @@ TIDE_LOG_QUERIES=true cargo run
 ```
 
 When enabled, every statement is printed to stderr: query-builder and migration statements before they run, the rest — `find`, `save`, `update`, `delete`, upserts and raw SQL — once they complete. The variable is read once, when the first statement runs. `QueryLogger` records them too, except the migrator's, with the query builder's tagged by table. `TIDE_LOG_LEVEL` (`error`, `warn`, `info`, `debug`, `trace`) and `TIDE_SLOW_QUERY_MS` configure the structured `QueryLogger` the way `QueryLogger::global()` does in code; settings made in code take precedence.
+
+`QueryLogger::global()` returns a builder; nothing changes until `enable()`, `disable()` or `apply()` ends it. `set_sink` sends what the logger prints somewhere other than stderr, such as `tracing`, and `QueryLogger::reset()` puts the logger back as the environment configures it, for tests:
+
+```rust
+use std::time::Duration;
+use tideorm::logging::{LogLevel, QueryLogger};
+
+QueryLogger::global()
+    .level(LogLevel::Debug)
+    .slow_query_threshold(Duration::from_millis(50))
+    .history_limit(200)
+    .enable();
+
+QueryLogger::set_sink(|entry, text| {
+    if !entry.success {
+        tracing::warn!("{text}");
+    }
+});
+
+for entry in QueryLogger::slow_queries() {
+    println!("{entry:?}");
+}
+```
 
 To look at a query before it runs, print `debug()`: the statement with its values written in, the parameterized statement, and the clauses it was built from. A query that a terminal would refuse — an unsafe `order_by` taken from a request, a bad raw fragment, a zero page — reports the reason on an `Invalid:` line, and `validate()` returns the same error without running anything, so a handler can answer 400 first:
 
@@ -1140,7 +1298,84 @@ match User::create(user).await {
 }
 ```
 
+`is_unique_violation()`, `is_foreign_key_violation()` and `is_not_null_violation()` ask the same about one kind. `validation_errors()` returns every failure behind an `Error::Validation`, field by field (see [Handling Validation Errors](models.md#handling-validation-errors)).
+
 Constraint violations (`UniqueViolation`, `ForeignKeyViolation`, `NotNullViolation`, `CheckViolation`) are never retryable, and neither is `InvalidValue`: a value too long for its column, out of its range, or not valid for its type. SQLite checks none of that, so a string longer than its `VARCHAR(255)` is stored there and refused by PostgreSQL and MySQL; `#[validate(max_length = 255)]` keeps the backends in step. `Deadlock`, `SerializationFailure`, `LockNotAvailable` (including MySQL's lock wait timeout and a busy SQLite database), `StatementTimeout`, `ConnectionTimeout` and `ConnectionClosed` are. A connection the server closes under a statement — a restart, a failover, MySQL's `KILL` — is `ConnectionClosed`; the pool replaces it, so the next call gets a fresh one.
+
+Opening a connection is classified too: `ConnectionRefused` (nothing listens there, or the server is not up yet) is retryable; `AuthenticationFailed`, `UnknownDatabase`, `TlsFailed` and `InvalidConfiguration` (a bad URL or option) are not, nor is `NotConnected`, the error of a model used before any connection was set up. A statement refused on a transaction that a failure already aborted reports that failure's kind, so the refusals after a deadlock are retryable too. The message is never read: an error with no classified failure, such as one built with `Error::query(..)`, is not retryable whatever it says.
+
+### Answering a Request
+
+`http_status()` gives a generic status for each variant (`NotFound` 404,
+`Validation` 422, `Connection` 503, `Transaction` 409, `Query` 400, and so on),
+but a duplicate key and a deadlock are both `Error::Query`, so an endpoint looks
+at `failure_kind()` first:
+
+```rust
+use tideorm::error::{DbFailureKind, Error};
+use tideorm::prelude::{JsonValue, json};
+
+/// The status and body an endpoint answers a TideORM error with. The body
+/// carries the stable `code()`, never the error's text.
+fn error_response(e: &Error) -> (u16, JsonValue) {
+    if let Some(errors) = e.validation_errors() {
+        // 422 with every failure, field by field: {"email": ["..."]}
+        return (422, json!({ "code": e.code(), "errors": errors.all() }));
+    }
+    let status = match e.failure_kind() {
+        // http_status() answers 400 for every Error::Query, a duplicate included
+        DbFailureKind::UniqueViolation => 409,
+        // deadlock, lock or statement timeout, dropped connection
+        _ if e.is_retryable() => 503,
+        // NotFound 404, Connection 503, Transaction 409, Configuration 500, ..
+        _ => e.http_status(),
+    };
+    if status >= 500 {
+        tracing::error!("{}", e.log_format());
+    }
+    (status, json!({ "code": e.code() }))
+}
+```
+
+- **What the client sees.** An error's `Display` text can hold the server's
+  message, table, column and constraint names and SQL; `log_format()` adds the
+  query and its context. Send `code()` (`TIDE_NOT_FOUND`, `TIDE_VALIDATION`, ..),
+  which does not change between releases, and keep the rest in your logs.
+  Validation messages are written for users, so they can go out as they are.
+- **The database is unavailable.** Every failure to open a connection is an
+  `Error::Connection`, which `http_status()` answers with 503. Only
+  `ConnectionRefused` and the timeouts are retryable: an `AuthenticationFailed`
+  or `UnknownDatabase` is a deployment fault that a retry will not fix, and
+  belongs in an alert as well as a 503.
+
+#### Retrying a Transaction
+
+Retry the whole transaction, never one statement inside it: after a deadlock the
+server has already rolled the whole transaction back.
+
+```rust
+use std::time::Duration;
+
+let mut attempt = 0u64;
+let order = loop {
+    match db.transaction(async |_tx| place_order(&cart).await).await {
+        Err(e) if e.is_retryable() && attempt < 3 => {
+            attempt += 1;
+            tokio::time::sleep(Duration::from_millis(50 * attempt)).await;
+        }
+        outcome => break outcome?,
+    }
+};
+```
+
+> **Warning:** retryable means a new attempt can succeed, not that the failed
+> one wrote nothing. A `ConnectionClosed` that cuts off the `COMMIT` leaves it
+> unknown whether the transaction committed, and the retry then writes it a
+> second time. The same holds for a single `create()`
+> retried outside a transaction. Make a retried write idempotent: insert with a
+> key the request carries (a client-chosen UUID, an idempotency key under a
+> unique index) or use an upsert, so a second run finds the first one's row
+> instead of adding another.
 
 ---
 

@@ -191,6 +191,34 @@ async fn sqlite_documents_follow_the_declared_type_and_views() {
     assert_eq!(rows, vec![json!({"made": {"k": 1}})]);
 }
 
+#[tokio::test]
+async fn attached_json_columns_keep_declared_types_through_views() {
+    let db = memory_database(
+        "CREATE TABLE t(doc TEXT, bin TEXT, plain TEXT); \
+         INSERT INTO t VALUES('{\"main\":1}', '[1]', '[2]'); \
+         ATTACH DATABASE ':memory:' AS other; \
+         CREATE TABLE other.t(doc JSON, bin JSONB, plain TEXT); \
+         INSERT INTO other.t VALUES('{\"other\":2}', '[3]', '[4]'); \
+         CREATE VIEW other.v AS SELECT doc, bin, plain FROM t",
+    )
+    .await;
+    for source in ["other.t", "other.v"] {
+        let rows = db
+            .query_raw_json(&format!("SELECT doc, bin, plain FROM {source}"))
+            .await
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![json!({"doc": {"other": 2}, "bin": [3], "plain": "[4]"})],
+            "{source}"
+        );
+    }
+    assert_eq!(
+        db.query_raw_json("SELECT doc FROM main.t").await.unwrap(),
+        vec![json!({"doc": "{\"main\":1}"})]
+    );
+}
+
 /// A JSON function returning SQL text or a number reads as that value: only
 /// the document-returning ones (`json`, `json_quote`, `json_extract` of
 /// several paths) read as documents.

@@ -1,282 +1,56 @@
-#![allow(missing_docs)]
-
 use async_trait::async_trait;
-use std::collections::HashMap;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use super::{
-    EntityManager, TideEntityManagerMergePersisted, TideEntityManagerMeta, TideEntityManagerSync,
-    save::{save_in_scope, sync_entity_manager_relations_only_impl},
+use crate::orm::sql_builder::ValueKey;
+
+use super::{EntityManager, ManagedModel};
+
+mod flush;
+mod flush_order;
+
+use flush_order::RowLink;
+pub(super) use flush_order::{
+    explain_flush_ordering_failure, flush_sort_key, order_self_references, plan_flush_order,
 };
 
+/// Where a [`Managed`] entity stands with its [`EntityManager`], which decides
+/// what the next [`flush`](EntityManager::flush) writes for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntityState {
+    /// Handed to [`persist`](EntityManager::persist) and not stored yet: the
+    /// flush inserts it.
     New,
+    /// Stored and tracked: the flush updates it when it changed.
     Managed,
+    /// Handed to [`remove`](EntityManager::remove): the flush deletes it.
     Removed,
+    /// No longer tracked, after [`detach`](EntityManager::detach) or
+    /// [`clear`](EntityManager::clear): the flush leaves it alone.
     Detached,
 }
 
-/// Coarse flush ordering rank: inserts, then updates, then deletes.
+/// A handle on an entity an [`EntityManager`] tracks.
 ///
-/// A flush runs every pending operation inside a single transaction, so a
-/// mis-ordered foreign key aborts the whole flush. Grouping the work by
-/// operation kind is the first half of the ordering; [`plan_flush_order`]
-/// supplies the second half, which orders tables against each other inside a
-/// kind. Sorting must stay stable so entries that tie on both keep their
-/// registration order.
-fn flush_order_rank(state: EntityState) -> u8 {
-    match state {
-        EntityState::New => 0,
-        EntityState::Managed => 1,
-        EntityState::Removed => 2,
-        EntityState::Detached => 3,
-    }
-}
-
-/// Table-level dependency order for one pass of a flush.
-///
-/// Grouping by operation kind alone still writes `posts` before `users` when
-/// the child was persisted first, which the database rejects. This ranks the
-/// tables taking part in the pass so inserts can run parents-first and deletes
-/// children-first.
-pub(super) struct FlushOrder {
-    ranks: HashMap<&'static str, usize>,
-    unordered: Vec<&'static str>,
-}
-
-impl FlushOrder {
-    fn rank(&self, table: &str) -> usize {
-        self.ranks.get(table).copied().unwrap_or(0)
-    }
-
-    /// Tables whose declared foreign keys form a cycle, so no total order over
-    /// them exists. They keep registration order and are named in the error if
-    /// the database then rejects a write.
-    pub(super) fn unordered_tables(&self) -> &[&'static str] {
-        &self.unordered
-    }
-}
-
-/// Record `parent -> child` if it is a real, expressible constraint.
-///
-/// Edges to tables outside this pass cannot change the order, and dropping
-/// them stops an absent table from inventing a cycle the flush would never
-/// hit. A self-edge is dropped too: a self-referencing foreign key
-/// (`parent_id` on the same table) is a legal schema, not a table-level
-/// ordering constraint, and keeping it would report every such table as an
-/// unbreakable cycle.
-fn add_dependency_edge(
-    edges: &mut Vec<(&'static str, &'static str)>,
-    tables: &[&'static str],
-    parent: &'static str,
-    child: &'static str,
-) {
-    if parent == child || !tables.contains(&parent) || !tables.contains(&child) {
-        return;
-    }
-
-    if !edges.contains(&(parent, child)) {
-        edges.push((parent, child));
-    }
-}
-
-/// Topologically sort the tables taking part in this flush pass.
-///
-/// Edges come from both ends of every declared relation — a child's
-/// `belongs_to` and a parent's `has_one`/`has_many` — so one declaration on
-/// either side is enough. Kahn's algorithm runs over the tables in first-seen
-/// order, which keeps the result deterministic; whatever it cannot drain is a
-/// cycle and is appended in registration order rather than looping forever.
-pub(super) fn plan_flush_order(entries: &[Arc<dyn ManagedOps>]) -> FlushOrder {
-    let mut tables: Vec<&'static str> = Vec::new();
-    for entry in entries {
-        let table = entry.table_name();
-        if !tables.contains(&table) {
-            tables.push(table);
-        }
-    }
-
-    let mut edges: Vec<(&'static str, &'static str)> = Vec::new();
-    for entry in entries {
-        let table = entry.table_name();
-        for parent in entry.parent_tables() {
-            add_dependency_edge(&mut edges, &tables, parent, table);
-        }
-        for child in entry.child_tables() {
-            add_dependency_edge(&mut edges, &tables, table, child);
-        }
-    }
-
-    let index_of = |table: &str| {
-        tables
-            .iter()
-            .position(|known| *known == table)
-            .expect("edges only join tables of this pass")
-    };
-    let edges: Vec<(usize, usize)> = edges
-        .iter()
-        .map(|(parent, child)| (index_of(parent), index_of(child)))
-        .collect();
-    let (mut ordered, cycle) =
-        crate::internal::topological_order(tables.len(), &edges, |index| index);
-    let unordered: Vec<&'static str> = cycle.iter().map(|&index| tables[index]).collect();
-    ordered.extend(cycle);
-
-    let ranks = ordered
-        .into_iter()
-        .enumerate()
-        .map(|(rank, index)| (tables[index], rank))
-        .collect();
-
-    FlushOrder { ranks, unordered }
-}
-
-/// One self-referencing foreign key as it applies to one row: the value this
-/// row holds in the referenced column, and the value its foreign key holds,
-/// each as key text; `None` for a NULL, or a key the database has not assigned.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RowLink {
-    pub(crate) foreign_key: &'static str,
-    pub(crate) referenced: &'static str,
-    pub(crate) provides: Option<String>,
-    pub(crate) requires: Option<String>,
-}
-
-/// Order the rows of one table that reference each other through a
-/// self-referencing foreign key (`nodes.parent_id -> nodes.id`): inserts
-/// referenced row first, deletes referencing row first.
-///
-/// The table order cannot express it, since the table depends on itself;
-/// `entries` is already sorted by [`flush_sort_key`], so the inserts and the
-/// deletes of each table are adjacent, and each such run is reordered on its
-/// own. Rows in a cycle keep registration order.
-pub(super) fn order_self_references(entries: &mut [Arc<dyn ManagedOps>]) {
-    let mut start = 0;
-    while start < entries.len() {
-        let state = entries[start].current_state();
-        let table = entries[start].table_name();
-        let end = start
-            + entries[start..]
-                .iter()
-                .take_while(|entry| entry.current_state() == state && entry.table_name() == table)
-                .count();
-        if matches!(state, EntityState::New | EntityState::Removed) && end - start > 1 {
-            order_rows(&mut entries[start..end], state == EntityState::Removed);
-        }
-        start = end;
-    }
-}
-
-/// Topologically order `rows`, referenced rows first, or last when
-/// `referencing_first`.
-fn order_rows(rows: &mut [Arc<dyn ManagedOps>], referencing_first: bool) {
-    let links: Vec<Vec<RowLink>> = rows.iter().map(|row| row.row_links()).collect();
-    // The rows holding each referenced value, so a batch of one table pairs
-    // in linear time.
-    let mut providers: HashMap<(&str, &str, &str), Vec<usize>> = HashMap::new();
-    for (index, row_links) in links.iter().enumerate() {
-        for link in row_links {
-            if let Some(provided) = &link.provides {
-                providers
-                    .entry((link.foreign_key, link.referenced, provided))
-                    .or_default()
-                    .push(index);
-            }
-        }
-    }
-    let mut edges = Vec::new();
-    for (referencing, row_links) in links.iter().enumerate() {
-        for link in row_links {
-            let Some(required) = &link.requires else {
-                continue;
-            };
-            let referenced_rows = providers.get(&(link.foreign_key, link.referenced, required));
-            for &referenced in referenced_rows.into_iter().flatten() {
-                if referenced != referencing {
-                    edges.push(if referencing_first {
-                        (referencing, referenced)
-                    } else {
-                        (referenced, referencing)
-                    });
-                }
-            }
-        }
-    }
-    if edges.is_empty() {
-        return;
-    }
-    let (mut order, cycle) = crate::internal::topological_order(rows.len(), &edges, |index| index);
-    order.extend(cycle);
-    let ordered: Vec<Arc<dyn ManagedOps>> =
-        order.into_iter().map(|index| rows[index].clone()).collect();
-    rows.clone_from_slice(&ordered);
-}
-
-/// Stable sort key placing an entry inside its operation kind.
-///
-/// Inserts ascend the table order so a parent row exists before the child that
-/// references it; deletes descend it so children go before the parent they
-/// reference. Updates and detached entries add no constraint of their own and
-/// tie, which the stable sort resolves as registration order.
-pub(super) fn flush_sort_key(entry: &dyn ManagedOps, order: &FlushOrder) -> (u8, usize) {
-    let state = entry.current_state();
-    let rank = order.rank(entry.table_name());
-    let within_kind = match state {
-        EntityState::New => rank,
-        EntityState::Removed => order.ranks.len().saturating_sub(rank),
-        EntityState::Managed | EntityState::Detached => 0,
-    };
-
-    (flush_order_rank(state), within_kind)
-}
-
-/// Say why a flush was ordered the way it was when the database rejects it.
-///
-/// The ordering only covers foreign keys a model actually declares, so a flush
-/// can still abort on SQLSTATE 23503 — previously with nothing but the driver's
-/// message, which never mentions that an entity manager chose the write order.
-/// Name the table being written and either the cycle that could not be broken
-/// or the fact that no relation declared the missing dependency. The driver
-/// failure stays attached as the source, so the SQLSTATE, constraint name and
-/// error chain survive.
-pub(super) fn explain_flush_ordering_failure(
-    error: crate::error::Error,
-    table: &'static str,
-    unordered: &[&'static str],
-) -> crate::error::Error {
-    if !error.is_foreign_key_violation() {
-        return error;
-    }
-
-    let detail = if unordered.is_empty() {
-        String::from(
-            "every table in this flush was ordered parent-before-child, so the row it \
-             references belongs to a table this model declares no relation to; declare the \
-             relation (`belongs_to` or `has_many`/`has_one`) or persist the parent first",
-        )
-    } else {
-        format!(
-            "these tables declare foreign keys in a cycle and could not be ordered: {}; \
-             flush one side of the cycle before the other",
-            unordered.join(", ")
-        )
-    };
-
-    let rendered = error.to_string();
-    let failure = error.into_db_failure().map(|failure| *failure);
-
-    crate::error::Error::query(format!(
-        "entity manager flush failed writing `{table}`: {rendered} — {detail}"
-    ))
-    .with_db_failure(failure)
-}
-
+/// Clones share one entity: an edit through any of them is what the next
+/// [`flush`](EntityManager::flush) writes. Read it with [`read`](Self::read)
+/// or [`get`](Self::get) and change it with [`edit`](Self::edit) or
+/// [`replace`](Self::replace).
 #[derive(Clone)]
 pub struct Managed<T> {
     pub(crate) entry: Arc<ManagedEntry<T>>,
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for Managed<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.read(|entity| {
+            f.debug_struct("Managed")
+                .field("state", &self.state())
+                .field("entity", entity)
+                .finish()
+        })
+    }
 }
 
 impl<T> Managed<T> {
@@ -284,10 +58,12 @@ impl<T> Managed<T> {
         Self { entry }
     }
 
+    /// Where the entity stands with its manager.
     pub fn state(&self) -> EntityState {
         self.entry.state()
     }
 
+    /// A copy of the entity as it is now.
     pub fn get(&self) -> T
     where
         T: Clone,
@@ -295,10 +71,24 @@ impl<T> Managed<T> {
         self.entry.get()
     }
 
+    /// Run `read` on the entity as it is now, without copying it.
+    ///
+    /// The entity is locked for reading while `read` runs: an
+    /// [`edit`](Self::edit) of it from inside waits forever.
+    pub fn read<R>(&self, read: impl FnOnce(&T) -> R) -> R {
+        self.entry.read(read)
+    }
+
+    /// Change the entity in place; the next flush writes what changed.
+    ///
+    /// The entity is locked while `edit` runs: reading it from inside
+    /// through this or another handle waits forever.
     pub fn edit<R>(&self, edit: impl FnOnce(&mut T) -> R) -> R {
         self.entry.edit(edit)
     }
 
+    /// Put `entity` in place of the tracked one; the next flush writes what
+    /// changed.
     pub fn replace(&self, entity: T) {
         self.entry.replace(entity);
     }
@@ -380,6 +170,10 @@ impl<T> ManagedEntry<T> {
         T: Clone,
     {
         self.current.read().clone()
+    }
+
+    pub(crate) fn read<R>(&self, read: impl FnOnce(&T) -> R) -> R {
+        read(&self.current.read())
     }
 
     pub(crate) fn edit<R>(&self, edit: impl FnOnce(&mut T) -> R) -> R {
@@ -466,39 +260,37 @@ impl<T: Send + Sync + 'static> ManagedEntry<T> {
 #[async_trait]
 impl<T> ManagedOps for ManagedEntry<T>
 where
-    T: TideEntityManagerMergePersisted + TideEntityManagerSync,
-    <<T as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
-        PartialEq,
+    T: ManagedModel,
 {
     fn current_state(&self) -> EntityState {
         self.state()
     }
 
     fn table_name(&self) -> &'static str {
-        <T as TideEntityManagerMeta>::tide_table_name()
+        <T as crate::model::ModelMeta>::table_name()
     }
 
     fn parent_tables(&self) -> Vec<&'static str> {
-        <T as TideEntityManagerMeta>::tide_parent_tables()
+        <T as crate::model::ModelMeta>::__parent_tables()
     }
 
     fn child_tables(&self) -> Vec<&'static str> {
-        <T as TideEntityManagerMeta>::tide_child_tables()
+        <T as crate::model::ModelMeta>::__child_tables()
     }
 
     fn row_links(&self) -> Vec<RowLink> {
-        let table = <T as TideEntityManagerMeta>::tide_table_name();
+        let table = <T as crate::model::ModelMeta>::table_name();
         let current = self.current.read();
         // A key the database has not numbered yet is no row's to reference.
-        let unnumbered = current.tide_pk_is_new();
-        let key_text = |name: &str| {
-            <T as crate::internal::InternalModel>::field_json_value(&current, name)
-                .ok()
-                .flatten()
-                .filter(|value| !value.is_null())
-                .map(|value| crate::relations::__relation_key(&value))
+        let unnumbered = <T as crate::model::Model>::is_new(&current);
+        // Both sides read as keys of the referenced column, as the database
+        // compares them.
+        let key = |name: &str, kind: Option<&crate::orm::ColumnType>| {
+            <T as crate::internal::InternalModel>::field_value(&current, name)
+                .filter(|value| !crate::query::is_sql_null(value))
+                .map(|value| ValueKey::new(crate::internal::column_value(&value, kind)))
         };
-        <T as TideEntityManagerMeta>::tide_row_references()
+        <T as crate::model::ModelMeta>::__row_references()
             .into_iter()
             .filter(|(related, _, _)| *related == table)
             .map(|(_, foreign_key, referenced)| {
@@ -506,15 +298,16 @@ where
                     .is_some_and(|column| {
                         <T as crate::model::ModelMeta>::primary_key_names().contains(&column)
                     });
+                let kind = crate::internal::column_type_of::<T>(referenced);
                 RowLink {
                     foreign_key,
                     referenced,
                     provides: if unnumbered && is_key {
                         None
                     } else {
-                        key_text(referenced)
+                        key(referenced, kind.as_ref())
                     },
-                    requires: key_text(foreign_key),
+                    requires: key(foreign_key, kind.as_ref()),
                 }
             })
             .collect()
@@ -536,243 +329,6 @@ where
     }
 }
 
-/// What one flush of an entry changed, each part as `(before, after)`, to
-/// put back if the flush's transaction does not commit.
-struct FlushUndo<T> {
-    fields: Option<FieldChanges<T>>,
-    snapshot: (Option<T>, Option<T>),
-    persisted_key: (Option<String>, Option<String>),
-    identity_key: (Option<String>, Option<String>),
-    state: (EntityState, EntityState),
-}
-
-impl<T> ManagedEntry<T>
-where
-    T: TideEntityManagerMergePersisted + TideEntityManagerSync,
-    <<T as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
-        PartialEq,
-{
-    /// Delete the row of an entry marked removed, if one was stored, and
-    /// detach the entry.
-    async fn flush_removal(
-        self: &Arc<Self>,
-        entity_manager: &Arc<EntityManager>,
-    ) -> crate::error::Result<()> {
-        // Only a row that exists gets a DELETE, so that stays gated on
-        // `persisted_key`. Evicting from the identity map is a separate
-        // question and uses `identity_key`, which is also set for an
-        // entity `persist`ed under a client-assigned key and never
-        // inserted — without this it survived the remove and a later
-        // `find_managed` handed back a row that was never written.
-        let persisted = self.persisted_key.read().as_ref().cloned();
-        if let Some(key) = persisted {
-            let entity = self
-                .snapshot
-                .read()
-                .clone()
-                .unwrap_or_else(|| self.current.read().clone());
-            // A detached merge may have no loaded snapshot. In that
-            // case `entity` is the live value, whose key can have been
-            // edited since it was attached. Never delete another row.
-            let delete_key = entity.tide_pk_key();
-            if delete_key != key {
-                return Err(crate::error::Error::query(format!(
-                    "the primary key of a managed {} row changed from {key} to \
-                     {delete_key}; refusing to delete a different row",
-                    <T as crate::model::ModelMeta>::table_name()
-                )));
-            }
-            super::with_entity_manager_db(
-                entity_manager,
-                <T as crate::model::Model>::delete(entity),
-            )
-            .await?;
-            entity_manager.remove_by_entity_manager_key::<T>(&key);
-        }
-
-        let snapshot = self.snapshot.write().take();
-        let persisted_key = self.persisted_key.write().take();
-        let identity_key = self.identity_key.read().clone();
-        let state = self.state();
-        self.evict(entity_manager);
-        let undo = FlushUndo {
-            fields: None,
-            snapshot: (snapshot, None),
-            persisted_key: (persisted_key, None),
-            identity_key: (identity_key, None),
-            state: (state, EntityState::Detached),
-        };
-        self.undo_flush_on_rollback(entity_manager, undo);
-        Ok(())
-    }
-
-    /// Insert or update the entry's row and sync its relations, then move
-    /// the entry onto the row as stored.
-    async fn flush_write(
-        self: &Arc<Self>,
-        entity_manager: &Arc<EntityManager>,
-    ) -> crate::error::Result<()> {
-        let current = self.current.read().clone();
-        // A saved row is identified by its primary key, so writing
-        // this entity under a changed key would write another row.
-        if let Some(persisted) = self.persisted_key.read().as_deref() {
-            let key = current.tide_pk_key();
-            if key != persisted {
-                return Err(crate::error::Error::query(format!(
-                    "the primary key of a managed {} row changed from {persisted} to \
-                     {key}; a managed entity keeps its key, so detach it and persist \
-                     a new one",
-                    <T as crate::model::ModelMeta>::table_name()
-                )));
-            }
-        }
-        let columns_changed = match self.snapshot.read().as_ref() {
-            Some(snapshot) => snapshot.to_entity_model() != current.to_entity_model(),
-            None => true,
-        };
-
-        // The map entry may predate the insert: `persist` files a
-        // client-assigned key immediately. Evict under whatever it was
-        // actually filed as, not under the persisted key it may not have.
-        let previous_key = self.identity_key.read().as_ref().cloned();
-        let saved = if columns_changed {
-            save_in_scope(&current, entity_manager).await?
-        } else {
-            sync_entity_manager_relations_only_impl(&current, entity_manager).await?
-        };
-        let next_key = Some(saved.tide_pk_key());
-
-        // Edits made while the row was being written stay, over the
-        // row as stored, and leave the entry dirty for the next flush.
-        let fields = {
-            let mut live = self.current.write();
-            // A relation edited meanwhile cannot be merged with the rows
-            // the flush wrote for it. Failing rolls the flush back,
-            // which leaves the edited value for the next flush.
-            if !live.tide_relations_match(&current) {
-                return Err(crate::error::Error::query(format!(
-                    "a relation of a managed {} row was edited while the flush wrote \
-                     it; the flush was rolled back and the edit kept, so flush again",
-                    <T as crate::model::ModelMeta>::table_name()
-                )));
-            }
-            let mut stored = saved.clone();
-            let fields = merge_fields(&mut stored, &*live, &current, &saved)?;
-            *live = stored;
-            FieldChanges {
-                fields,
-                before: current,
-                after: saved.clone(),
-            }
-        };
-        let snapshot = self.snapshot.write().replace(saved.clone());
-        let persisted_key = std::mem::replace(&mut *self.persisted_key.write(), next_key.clone());
-
-        // A remove or detach may have arrived during the save. Keep
-        // that request, while recording the saved row so a pending
-        // removal can delete even an insert that just received its key.
-        // Serialize re-filing with evict, without holding this lock
-        // across database work or user edits to the current value.
-        let mut state = self.state.write();
-        let state_before = *state;
-        let identity_before = self.identity_key.read().clone();
-        if *state != EntityState::Detached {
-            if let Some(ref previous_key) = previous_key
-                && Some(previous_key.as_str()) != next_key.as_deref()
-            {
-                entity_manager.remove_managed_entry::<T>(previous_key);
-            }
-            if let Some(key) = next_key.as_deref() {
-                entity_manager.put_managed_entry::<T>(key, self.clone());
-            }
-            *self.identity_key.write() = next_key.clone();
-            if *state != EntityState::Removed {
-                *state = EntityState::Managed;
-            }
-        }
-        let undo = FlushUndo {
-            fields: Some(fields),
-            snapshot: (snapshot, Some(saved)),
-            persisted_key: (persisted_key, next_key),
-            identity_key: (identity_before, self.identity_key.read().clone()),
-            state: (state_before, *state),
-        };
-        drop(state);
-        self.undo_flush_on_rollback(entity_manager, undo);
-        Ok(())
-    }
-
-    /// Put back what a flush changed if its transaction does not commit:
-    /// when the flush fails, is cancelled, or a transaction enclosing it
-    /// rolls back.
-    fn undo_flush_on_rollback(
-        self: &Arc<Self>,
-        entity_manager: &Arc<EntityManager>,
-        undo: FlushUndo<T>,
-    ) {
-        let entry = Arc::clone(self);
-        let entity_manager = Arc::downgrade(entity_manager);
-        crate::cache::undo_on_rollback(move || entry.undo_flush(&entity_manager, undo));
-    }
-
-    /// Put back each part of `undo` that still holds what the flush left, so
-    /// what was done to the entry since, an edit, a removal or a detach,
-    /// stays. An entry the flush detached is managed again.
-    fn undo_flush(self: &Arc<Self>, entity_manager: &Weak<EntityManager>, undo: FlushUndo<T>) {
-        let Some(entity_manager) = entity_manager.upgrade() else {
-            return;
-        };
-        let mut state = self.state.write();
-        if let Some(fields) = undo.fields {
-            let mut current = self.current.write();
-            // The entry took the stored row's relation wrappers, with the
-            // rows the flush wrote and the keys a save diffs against; unless
-            // edited since, they go back to what the flush read.
-            if current.tide_relations_match(&fields.after) {
-                current.tide_relations_from(&fields.before);
-            }
-            fields.undo(&mut *current);
-        }
-        {
-            let mut snapshot = self.snapshot.write();
-            let model = |row: Option<&T>| row.map(|row| row.to_entity_model());
-            if model(snapshot.as_ref()) == model(undo.snapshot.1.as_ref()) {
-                *snapshot = undo.snapshot.0;
-            }
-        }
-        {
-            let mut persisted_key = self.persisted_key.write();
-            if *persisted_key == undo.persisted_key.1 {
-                *persisted_key = undo.persisted_key.0;
-            }
-        }
-        {
-            let (before, after) = undo.identity_key;
-            let mut identity_key = self.identity_key.write();
-            if *identity_key == after && before != after {
-                if let Some(key) = after.as_deref() {
-                    entity_manager.remove_managed_entry::<T>(key);
-                }
-                if let Some(key) = before.as_deref() {
-                    entity_manager.put_managed_entry::<T>(key, self.clone());
-                }
-                *identity_key = before;
-            }
-        }
-        let (before, after) = undo.state;
-        let reregister = *state == after && before != after && after == EntityState::Detached;
-        if *state == after {
-            *state = before;
-        }
-        // A flush that completes drops its detached entries from the list; the
-        // list's lock is taken before an entry's when it does.
-        drop(state);
-        if reregister {
-            entity_manager.reregister_managed_entry(self.clone());
-        }
-    }
-}
-
 /// The fields a merge gave the stored value, which differed from what the
 /// entry held: `before` holds those values, `after` the stored ones.
 struct FieldChanges<T> {
@@ -786,11 +342,7 @@ impl<T: crate::model::Model> FieldChanges<T> {
     /// since keeps the edit.
     fn undo(self, target: &mut T) {
         for field in self.fields {
-            let unchanged = matches!(
-                (target.field_compare_value(field), self.after.field_compare_value(field)),
-                (Ok(current), Ok(stored)) if current == stored
-            );
-            if unchanged {
+            if target.field_value(field) == self.after.field_value(field) {
                 // An undo has no caller to report to; the field keeps its value.
                 let _ = target.copy_field_from(&self.before, field);
             }
@@ -801,10 +353,10 @@ impl<T: crate::model::Model> FieldChanges<T> {
 /// Give `target` each field of `holder` merged with `saved`, the row as
 /// stored: a field `holder` still holds as in `base` takes the stored value,
 /// and one changed since `base` keeps the change. Relation wrappers are
-/// `target`'s own. Fields are compared by
-/// [`field_compare_value`](crate::internal::InternalModel::field_compare_value)
-/// and copied as values, so a NaN float neither hides a change nor fails a
-/// copy through JSON. Returns the fields that took a different stored value.
+/// `target`'s own. Fields are compared and copied as values
+/// ([`field_value`](crate::internal::InternalModel::field_value)), so a NaN
+/// float neither hides a change nor fails a copy. Returns the fields that
+/// took a different stored value.
 fn merge_fields<T>(
     target: &mut T,
     holder: &T,
@@ -816,9 +368,9 @@ where
 {
     let mut changed = Vec::new();
     for &field in <T as crate::model::ModelMeta>::field_names() {
-        let held = holder.field_compare_value(field)?;
-        let source = if held == base.field_compare_value(field)? {
-            if held != saved.field_compare_value(field)? {
+        let held = holder.field_value(field);
+        let source = if held == base.field_value(field) {
+            if held != saved.field_value(field) {
                 changed.push(field);
             }
             saved

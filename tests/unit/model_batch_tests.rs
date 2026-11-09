@@ -68,7 +68,7 @@ fn batch_update_when_sets_only_when_the_condition_holds() {
         .when(true, |update| update.set("name", "updated"));
     assert!(matches!(
         builder.updates.get("name"),
-        Some(super::UpdateValue::Value(value)) if *value == serde_json::json!("updated")
+        Some(super::UpdateValue::Value(value)) if *value == crate::DbValue::from("updated")
     ));
 
     let builder = BatchUpdateBuilder::<BatchUpdateGuardUser>::new()
@@ -93,33 +93,39 @@ fn batch_update_builder_accepts_typed_columns() {
 }
 
 #[test]
-fn batch_update_builder_literal_like_helpers_escape_metacharacters() {
+fn batch_update_builder_literal_like_helpers_keep_the_literal() {
     let builder = BatchUpdateGuardUser::update_all()
         .where_contains("name", r"100%_\done")
         .or_where_starts_with("name", r"lead%_")
         .or_where_ends_with("name", r"tail%_");
 
     assert_eq!(builder.conditions.len(), 1);
-    assert!(matches!(
-        builder.conditions[0].operator,
-        crate::query::Operator::LikeEscaped
-    ));
-    assert!(matches!(
-        &builder.conditions[0].value,
-        crate::query::ConditionValue::Single(serde_json::Value::String(value))
-            if value == r"%100!%!_\done%"
-    ));
     assert_eq!(builder.or_group.conditions.len(), 2);
-    assert!(matches!(
-        &builder.or_group.conditions[0].value,
-        crate::query::ConditionValue::Single(serde_json::Value::String(value))
-            if value == r"lead!%!_%"
-    ));
-    assert!(matches!(
-        &builder.or_group.conditions[1].value,
-        crate::query::ConditionValue::Single(serde_json::Value::String(value))
-            if value == r"%tail!%!_"
-    ));
+    // The `LIKE` pattern is escaped when the condition renders.
+    for (condition, operator, literal) in [
+        (
+            &builder.conditions[0],
+            crate::query::Operator::Contains,
+            r"100%_\done",
+        ),
+        (
+            &builder.or_group.conditions[0],
+            crate::query::Operator::StartsWith,
+            r"lead%_",
+        ),
+        (
+            &builder.or_group.conditions[1],
+            crate::query::Operator::EndsWith,
+            r"tail%_",
+        ),
+    ] {
+        assert_eq!(condition.operator, operator);
+        assert!(matches!(
+            &condition.value,
+            crate::query::ConditionValue::Single(crate::DbValue::String(Some(value)))
+                if value == literal
+        ));
+    }
 }
 
 #[test]

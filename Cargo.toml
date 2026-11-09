@@ -1,6 +1,6 @@
 [package]
 name = "tideorm"
-version = "0.16.2"
+version = "0.17.0"
 edition = "2024"
 authors = ["Mohamad Al Zohbie <alzoubi528@gmail.com>"]
 description = "A developer-friendly ORM for Rust with clean, expressive syntax"
@@ -12,11 +12,11 @@ keywords = ["orm", "database", "postgres", "mysql", "sqlite"]
 categories = ["database"]
 readme = "README.md"
 # Declared MSRV, and what downstream resolvers see. It is set by the dependency
-# tree, not by the edition floor: sea-orm 2.x requires 1.94.0, and `resolver = "3"`
-# refuses to build against a dependency that wants more than the running toolchain.
+# tree, not by the edition floor: `resolver = "3"` refuses to build against a
+# dependency that wants more than the running toolchain.
 # The `msrv` job in .github/workflows/ci.yml pins this exact toolchain and runs
 # `cargo check`, so a post-1.94 API cannot land unnoticed. Raising this touches
-# five places — see the MSRV bullet in CONTRIBUTING.md, which lists them; a bump
+# eight places — see the MSRV bullet in CONTRIBUTING.md, which lists them; a bump
 # also switches on MSRV-gated clippy lints, so re-run clippy after one.
 rust-version = "1.94"
 # `tests/unit/**` and `tests/support/**` are `#[path]`-included into `src/`, so a
@@ -53,13 +53,14 @@ resolver = "3"
 
 [features]
 default = ["postgres", "runtime-tokio"]
-postgres = ["sea-orm/sqlx-postgres"]
-mysql = ["sea-orm/sqlx-mysql"]
-# sqlx builds its bundled SQLite (3.46 or later), which has `RETURNING`, so an
-# insert or update needs one statement instead of the write plus a `SELECT` of the row.
-sqlite = ["sea-orm/sqlx-sqlite", "sea-orm/sqlite-use-returning-for-3_35", "dep:async-io"]
-runtime-tokio = ["sea-orm/runtime-tokio-rustls"]
-runtime-async-std = ["sea-orm/runtime-async-std-rustls"]
+postgres = ["tideorm-engine/postgres", "tideorm-macros/postgres"]
+mysql = ["tideorm-engine/mysql"]
+# The SQLite driver builds its bundled SQLite (3.46 or later), which has `RETURNING`, so the
+# engine's `sqlite` feature writes an insert or update as one statement instead of
+# the write plus a `SELECT` of the row.
+sqlite = ["tideorm-engine/sqlite", "dep:async-io"]
+runtime-tokio = ["tideorm-engine/runtime-tokio"]
+runtime-async-std = ["tideorm-engine/runtime-async-std"]
 # These module flags intentionally gate TideORM's public API surface via #[cfg(feature = ...)]
 # and feature-specific tests/benches only. They do not enable extra dependencies.
 attachments = []
@@ -70,16 +71,10 @@ dirty-tracking = []
 encrypted-fields = []
 
 [dependencies]
-# A caret range now that 2.x is stable. `src/orm.rs` re-exports all of sea-orm and
-# macro-generated models resolve `sea_orm::` paths through it, so a resolver bump
-# used to surface as errors inside macro expansion in downstream crates — which is
-# what the old `=2.0.0-rc.38` pin existed to prevent. Within a stable major, semver
-# is what rules that out, so the pin is no longer carrying its weight.
-#
-# This crate's MSRV is downstream of this line: sea-orm 2.x declares
-# `rust-version = "1.94.0"`, and `resolver = "3"` enforces it. Raising this range
-# can therefore raise the toolchain floor without any of our own code changing.
-sea-orm = { version = "2.0.4", default-features = false, features = ["macros", "with-chrono", "with-json", "with-rust_decimal", "with-uuid"] }
+# The execution engine, from its own repository (rust-ocean/tideorm-engine).
+# `src/orm.rs` re-exports it, with the ORM derive macros from `tideorm-macros`,
+# and macro-generated models reach both through that module's paths.
+tideorm-engine = { version = "0.1.0", default-features = false }
 
 # Async runtime
 async-trait = "0.1.92"
@@ -99,11 +94,11 @@ rust_decimal = { version = "1.43.0", features = ["serde"] }
 thiserror = "2.0.21"
 
 # Derive macros (our own crate)
-tideorm-macros = { version = "0.16.2", path = "tideorm-macros" }
+tideorm-macros = { version = "0.17.0", path = "tideorm-macros" }
 
 # Utils
 parking_lot = "0.12.5"
-# An async mutex that works on either runtime; sea-orm already builds this crate.
+# An async mutex that works on either runtime; the engine already builds this crate.
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 inventory = "0.3.25"
 regex = "1.13.1"
@@ -113,7 +108,7 @@ argon2 = "0.6.0"
 
 [dev-dependencies]
 async-std = "1.13.2"
-tokio = { version = "1.54.1", features = ["full", "test-util", "macros"] }
+tokio = { version = "1.54.1", features = ["full"] }
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 dotenvy = "0.15.7"
 trybuild = "1.0.122"

@@ -1,5 +1,6 @@
-//! Case conversion for the names a model derives: table and column names
-//! (snake_case) and the entity enum variants (PascalCase).
+//! Case conversion for every name the derives make up: table and column names
+//! (snake_case), the entity enum variants (PascalCase), and the `rename_all`
+//! styles and default names of the other derives.
 //!
 //! The word boundaries decide the table and column an existing model maps to, so
 //! they reproduce `convert_case` 0.11 exactly: the same rules over the same grapheme
@@ -10,19 +11,25 @@ use unicode_segmentation::UnicodeSegmentation;
 
 /// `UserProfile` → `user_profile`, `HTTPRequest` → `http_request`.
 pub(crate) fn to_snake_case(ident: &str) -> String {
-    words(ident)
-        .iter()
-        .map(|word| word.to_lowercase())
-        .collect::<Vec<_>>()
-        .join("_")
+    convert(ident, "_", str::to_lowercase)
 }
 
 /// `created_at` → `CreatedAt`, `HTTPRequest` → `HttpRequest`.
 pub(crate) fn to_pascal_case(ident: &str) -> String {
-    words(ident).into_iter().map(capitalize).collect()
+    convert(ident, "", capitalize)
 }
 
-fn capitalize(word: &str) -> String {
+/// The words of `ident`, each passed through `word`, joined by `separator`.
+pub(crate) fn convert(ident: &str, separator: &str, word: fn(&str) -> String) -> String {
+    words(ident)
+        .into_iter()
+        .map(word)
+        .collect::<Vec<_>>()
+        .join(separator)
+}
+
+/// `hTTP` → `Http`.
+pub(crate) fn capitalize(word: &str) -> String {
     let mut chars = word.chars();
     match chars.next() {
         Some(first) => first

@@ -1,34 +1,15 @@
 use crate::config::DatabaseType;
-use crate::internal::Value;
-use std::fmt::Write as _;
 
-mod arrays;
-mod mysql_json;
 mod placeholders;
-mod sqlite_json;
 
-pub(crate) use crate::internal::placeholder;
 pub(crate) use crate::internal::sql_safety::{
-    format_identifier_reference, is_safe_identifier_segment, push_quoted_ident, quote_ident,
-    validate_compound_subquery_sql, validate_having_sql_fragment, validate_identifier,
-    validate_identifier_reference, validate_join_column, validate_raw_sql_fragment,
-    validate_subquery_sql,
+    format_identifier_reference, is_safe_identifier_segment, push_quoted_ident,
+    push_quoted_qualified, quote_ident, validate_compound_subquery_sql,
+    validate_having_sql_fragment, validate_identifier, validate_identifier_reference,
+    validate_join_column, validate_raw_sql_fragment, validate_subquery_sql,
 };
-pub(crate) use arrays::{
-    all_elements, any_element, array_contained_by, postgres_array_contained_by,
-    postgres_array_contains, postgres_array_overlaps,
-};
-
-/// A predicate that holds for no row. A condition that cannot hold (an
-/// overlap with no values, a search with no word) renders as it rather than
-/// leaving the WHERE clause.
-pub(crate) const MATCH_NOTHING: &str = "0 = 1";
-
-/// `test`, unknown for a NULL column, which matches neither a JSON test nor
-/// its negation.
-fn unknown_when_null(column_sql: &str, test: &str) -> String {
-    format!("CASE WHEN {column_sql} IS NOT NULL THEN {test} END")
-}
+pub(crate) use crate::orm::sql_builder::{BoundSql, MATCH_NOTHING, parse_json_path};
+use crate::orm::sql_builder::{Expr, SchemaName, SelectStatement, TableName};
 
 /// `base`, with `_` appended until `taken` no longer holds: a name for a
 /// generated output that no model column or other output already uses.
@@ -40,36 +21,43 @@ pub(crate) fn unused_name(base: &str, taken: impl Fn(&str) -> bool) -> String {
     name
 }
 
-/// `SELECT <projection> FROM (<inner_sql>) AS <alias>`: a query's rows read
+/// `SELECT <projection> FROM (<inner>) AS <alias>`: a query's rows read
 /// through a derived table.
 pub(crate) fn select_from_derived(
+    projection: impl Into<String>,
+    inner: SelectStatement,
+    alias: &'static str,
+) -> SelectStatement {
+    let mut select = SelectStatement::new();
+    select
+        .expr(Expr::cust(projection.into()))
+        .from_subquery(inner, alias);
+    select
+}
+
+/// `statement` rendered for `db_type`: its SQL and the values it binds.
+pub(crate) fn built(
     db_type: DatabaseType,
-    projection: &str,
-    inner_sql: &str,
-    alias: &str,
-) -> String {
-    format!(
-        "SELECT {projection} FROM ({inner_sql}) AS {}",
-        quote_ident(db_type, alias)
+    statement: &impl crate::orm::StatementBuilder,
+) -> crate::error::Result<(String, Vec<crate::internal::Value>)> {
+    let statement = db_type
+        .build(statement)
+        .map_err(crate::internal::translate_error)?;
+    Ok((
+        statement.sql,
+        statement.values.map_or_else(Vec::new, |values| values.0),
+    ))
+}
+
+/// A table a statement reads, qualified with `schema` when given.
+pub(crate) fn table_name(schema: Option<&str>, table: &str) -> TableName {
+    TableName(
+        schema.map(|schema| SchemaName(None, schema.to_owned().into())),
+        table.to_owned().into(),
     )
 }
 
-pub(crate) use placeholders::{
-    count_template_placeholders, inline_parameters, map_template_placeholders, placeholders,
-    rebase_placeholders, render_template,
-};
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct BoundSql {
-    pub sql: String,
-    pub values: Vec<Value>,
-}
-
-impl BoundSql {
-    pub(crate) fn new(sql: String, values: Vec<Value>) -> Self {
-        Self { sql, values }
-    }
-}
+pub(crate) use placeholders::{count_template_placeholders, inline_parameters, template_bound};
 
 /// `M`'s table as a statement names it: quoted, and qualified with the model's
 /// schema when it declares one.
@@ -87,11 +75,7 @@ pub(crate) fn push_quoted_table<M: crate::model::ModelMeta>(
     out: &mut String,
     db_type: DatabaseType,
 ) {
-    if let Some(schema) = M::schema_name() {
-        push_quoted_ident(out, db_type, schema);
-        out.push('.');
-    }
-    push_quoted_ident(out, db_type, M::table_name());
+    push_quoted_qualified(out, db_type, M::schema_name(), M::table_name());
 }
 
 /// `M`'s own columns as a projection, each qualified with `qualifier` when given.
@@ -118,394 +102,6 @@ pub(crate) fn model_columns_sql<M: crate::model::ModelMeta>(
         push_quoted_ident(&mut sql, db_type, column);
     }
     sql
-}
-
-/// Bind a JSON value as its JSON text, for backends that parse it server-side.
-pub(crate) fn json_scalar_parameter(value: &serde_json::Value) -> Value {
-    Value::String(Some(value.to_string()))
-}
-
-/// Bind a list of JSON values or strings as the text of one JSON array.
-///
-/// The list is serialized where it lies rather than copied into an array
-/// value first: it is how a long `where_in` list binds, thousands of values.
-/// JSON values and strings always serialize, so the text is never the empty
-/// default.
-pub(crate) fn json_array_parameter<T: serde::Serialize>(values: &[T]) -> Value {
-    Value::String(Some(serde_json::to_string(values).unwrap_or_default()))
-}
-
-fn json_native_parameter(value: &serde_json::Value) -> Value {
-    Value::Json(Some(Box::new(value.clone())))
-}
-
-/// The JSON path of the member `key` below `path`, the key quoted.
-fn json_member_path(path: &str, key: &str) -> String {
-    format!("{path}.{}", serde_json::Value::from(key))
-}
-
-/// `column_sql` as `jsonb`, which PostgreSQL's JSON operators require: a
-/// `json` column has none of them. On a `jsonb` column the cast is dropped at
-/// planning, so its indexes still apply.
-pub(crate) fn postgres_jsonb(column_sql: &str) -> String {
-    format!("({column_sql})::jsonb")
-}
-
-/// Render "`column` holds the JSON document `value`" (or does not, when
-/// `negated`), compared as JSON rather than as text, so key order and
-/// spacing do not count and `1` equals `1.0`. PostgreSQL's `json` type has
-/// no `=` at all, MySQL compared the document with a string, which never
-/// matched, and SQLite, which compares JSON only as text, compares the
-/// document's structure.
-pub(crate) fn json_equals_bound(
-    db_type: DatabaseType,
-    column_sql: &str,
-    value: &serde_json::Value,
-    negated: bool,
-) -> BoundSql {
-    let operator = if negated { "<>" } else { "=" };
-    let text = || vec![json_scalar_parameter(value)];
-    match db_type {
-        DatabaseType::Postgres => BoundSql::new(
-            format!("{} {} $1", postgres_jsonb(column_sql), operator),
-            vec![json_native_parameter(value)],
-        ),
-        DatabaseType::MySQL => BoundSql::new(
-            format!("{} {} CAST(? AS JSON)", column_sql, operator),
-            text(),
-        ),
-        // MariaDB has no `CAST(.. AS JSON)`, and its `JSON_EQUALS` reads a
-        // NULL column as the `null` document; a NULL column matches neither
-        // the test nor its negation.
-        DatabaseType::MariaDB => BoundSql::new(
-            format!(
-                "{}({})",
-                if negated { "NOT " } else { "" },
-                unknown_when_null(column_sql, &format!("JSON_EQUALS({column_sql}, ?)")),
-            ),
-            text(),
-        ),
-        // A NULL column matches neither the test nor its negation.
-        DatabaseType::SQLite => {
-            let (equal, values) = sqlite_json::sqlite_json_equals(column_sql, value);
-            let sql = if negated {
-                format!("({column_sql} IS NOT NULL AND NOT {equal})")
-            } else {
-                equal
-            };
-            BoundSql::new(sql, values)
-        }
-    }
-}
-
-/// Render "the `json_each` row `alias` holds the JSON value `value`" on
-/// SQLite, compared as [`json_equals_bound`] compares documents.
-pub(crate) fn sqlite_json_element_equals(alias: &str, value: &serde_json::Value) -> BoundSql {
-    let (sql, values) = sqlite_json::sqlite_json_element_equals(alias, value);
-    BoundSql::new(sql, values)
-}
-
-/// Which way a JSON containment test reads, as PostgreSQL's `@>` and `<@` do.
-#[derive(Clone, Copy)]
-pub(crate) enum JsonContainment {
-    /// The column holds every key and element of the value.
-    Contains,
-    /// The value holds every key and element of the column.
-    ContainedBy,
-}
-
-/// Render a JSON containment test of `column_sql` against `value`.
-pub(crate) fn json_containment_bound(
-    db_type: DatabaseType,
-    column_sql: &str,
-    value: &serde_json::Value,
-    containment: JsonContainment,
-) -> BoundSql {
-    let contains = matches!(containment, JsonContainment::Contains);
-    let (sql, values) = match db_type {
-        DatabaseType::Postgres => (
-            format!(
-                "{} {} $1",
-                postgres_jsonb(column_sql),
-                if contains { "@>" } else { "<@" }
-            ),
-            vec![json_native_parameter(value)],
-        ),
-        DatabaseType::MySQL | DatabaseType::MariaDB if contains => {
-            mysql_json::mysql_json_contains(column_sql, value)
-        }
-        DatabaseType::MySQL | DatabaseType::MariaDB => {
-            mysql_json::mysql_json_contained_by(column_sql, value)
-        }
-        DatabaseType::SQLite if contains => sqlite_json::sqlite_json_contains(column_sql, value),
-        DatabaseType::SQLite => sqlite_json::sqlite_json_contained_by(column_sql, value),
-    };
-    BoundSql::new(sql, values)
-}
-
-/// What a JSON existence predicate looks for.
-#[derive(Clone, Copy)]
-pub(crate) enum JsonExistence {
-    /// A top-level member, named by a plain key.
-    Key,
-    /// A JSON path such as `$.user.name`.
-    Path,
-}
-
-/// Render a JSON key- or path-existence test, or its negation.
-///
-/// Every backend reads a path strictly: a member step finds a member of an
-/// object only, never of the objects inside an array, and an index step an
-/// element of an array only. A key is the one-member path that names it, so
-/// it exists only in an object. A member holding JSON `null` exists, and a
-/// `NULL` column is unknown, so that the negation does not match it either.
-///
-/// PostgreSQL tests a key with `?`, which also finds a string element of an
-/// array, so it checks the document is an object first, and a path with
-/// `@?` in `strict` mode, where the default `lax` mode would look into
-/// arrays and read a scalar as an array of one. MySQL and MariaDB read an
-/// index of a non-array as the value itself, so each indexed step checks its
-/// parent is an array. SQLite's `json_type` is strict already, and finds a
-/// member holding JSON `null`, which `json_extract` reports as SQL `NULL`.
-///
-/// `None` means the path has steps no other backend can express; PostgreSQL
-/// reads such a path as the JSONPath written.
-pub(crate) fn json_exists_bound(
-    db_type: DatabaseType,
-    column_sql: &str,
-    existence: JsonExistence,
-    target: &str,
-    negated: bool,
-) -> Option<BoundSql> {
-    let steps = match existence {
-        JsonExistence::Key => Some(vec![JsonPathStep::Member(target.to_string())]),
-        JsonExistence::Path => parse_json_path(target),
-    };
-    let (sql, bound) = match (db_type, steps) {
-        (DatabaseType::Postgres, steps) => {
-            let jsonb = postgres_jsonb(column_sql);
-            match (existence, steps) {
-                (JsonExistence::Key, _) => (
-                    unknown_when_null(
-                        column_sql,
-                        &format!("(jsonb_typeof({jsonb}) = 'object' AND {jsonb} ? $1)"),
-                    ),
-                    vec![target.to_string()],
-                ),
-                // A step strict mode refuses is suppressed by `@?`, which
-                // then reports no answer; it is a missing member.
-                (JsonExistence::Path, Some(steps)) => (
-                    unknown_when_null(
-                        column_sql,
-                        &format!("COALESCE({jsonb} @? ($1::jsonpath), FALSE)"),
-                    ),
-                    vec![format!("strict {}", json_path_text(&steps))],
-                ),
-                (JsonExistence::Path, None) => (
-                    format!("{jsonb} @? ($1::jsonpath)"),
-                    vec![target.to_string()],
-                ),
-            }
-        }
-        (_, None) => return None,
-        (DatabaseType::SQLite, Some(steps)) => (
-            unknown_when_null(
-                column_sql,
-                &format!("json_type({column_sql}, ?) IS NOT NULL"),
-            ),
-            vec![json_path_text(&steps)],
-        ),
-        (DatabaseType::MySQL | DatabaseType::MariaDB, Some(steps)) => {
-            let mut sql = format!("JSON_CONTAINS_PATH({column_sql}, 'one', ?)");
-            let mut bound = vec![json_path_text(&steps)];
-            for (index, step) in steps.iter().enumerate() {
-                if matches!(step, JsonPathStep::Element(_)) {
-                    sql.push_str(" AND ");
-                    sql.push_str(&mysql_json::guard_sql(column_sql, mysql_json::Kind::Array));
-                    bound.push(json_path_text(&steps[..index]));
-                }
-            }
-            (sql, bound)
-        }
-    };
-
-    let sql = if negated {
-        format!("NOT ({})", sql)
-    } else {
-        sql
-    };
-    let values = bound
-        .into_iter()
-        .map(|text| Value::String(Some(text)))
-        .collect();
-    Some(BoundSql::new(sql, values))
-}
-
-/// One step of a JSON path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum JsonPathStep {
-    /// The member a key names.
-    Member(String),
-    /// The array element at an index.
-    Element(u64),
-}
-
-/// The steps of a JSON path written `$` followed by `.key`, `."quoted key"`,
-/// `['quoted key']` or `[index]` steps; `None` for anything else, such as a
-/// wildcard or an unquoted key that is not a plain identifier.
-pub(crate) fn parse_json_path(path: &str) -> Option<Vec<JsonPathStep>> {
-    let chars: Vec<char> = path.chars().collect();
-    if chars.first().copied() != Some('$') {
-        return None;
-    }
-
-    let mut index = 1;
-    let mut steps = Vec::new();
-    while index < chars.len() {
-        let step = match chars[index] {
-            '.' => {
-                index += 1;
-                match chars.get(index) {
-                    Some('"' | '\'') => {
-                        JsonPathStep::Member(parse_quoted_json_path_segment(&chars, &mut index)?)
-                    }
-                    Some(_) => {
-                        let start = index;
-                        while index < chars.len() && chars[index] != '.' && chars[index] != '[' {
-                            index += 1;
-                        }
-                        let segment: String = chars[start..index].iter().collect();
-                        if !is_safe_identifier_segment(&segment) {
-                            return None;
-                        }
-                        JsonPathStep::Member(segment)
-                    }
-                    None => return None,
-                }
-            }
-            '[' => {
-                index += 1;
-                let step = match chars.get(index) {
-                    Some('"' | '\'') => {
-                        JsonPathStep::Member(parse_quoted_json_path_segment(&chars, &mut index)?)
-                    }
-                    Some(ch) if ch.is_ascii_digit() => {
-                        let start = index;
-                        while index < chars.len() && chars[index].is_ascii_digit() {
-                            index += 1;
-                        }
-                        let digits: String = chars[start..index].iter().collect();
-                        JsonPathStep::Element(digits.parse().ok()?)
-                    }
-                    _ => return None,
-                };
-                if chars.get(index) != Some(&']') {
-                    return None;
-                }
-                index += 1;
-                step
-            }
-            _ => return None,
-        };
-        steps.push(step);
-    }
-
-    Some(steps)
-}
-
-/// A JSON path as MySQL, MariaDB and SQLite read it, every key quoted.
-pub(crate) fn json_path_text(steps: &[JsonPathStep]) -> String {
-    steps
-        .iter()
-        .fold(String::from("$"), |path, step| match step {
-            JsonPathStep::Member(key) => json_member_path(&path, key),
-            JsonPathStep::Element(index) => format!("{path}[{index}]"),
-        })
-}
-
-/// A JSON path as the `text[]` literal PostgreSQL's `jsonb_set` takes.
-pub(crate) fn postgres_json_path_array(steps: &[JsonPathStep]) -> String {
-    let elements: Vec<String> = steps
-        .iter()
-        .map(|step| {
-            let text = match step {
-                JsonPathStep::Member(key) => key.clone(),
-                JsonPathStep::Element(index) => index.to_string(),
-            };
-            format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
-        })
-        .collect();
-    format!("{{{}}}", elements.join(","))
-}
-
-fn parse_quoted_json_path_segment(chars: &[char], index: &mut usize) -> Option<String> {
-    let quote = chars.get(*index).copied()?;
-    *index += 1;
-    let mut json = String::from("\"");
-    while *index < chars.len() {
-        let ch = chars[*index];
-        *index += 1;
-        if ch == quote {
-            json.push('"');
-            return serde_json::from_str(&json).ok();
-        }
-        if ch == '\\' {
-            let escaped = *chars.get(*index)?;
-            *index += 1;
-            if quote == '\'' && escaped == '\'' {
-                json.push('\'');
-            } else {
-                json.push('\\');
-                json.push(escaped);
-            }
-        } else {
-            if ch == '"' {
-                json.push('\\');
-            }
-            json.push(ch);
-        }
-    }
-    None
-}
-
-/// Append a query's ` LIMIT n OFFSET ?`: the limit written into the SQL, where
-/// SQLite 3.50+ would recompile a statement with a bound LIMIT on every run,
-/// and the offset bound, so paging reuses one statement. MySQL, MariaDB and
-/// SQLite have no bare `OFFSET`, so an offset alone gets the dialect's
-/// open-ended limit.
-pub(crate) fn append_limit_offset(
-    sql: &mut String,
-    db_type: DatabaseType,
-    limit: Option<u64>,
-    offset: Option<u64>,
-    params: &mut Vec<Value>,
-) {
-    match (limit, offset) {
-        (Some(limit), _) => {
-            let _ = write!(sql, " LIMIT {limit}");
-        }
-        (None, Some(_)) => match db_type {
-            DatabaseType::Postgres => {}
-            DatabaseType::SQLite => sql.push_str(" LIMIT -1"),
-            DatabaseType::MySQL | DatabaseType::MariaDB => {
-                let _ = write!(sql, " LIMIT {}", u64::MAX);
-            }
-        },
-        (None, None) => {}
-    }
-    if let Some(offset) = offset {
-        sql.push_str(" OFFSET ");
-        match i64::try_from(offset) {
-            Ok(offset) => sql.push_str(&crate::internal::push_param(
-                db_type,
-                params,
-                Value::BigInt(Some(offset)),
-            )),
-            Err(_) => {
-                let _ = write!(sql, "{offset}");
-            }
-        }
-    }
 }
 
 /// Format a trusted column/expression slot for rendering paths that intentionally

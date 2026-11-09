@@ -70,7 +70,8 @@ fn test_distinct_sentinel_never_reaches_parameterized_sql() {
     let (sql, _) = SelectRenderUser::query()
         .distinct()
         .where_eq("name", "ada")
-        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres)
+        .unwrap();
 
     assert!(
         sql.starts_with(
@@ -85,7 +86,8 @@ fn test_distinct_sentinel_never_reaches_parameterized_sql() {
 fn test_distinct_count_counts_the_deduplicated_rows() {
     let (sql, _) = SelectRenderUser::query()
         .distinct()
-        .build_count_sql_with_params_for_db(DatabaseType::Postgres);
+        .build_count_sql_with_params_for_db(DatabaseType::Postgres)
+        .unwrap();
 
     // The `SELECT COUNT(*)` fast path would count the duplicate rows that
     // DISTINCT exists to collapse, so a distinct query has to count the
@@ -100,7 +102,8 @@ fn test_distinct_count_counts_the_deduplicated_rows() {
 fn test_distinct_does_not_change_the_exists_projection() {
     let (sql, _) = SelectRenderUser::query()
         .distinct()
-        .build_exists_sql_with_params_for_db(DatabaseType::Postgres);
+        .build_exists_sql_with_params_for_db(DatabaseType::Postgres)
+        .unwrap();
 
     assert_eq!(
         sql,
@@ -128,7 +131,7 @@ fn test_distinct_survives_a_fragment_round_trip_without_duplicating() {
 #[test]
 fn test_empty_selection_falls_back_to_the_model_projection() {
     let sql = SelectRenderUser::query()
-        .select(Vec::new())
+        .select(Vec::<&str>::new())
         .build_select_sql_for_db(DatabaseType::Postgres);
 
     assert_eq!(
@@ -187,7 +190,8 @@ fn test_select_subquery_binds_its_values_ahead_of_the_where_clause() {
             "account_id",
         )
         .where_eq("name", "ada")
-        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres)
+        .unwrap();
 
     assert_eq!(
         sql,
@@ -212,18 +216,23 @@ fn test_lock_for_update_closes_the_statement_and_survives_a_fragment() {
 
     let (sql, _) = locked()
         .limit(1)
-        .build_select_sql_with_params_for_db(DatabaseType::MySQL);
+        .build_select_sql_with_params_for_db(DatabaseType::MySQL)
+        .unwrap();
     assert_eq!(
         sql,
         "SELECT `select_render_users`.`id`, `select_render_users`.`name` FROM `select_render_users` WHERE `name` = ? LIMIT 1 FOR UPDATE"
     );
     // SQLite has no row locks and no FOR UPDATE syntax.
-    let (sql, _) = locked().build_select_sql_with_params_for_db(DatabaseType::SQLite);
+    let (sql, _) = locked()
+        .build_select_sql_with_params_for_db(DatabaseType::SQLite)
+        .unwrap();
     assert!(!sql.contains("FOR UPDATE"), "{sql}");
 
     // PostgreSQL refuses FOR UPDATE next to an aggregate, so a locked count
     // locks the rows it reads through a derived table.
-    let (sql, _) = locked().build_count_sql_with_params_for_db(DatabaseType::Postgres);
+    let (sql, _) = locked()
+        .build_count_sql_with_params_for_db(DatabaseType::Postgres)
+        .unwrap();
     assert_eq!(
         sql,
         "SELECT COUNT(*) AS count FROM (SELECT \"select_render_users\".\"id\", \"select_render_users\".\"name\" FROM \"select_render_users\" WHERE \"name\" = $1 FOR UPDATE) AS \"tideorm_count_subquery\""
@@ -233,7 +242,8 @@ fn test_lock_for_update_closes_the_statement_and_survives_a_fragment() {
     assert!(!fragment.is_empty());
     let (sql, _) = SelectRenderUser::query()
         .apply(&fragment)
-        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres)
+        .unwrap();
     assert!(sql.ends_with(" FOR UPDATE"), "{sql}");
 }
 
@@ -246,15 +256,17 @@ fn test_offset_is_bound_last_and_the_limit_written_in() {
         .where_eq("name", "ada")
         .limit(20)
         .offset(40)
-        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres)
+        .unwrap();
     assert!(sql.ends_with(" LIMIT 20 OFFSET $2"), "{sql}");
-    assert_eq!(params.last(), Some(&Value::BigInt(Some(40))));
+    assert_eq!(params.last(), Some(&Value::BigUnsigned(Some(40))));
 
     let (sql, params) = SelectRenderUser::query()
         .offset(40)
-        .build_select_sql_with_params_for_db(DatabaseType::SQLite);
+        .build_select_sql_with_params_for_db(DatabaseType::SQLite)
+        .unwrap();
     assert!(sql.ends_with(" LIMIT -1 OFFSET ?"), "{sql}");
-    assert_eq!(params, vec![Value::BigInt(Some(40))]);
+    assert_eq!(params, vec![Value::BigUnsigned(Some(40))]);
 
     let preview = SelectRenderUser::query()
         .limit(20)
@@ -280,19 +292,17 @@ fn test_offset_is_bound_last_and_the_limit_written_in() {
 fn test_long_lists_bind_one_parameter_where_the_backend_can() {
     let names: Vec<String> = (0..1_500).map(|i| format!("name{i}")).collect();
 
-    // The array value only exists with PostgreSQL support compiled in.
-    #[cfg(feature = "postgres")]
-    {
-        let (sql, params) = SelectRenderUser::query()
-            .where_in("name", names.clone())
-            .build_select_sql_with_params_for_db(DatabaseType::Postgres);
-        assert!(sql.contains(r#""name" = ANY($1)"#), "{sql}");
-        assert_eq!(params.len(), 1);
-    }
+    let (sql, params) = SelectRenderUser::query()
+        .where_in("name", names.clone())
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres)
+        .unwrap();
+    assert!(sql.contains(r#""name" = ANY($1)"#), "{sql}");
+    assert_eq!(params.len(), 1);
 
     let (sql, params) = SelectRenderUser::query()
         .where_not_in("name", names.clone())
-        .build_select_sql_with_params_for_db(DatabaseType::SQLite);
+        .build_select_sql_with_params_for_db(DatabaseType::SQLite)
+        .unwrap();
     assert!(
         sql.contains(r#""name" NOT IN (SELECT value FROM json_each(?))"#),
         "{sql}"
@@ -301,7 +311,8 @@ fn test_long_lists_bind_one_parameter_where_the_backend_can() {
 
     let (sql, params) = SelectRenderUser::query()
         .where_in("name", names[..3].to_vec())
-        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres)
+        .unwrap();
     assert!(sql.contains(r#""name" IN ($1, $2, $3)"#), "{sql}");
     assert_eq!(params.len(), 3);
 }

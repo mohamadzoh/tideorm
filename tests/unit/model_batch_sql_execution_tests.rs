@@ -109,6 +109,53 @@ fn filtered_soft_delete_builder() -> BatchUpdateBuilder<BatchSqlSoftDeleteUser> 
         .where_eq("id", 1)
 }
 
+/// An update started from a query renders its filter through the query
+/// builder's mutation guard: a raw fragment that folds to TRUE, alone or as a
+/// branch of the OR group, cannot exclude a row, whatever the soft-delete
+/// scope ANDs to it.
+#[test]
+fn batch_update_refuses_query_filters_that_fold_to_true() {
+    let refused = |result: Result<(String, Vec<crate::internal::Value>)>| {
+        result.is_err_and(|error| {
+            error
+                .to_string()
+                .contains("unfiltered bulk mutations are blocked")
+        })
+    };
+    let built = |update: BatchUpdateBuilder<BatchSqlUser>| {
+        update
+            .set("name", "updated")
+            .build_update_statement(crate::config::DatabaseType::SQLite)
+    };
+    let soft_built = |update: BatchUpdateBuilder<BatchSqlSoftDeleteUser>| {
+        update
+            .set("name", "updated")
+            .build_update_statement(crate::config::DatabaseType::SQLite)
+    };
+
+    assert!(refused(built(
+        BatchSqlUser::query().where_raw("TRUE").update_all()
+    )));
+    assert!(refused(built(
+        BatchSqlUser::query()
+            .or_where_eq("id", 1)
+            .or_where_raw("1 = 1")
+            .update_all()
+    )));
+    assert!(refused(soft_built(
+        BatchSqlSoftDeleteUser::query()
+            .where_raw("TRUE")
+            .update_all()
+    )));
+    assert!(refused(soft_built(
+        BatchSqlSoftDeleteUser::query()
+            .where_raw("1 = 1")
+            .update_all()
+            .with_trashed()
+    )));
+    assert!(built(BatchSqlUser::query().where_eq("id", 1).update_all()).is_ok());
+}
+
 #[test]
 fn batch_update_scopes_trashed_rows_as_a_query_does() {
     let sql = |update: BatchUpdateBuilder<BatchSqlSoftDeleteUser>| {
@@ -238,12 +285,13 @@ fn batch_json_set_binds_the_backend_path_then_the_value() {
         .build_update_statement(crate::config::DatabaseType::Postgres)
         .expect("statement should build");
 
+    // Each step's parent is checked first, the root and then `profile`.
     assert!(
-        sql.starts_with(r#"UPDATE "batch_json_users" SET "name" = jsonb_set(("name")::jsonb, $1::text[], CAST($2 AS jsonb))"#),
+        sql.starts_with(r#"UPDATE "batch_json_users" SET "name" = CASE WHEN jsonb_typeof(("name")::jsonb #> $1::text[]) = 'object' AND jsonb_typeof(("name")::jsonb #> $2::text[]) = 'object' THEN jsonb_set(("name")::jsonb, $3::text[], CAST($4 AS jsonb)) ELSE ("name")::jsonb END"#),
         "unexpected sql: {sql}"
     );
     assert_eq!(
-        params[..2],
+        params[2..4],
         [
             crate::internal::Value::String(Some("{\"profile\",\"city\"}".to_string())),
             crate::internal::Value::String(Some("\"Paris\"".to_string())),
@@ -264,12 +312,13 @@ fn batch_json_set_takes_indexes_and_quoted_keys() {
     };
     let text = |text: &str| crate::internal::Value::String(Some(text.to_string()));
 
+    // PostgreSQL and MySQL check each of the three steps' parents first.
     assert_eq!(
-        bound(crate::config::DatabaseType::Postgres)[0],
+        bound(crate::config::DatabaseType::Postgres)[3],
         text(r#"{"items","0","a \"b\""}"#)
     );
     assert_eq!(
-        bound(crate::config::DatabaseType::MySQL)[0],
+        bound(crate::config::DatabaseType::MySQL)[3],
         text(r#"$."items"[0]."a \"b\"""#)
     );
     // SQLite checks the parent first, then sets the member.
@@ -305,6 +354,7 @@ fn mysql_array_remove_guards_non_array_documents() {
     ] {
         let (sql, params) = BatchUpdateBuilder::<BatchJsonUser>::new()
             .array_remove("name", serde_json::json!(999))
+            .where_eq("id", 1)
             .build_update_statement(backend)
             .unwrap();
         assert!(

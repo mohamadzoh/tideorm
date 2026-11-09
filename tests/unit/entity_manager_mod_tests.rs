@@ -1,6 +1,5 @@
 use super::{EntityManager, EntityState, managed, save};
 use crate::database::Database;
-use crate::model::{Model, ModelMeta, OnConflictBuilder};
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -63,216 +62,6 @@ impl managed::ManagedOps for AppendingManagedEntry {
     }
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-struct RefreshAwareSyncOnlyModel {
-    id: i64,
-    name: String,
-    runtime_state: String,
-}
-
-impl ModelMeta for RefreshAwareSyncOnlyModel {
-    type PrimaryKey = i64;
-
-    fn table_name() -> &'static str {
-        <EntityManagerModTestUser as ModelMeta>::table_name()
-    }
-
-    fn primary_key_names() -> &'static [&'static str] {
-        <EntityManagerModTestUser as ModelMeta>::primary_key_names()
-    }
-
-    fn primary_key_display(primary_key: &Self::PrimaryKey) -> String {
-        primary_key.to_string()
-    }
-
-    fn primary_key_is_new(primary_key: &Self::PrimaryKey) -> bool {
-        *primary_key == 0
-    }
-
-    fn column_names() -> &'static [&'static str] {
-        <EntityManagerModTestUser as ModelMeta>::column_names()
-    }
-
-    fn field_names() -> &'static [&'static str] {
-        <EntityManagerModTestUser as ModelMeta>::field_names()
-    }
-}
-
-impl crate::internal::InternalModel for RefreshAwareSyncOnlyModel {
-    type Entity = <EntityManagerModTestUser as crate::internal::InternalModel>::Entity;
-    type ActiveModel = <EntityManagerModTestUser as crate::internal::InternalModel>::ActiveModel;
-
-    fn into_active_model(self) -> Self::ActiveModel {
-        EntityManagerModTestUser {
-            id: self.id,
-            name: self.name,
-        }
-        .into_active_model()
-    }
-
-    fn try_from_entity_model(
-        model: <Self::Entity as crate::internal::EntityTrait>::Model,
-    ) -> crate::error::Result<Self> {
-        Ok(Self {
-            id: model.id,
-            name: model.name,
-            runtime_state: "from-entity".to_string(),
-        })
-    }
-
-    fn to_entity_model(&self) -> <Self::Entity as crate::internal::EntityTrait>::Model {
-        EntityManagerModTestUser {
-            id: self.id,
-            name: self.name.clone(),
-        }
-        .to_entity_model()
-    }
-
-    fn column_from_str(
-        name: &str,
-    ) -> Option<<Self::Entity as crate::internal::EntityTrait>::Column> {
-        <EntityManagerModTestUser as crate::internal::InternalModel>::column_from_str(name)
-    }
-
-    fn primary_key_columns() -> Vec<<Self::Entity as crate::internal::EntityTrait>::Column> {
-        <EntityManagerModTestUser as crate::internal::InternalModel>::primary_key_columns()
-    }
-
-    fn primary_key_condition(
-        primary_key: &<Self as ModelMeta>::PrimaryKey,
-    ) -> crate::internal::Condition {
-        <EntityManagerModTestUser as crate::internal::InternalModel>::primary_key_condition(
-            primary_key,
-        )
-    }
-
-    fn refresh_runtime_relations_from(&mut self, previous: &Self) {
-        self.runtime_state = format!("refreshed:{}", previous.runtime_state);
-    }
-}
-
-impl crate::validation::Validate for RefreshAwareSyncOnlyModel {
-    fn validate(&self) -> std::result::Result<(), crate::validation::ValidationErrors> {
-        Ok(())
-    }
-}
-
-#[crate::async_trait::async_trait]
-impl Model for RefreshAwareSyncOnlyModel {
-    fn primary_key(&self) -> Self::PrimaryKey {
-        self.id
-    }
-
-    async fn insert_or_update(
-        model: Self,
-        _conflict_columns: Vec<&str>,
-    ) -> crate::error::Result<Self>
-    where
-        Self: Sized,
-    {
-        Ok(model)
-    }
-
-    async fn find(_id: Self::PrimaryKey) -> crate::error::Result<Option<Self>>
-    where
-        Self: Sized,
-    {
-        Ok(None)
-    }
-
-    async fn find_with(
-        _id: Self::PrimaryKey,
-        _db: &crate::database::Database,
-    ) -> crate::error::Result<Option<Self>>
-    where
-        Self: Sized,
-    {
-        Ok(None)
-    }
-
-    async fn create(model: Self) -> crate::error::Result<Self>
-    where
-        Self: Sized,
-    {
-        Ok(model)
-    }
-
-    async fn destroy(_id: Self::PrimaryKey) -> crate::error::Result<u64>
-    where
-        Self: Sized,
-    {
-        Ok(0)
-    }
-
-    async fn save(self) -> crate::error::Result<Self>
-    where
-        Self: Sized,
-    {
-        Ok(self)
-    }
-
-    async fn update(self) -> crate::error::Result<Self>
-    where
-        Self: Sized,
-    {
-        Ok(self)
-    }
-
-    async fn delete(self) -> crate::error::Result<u64>
-    where
-        Self: Sized,
-    {
-        Ok(0)
-    }
-
-    async fn __force_delete(self) -> crate::error::Result<u64>
-    where
-        Self: Sized,
-    {
-        Ok(0)
-    }
-
-    async fn __insert_with_conflict(
-        model: Self,
-        _builder: OnConflictBuilder<Self>,
-    ) -> crate::error::Result<Self>
-    where
-        Self: Sized,
-    {
-        Ok(model)
-    }
-}
-
-impl super::TideEntityManagerMeta for RefreshAwareSyncOnlyModel {
-    fn tide_table_name() -> &'static str
-    where
-        Self: Sized,
-    {
-        Self::table_name()
-    }
-
-    fn tide_pk_key(&self) -> String {
-        self.id.to_string()
-    }
-}
-
-impl super::TideEntityManagerMergePersisted for RefreshAwareSyncOnlyModel {
-    fn tide_merge_persisted(&mut self, persisted: Self) {
-        self.id = persisted.id;
-        self.name = persisted.name;
-    }
-}
-
-impl super::TideEntityManagerSync for RefreshAwareSyncOnlyModel {
-    async fn tide_sync_entity_manager_relations<'a>(
-        &'a mut self,
-        _entity_manager: &'a Arc<EntityManager>,
-    ) -> crate::error::Result<()> {
-        self.runtime_state = format!("synced:{}", self.runtime_state);
-        Ok(())
-    }
-}
-
 struct RunawayManagedEntry {
     flush_count: Arc<AtomicUsize>,
 }
@@ -323,25 +112,6 @@ async fn flush_in_scope_processes_entries_added_during_flush() -> crate::error::
     assert_eq!(parent_flush_count.load(Ordering::SeqCst), 1);
     assert_eq!(child_flush_count.load(Ordering::SeqCst), 1);
     assert_eq!(entity_manager.managed_entries.read().len(), 2);
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn sync_entity_manager_relations_only_refreshes_runtime_relations_before_sync()
--> crate::error::Result<()> {
-    let entity_manager = EntityManager::new(Arc::new(Database::disconnected()));
-    let result = save::sync_entity_manager_relations_only_impl(
-        &RefreshAwareSyncOnlyModel {
-            id: 42,
-            name: "Refresh Aware".to_string(),
-            runtime_state: "initial".to_string(),
-        },
-        &entity_manager,
-    )
-    .await?;
-
-    assert_eq!(result.runtime_state, "synced:refreshed:initial");
 
     Ok(())
 }
@@ -509,7 +279,6 @@ fn transaction_scope_is_restored_when_a_polled_future_panics() {
     let other_in_scope = Arc::new(AtomicBool::new(false));
     let mut future = Box::pin(save::with_entity_manager_transaction_scope(
         &owner,
-        save::new_identity_rollback_log(),
         PanickingFuture {
             owner: owner.clone(),
             other: other.clone(),
@@ -636,22 +405,18 @@ async fn removing_a_never_inserted_entity_evicts_it_without_a_delete() -> crate:
 async fn registering_two_unsaved_entities_keeps_them_distinct() {
     let entity_manager = EntityManager::new(Arc::new(Database::disconnected()));
 
-    // Both have the default primary key, which `tide_pk_key` renders as "0".
+    // Both have the default primary key, which `model_identity_key` renders as "0".
     // Filing them under it made the second collide with the first and get the
     // first handed back — silently dropping one child and inserting the other
     // twice.
-    let first = entity_manager
-        .register(EntityManagerModTestUser {
-            id: 0,
-            name: "first".to_string(),
-        })
-        .await;
-    let second = entity_manager
-        .register(EntityManagerModTestUser {
-            id: 0,
-            name: "second".to_string(),
-        })
-        .await;
+    let first = entity_manager.register(EntityManagerModTestUser {
+        id: 0,
+        name: "first".to_string(),
+    });
+    let second = entity_manager.register(EntityManagerModTestUser {
+        id: 0,
+        name: "second".to_string(),
+    });
 
     assert_eq!(first.name, "first");
     assert_eq!(

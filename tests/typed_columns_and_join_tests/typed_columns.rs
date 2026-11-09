@@ -1,5 +1,9 @@
 use super::*;
-use serde_json::json;
+use tideorm::DbValue;
+
+fn v(value: impl Into<DbValue>) -> DbValue {
+    value.into()
+}
 
 mod user_cols {
     use tideorm::columns::Column;
@@ -20,113 +24,113 @@ fn typed_column_operators_build_their_conditions() {
     let single = ConditionValue::Single;
     let range = ConditionValue::Range;
     let cases = [
-        ("id eq", ID.eq(42i64), "id", Operator::Eq, single(json!(42))),
+        ("id eq", ID.eq(42i64), "id", Operator::Eq, single(v(42i64))),
         (
             "id ne",
             ID.ne(99i64),
             "id",
             Operator::NotEq,
-            single(json!(99)),
+            single(v(99i64)),
         ),
-        ("id gt", ID.gt(10i64), "id", Operator::Gt, single(json!(10))),
+        ("id gt", ID.gt(10i64), "id", Operator::Gt, single(v(10i64))),
         (
             "id gte",
             ID.gte(10i64),
             "id",
             Operator::Gte,
-            single(json!(10)),
+            single(v(10i64)),
         ),
         (
             "id lt",
             ID.lt(100i64),
             "id",
             Operator::Lt,
-            single(json!(100)),
+            single(v(100i64)),
         ),
         (
             "id lte",
             ID.lte(100i64),
             "id",
             Operator::Lte,
-            single(json!(100)),
+            single(v(100i64)),
         ),
         (
             "id between",
             ID.between(10i64, 100i64),
             "id",
             Operator::Between,
-            range(json!(10), json!(100)),
+            range(v(10i64), v(100i64)),
         ),
         (
             "id in",
             ID.is_in(vec![1i64, 2, 3, 4, 5]),
             "id",
             Operator::In,
-            ConditionValue::List((1..=5).map(|id| json!(id)).collect()),
+            ConditionValue::List((1..=5i64).map(v).collect()),
         ),
         (
             "id not in",
             ID.not_in(vec![1i64, 2]),
             "id",
             Operator::NotIn,
-            ConditionValue::List(vec![json!(1), json!(2)]),
+            ConditionValue::List(vec![v(1i64), v(2i64)]),
         ),
         (
             "name eq",
             NAME.eq("Alice"),
             "name",
             Operator::Eq,
-            single(json!("Alice")),
+            single(v("Alice")),
         ),
         (
             "name like",
             NAME.like("%test%"),
             "name",
             Operator::Like,
-            single(json!("%test%")),
+            single(v("%test%")),
         ),
         (
             "name not like",
             NAME.not_like("%spam%"),
             "name",
             Operator::NotLike,
-            single(json!("%spam%")),
+            single(v("%spam%")),
         ),
         (
             "name contains",
             NAME.contains("test"),
             "name",
-            Operator::LikeEscaped,
-            single(json!("%test%")),
+            Operator::Contains,
+            single(v("test")),
         ),
         (
             "name starts with",
             NAME.starts_with("Mr."),
             "name",
-            Operator::LikeEscaped,
-            single(json!("Mr.%")),
+            Operator::StartsWith,
+            single(v("Mr.")),
         ),
         (
             "name ends with",
             NAME.ends_with("son"),
             "name",
-            Operator::LikeEscaped,
-            single(json!("%son")),
+            Operator::EndsWith,
+            single(v("son")),
         ),
         (
             "name in",
             NAME.is_in(vec!["Alice", "Bob", "Charlie"]),
             "name",
             Operator::In,
-            ConditionValue::List(vec![json!("Alice"), json!("Bob"), json!("Charlie")]),
+            ConditionValue::List(vec![v("Alice"), v("Bob"), v("Charlie")]),
         ),
-        ("age gt", AGE.gt(18), "age", Operator::Gt, single(json!(18))),
+        ("age gt", AGE.gt(18), "age", Operator::Gt, single(v(18))),
         (
             "age between",
             AGE.between(18, 65),
             "age",
             Operator::Between,
-            range(json!(18), json!(65)),
+            range(v(18), v(65)),
         ),
         (
             "age is null",
@@ -147,21 +151,21 @@ fn typed_column_operators_build_their_conditions() {
             ACTIVE.eq(true),
             "active",
             Operator::Eq,
-            single(json!(true)),
+            single(v(true)),
         ),
         (
             "score gt",
             SCORE.gt(90.5),
             "score",
             Operator::Gt,
-            single(json!(90.5)),
+            single(v(90.5)),
         ),
         (
             "score between",
             SCORE.between(0.0, 100.0),
             "score",
             Operator::Between,
-            range(json!(0.0), json!(100.0)),
+            range(v(0.0), v(100.0)),
         ),
     ];
 

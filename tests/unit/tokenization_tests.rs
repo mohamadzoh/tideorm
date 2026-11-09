@@ -43,7 +43,14 @@ fn test_token_config_setters_overwrite_previous_values() {
 
     TokenConfig::set_encryption_key("first-key");
     TokenConfig::set_encryption_key("second-key");
-    assert_eq!(TokenConfig::get_encryption_key().unwrap(), "second-key");
+    let sealed = default_encode("7", "User").unwrap();
+    TokenConfig::set_encryption_key("second-key");
+    assert_eq!(
+        default_decode(&sealed, "User").unwrap().as_deref(),
+        Some("7")
+    );
+    TokenConfig::set_encryption_key("first-key");
+    assert_eq!(default_decode(&sealed, "User").unwrap(), None);
 
     fn encoder_one(record_id: &str, _model_name: &str) -> Result<String> {
         Ok(format!("one-{record_id}"))
@@ -111,7 +118,6 @@ fn test_token_config_reset_clears_state_set_on_another_thread() {
         result_tx
             .send((
                 TokenConfig::has_encryption_key(),
-                TokenConfig::get_encryption_key(),
                 TokenConfig::get_encoder()("7", "User"),
             ))
             .expect("worker should report token state after reset");
@@ -127,7 +133,7 @@ fn test_token_config_reset_clears_state_set_on_another_thread() {
         .send(())
         .expect("main thread should signal worker to validate reset state");
 
-    let (has_key, key_result, encode_result) = result_rx
+    let (has_key, encode_result) = result_rx
         .recv()
         .expect("main thread should receive worker validation results");
 
@@ -136,7 +142,6 @@ fn test_token_config_reset_clears_state_set_on_another_thread() {
         .expect("token config worker thread should finish successfully");
 
     assert!(!has_key);
-    assert!(key_result.is_err());
     assert!(encode_result.is_err());
 }
 
@@ -253,7 +258,7 @@ fn an_empty_encryption_key_leaves_encryption_unconfigured() {
     TokenConfig::reset();
     TokenConfig::set_encryption_key("  ");
     assert!(!TokenConfig::has_encryption_key());
-    assert!(TokenConfig::get_encryption_key().is_err());
+    assert!(default_encode("7", "User").is_err());
 
     TokenConfig::set_encryption_key("a-real-key");
     assert!(TokenConfig::has_encryption_key());

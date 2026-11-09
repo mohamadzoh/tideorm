@@ -15,6 +15,8 @@ use helpers::*;
 
 pub(crate) struct BuildContext {
     pub(crate) struct_name: Ident,
+    /// The struct's own visibility.
+    pub(crate) vis: syn::Visibility,
     pub(crate) struct_name_str: String,
     pub(crate) table_name: String,
     /// The schema from `#[tideorm(schema = "..")]`; every statement then
@@ -34,7 +36,6 @@ pub(crate) struct BuildContext {
     pub(crate) hidden_attrs: Vec<String>,
     pub(crate) translatable_fields: Vec<String>,
     pub(crate) encrypted_fields: Vec<String>,
-    pub(crate) encrypted_column_names: Vec<String>,
     /// `languages = ".."`; without it the configured languages apply.
     pub(crate) allowed_languages: Option<Vec<String>>,
     /// `fallback_language = ".."`; without it the configured fallback applies.
@@ -209,10 +210,6 @@ impl BuildContext {
             .iter()
             .map(|field| field.name())
             .collect();
-        let encrypted_column_names = resolved_encrypted_fields
-            .iter()
-            .map(|field| field.column_name())
-            .collect();
         let field_names_of = |attribute: &str, names: &[String]| {
             resolve_field_list(&input.ident, attribute, &db_fields, names)
                 .map(|fields| fields.into_iter().map(ModelField::name).collect::<Vec<_>>())
@@ -290,6 +287,7 @@ impl BuildContext {
         let mut ctx = Self {
             columns_struct_name: format_ident!("{}Columns", struct_name),
             struct_name,
+            vis: input.vis.clone(),
             struct_name_str,
             table_name,
             schema_name,
@@ -309,7 +307,6 @@ impl BuildContext {
             hidden_attrs,
             translatable_fields,
             encrypted_fields,
-            encrypted_column_names,
             allowed_languages: split_csv(&input.ident, "languages", input.languages.as_ref())?,
             fallback_language: input.fallback_language.clone(),
             has_one_files,
@@ -331,8 +328,14 @@ impl BuildContext {
             field_types: db_fields.iter().map(|field| field.ty.clone()).collect(),
             column_types: db_fields
                 .iter()
-                .map(ModelField::column_type_expr)
-                .collect::<syn::Result<_>>()?,
+                .map(|field| {
+                    field.column_type_expr(
+                        resolved_encrypted_fields
+                            .iter()
+                            .any(|encrypted| encrypted.ident() == field.ident()),
+                    )
+                })
+                .collect(),
             serialized_names: if should_gen_serialize {
                 Vec::new()
             } else {
@@ -355,15 +358,6 @@ impl BuildContext {
         };
         ctx.relation_wiring = build_relation_wiring(&ctx)?;
         Ok(ctx)
-    }
-
-    /// `(field, type)` for each persisted field whose integer type a backend's
-    /// driver cannot store and read back.
-    pub(crate) fn driver_limited_fields(&self) -> Vec<(String, &'static str)> {
-        self.db_fields
-            .iter()
-            .filter_map(|field| Some((field.name(), field.driver_limited_integer()?)))
-            .collect()
     }
 
     /// A reference to each component of the `primary_key: &Self::PrimaryKey`

@@ -20,7 +20,7 @@ use super::*;
 /// does not carry: serializing yields only the cached owner (or `null`), and a
 /// deserialized wrapper can no longer query. A model rebuilt from JSON works
 /// again only after
-/// [`refresh_runtime_relations_from`](crate::internal::InternalModel::refresh_runtime_relations_from)
+/// [`__rebuild_relations`](crate::internal::InternalModel::__rebuild_relations)
 /// re-derives the wrappers from its fresh column values. Any new path that
 /// reconstructs a model from JSON must call it, or the relation is silently
 /// dead.
@@ -50,7 +50,7 @@ impl<E: Model> BelongsTo<E> {
         ensure_relation_configured("BelongsTo", &[self.foreign_key, self.owner_key])
     }
 
-    fn foreign_key_value(&self, context: &str) -> Result<&serde_json::Value> {
+    fn foreign_key_value(&self, context: &str) -> Result<&Value> {
         self.ensure_configured()?;
         required_key(&self.state.key, "Foreign key value", context)
     }
@@ -65,6 +65,7 @@ impl<E: Model> BelongsTo<E> {
     ///
     /// Both must be non-empty; every method rejects a wrapper built by
     /// [`Default`] with "BelongsTo relation is not configured".
+    #[must_use]
     pub fn new(foreign_key: &'static str, owner_key: &'static str) -> Self {
         Self {
             foreign_key,
@@ -78,14 +79,14 @@ impl<E: Model> BelongsTo<E> {
     ///
     /// Must be a scalar; composite keys are rejected at load time. Without this
     /// the wrapper is inert — every query method errors with "Foreign key value
-    /// not set for relation". A nullable foreign key is fine: a JSON `null`
-    /// relates to no row, so `load` yields `Ok(None)`.
-    pub fn with_fk_value(mut self, fk: serde_json::Value) -> Self {
-        self.state.key = Some(fk);
+    /// not set for relation". A nullable foreign key is fine: a NULL relates
+    /// to no row, so `load` yields `Ok(None)`.
+    #[doc(hidden)]
+    pub fn with_fk_value(mut self, fk: impl Into<Value>) -> Self {
+        self.state.key = Some(fk.into());
         self
     }
 
-    #[cfg(feature = "entity-manager")]
     #[doc(hidden)]
     pub fn attach_query_database(&mut self, database: &crate::database::Database) {
         self.state.source.database = Some(database.clone());
@@ -149,30 +150,7 @@ impl<E: Model> BelongsTo<E> {
         self.query("BelongsTo::exists")?.exists().await
     }
 
-    /// Mutable access to the cached owner, if one is cached.
-    ///
-    /// Edits are local to the cache: nothing is written back, and
-    /// [`load`](Self::load) will not see them. Persist by calling `save()` on the
-    /// owner itself.
-    pub fn as_mut(&mut self) -> Option<&mut E> {
-        self.state.cached_mut().map(|model| &mut **model)
-    }
-
-    /// Whether the cache has been populated — by an eager load, by `set_cached`,
-    /// or by deserializing a non-`null` payload. Deserializing `null` leaves this
-    /// `false`.
-    pub fn is_loaded(&self) -> bool {
-        self.state.is_loaded()
-    }
-
-    /// The eagerly-loaded owner, if one is cached. Never queries and never
-    /// awaits.
-    ///
-    /// Returns `None` both when nothing was ever loaded and when the owner is
-    /// known to be absent; [`is_loaded`](Self::is_loaded) distinguishes them.
-    pub fn get_cached(&self) -> Option<&E> {
-        self.state.cached().map(|model| &**model)
-    }
+    crate::relations::state::one_row_cache!(E);
 }
 
 impl<E: Model> Default for BelongsTo<E> {
@@ -194,7 +172,7 @@ relation_serde!(BelongsTo<E>);
 #[cfg(feature = "entity-manager")]
 impl<E> crate::entity_manager::EntityManagerLoad for BelongsTo<E>
 where
-    E: Model + TideEntityManagerMeta,
+    E: Model,
 {
     type Output<'a>
         = Option<&'a E>

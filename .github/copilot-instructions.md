@@ -2,7 +2,7 @@
 
 ## Scope
 
-- This workspace is a Rust 2024 workspace with two crates: the main `tideorm` crate and the `tideorm-macros` proc-macro crate.
+- This workspace is a Rust 2024 workspace with two crates: the main `tideorm` crate and the `tideorm-macros` proc-macro crate. It depends on three crates published from repositories of their own (cloned next to it as `../tideorm-engine` (the execution engine), `../tideorm-sql-builder` (the SQL statement builder and its `Iden` derives, `tideorm-sql-builder-derive`) and `../tideorm-driver` (the database drivers: `tideorm-driver`, `tideorm-driver-core`, `tideorm-driver-postgres`, `tideorm-driver-mysql`, `tideorm-driver-sqlite`)), which a local `[patch.crates-io]` config replaces with those checkouts (CONTRIBUTING.md).
 - Prefer minimal, targeted edits. Do not reformat unrelated Rust code or documentation.
 - Keep public APIs consistent unless the task explicitly requires a breaking change.
 
@@ -11,6 +11,9 @@
 - Fast smoke test: `cargo test --lib`
 - Broad unit compatibility pass: `cargo test --all-features --lib`
 - Proc-macro pass: `cargo test -p tideorm-macros --lib`
+- SQL builder pass, from `../tideorm-sql-builder`: `cargo test --workspace --all-features`
+- Engine pass, from `../tideorm-engine`: `cargo test --all-features --tests` (its `live::` contracts take `ENGINE_PROBE_DATABASE_URL`)
+- Driver pass, from `../tideorm-driver`: `cargo test --workspace --lib --features tideorm-driver/postgres,tideorm-driver/mysql,tideorm-driver/sqlite,tideorm-driver/runtime-tokio` (and `--doc` instead of `--lib` for the doc tests)
 - Default backend test pass: `cargo test` (the PostgreSQL suites run only when a PostgreSQL URL or `RUN_POSTGRES_TESTS` is set)
 - SQLite integration suite: `cargo test --test sqlite_integration_tests --features "sqlite runtime-tokio" --no-default-features`
 - PostgreSQL integration suite: `cargo test --test postgres_integration_tests`
@@ -24,7 +27,7 @@
 
 ## Environment And Prerequisites
 
-- Rust `1.94` is the declared MSRV (`rust-version` in both manifests), set by the dependency tree (sea-orm 2.x and sqlx 0.9 both require it). The CI `msrv` job checks it; see CONTRIBUTING.md for the places a bump has to touch.
+- Rust `1.94` is the declared MSRV (`rust-version` in all nine manifests), bounded by the dependency tree. The CI `msrv` job checks it; see CONTRIBUTING.md for the places a bump has to touch.
 - Integration tests may require database servers and environment variables loaded from `.env` via `dotenvy`.
 - PostgreSQL tests read `TEST_DATABASE_URL` first, then `POSTGRESQL_DATABASE_URL`, then default to `postgres://postgres:postgres@localhost:5432/test_tide_orm`.
 - SQLite tests default to `sqlite://./test_tide_orm.db?mode=rwc` when `SQLITE_DATABASE_URL` is absent.
@@ -39,7 +42,7 @@
 ## Architecture Boundaries
 
 - `src/` contains the public ORM runtime. `tideorm-macros/src/` contains proc-macro parsing and code generation.
-- Keep SeaORM as an internal implementation detail. The main boundary is centered in `src/internal/`; do not expose SeaORM types in the public API unless the task explicitly requires it.
+- Keep the execution engine (`../tideorm-engine`) an internal implementation detail. The main boundary is centered in `src/internal/`; do not expose engine types in the public API unless the task explicitly requires it.
 - `src/database/` contains the global connection pattern, scoped connection overrides, and transaction helpers used by the rest of the crate.
 - `src/model/` contains generated-model runtime support, CRUD internals, nested save behavior, and serialization helpers that rebuild runtime relation wrappers after serde rewrites.
 - `src/query/` contains query-builder behavior, SQL generation, and DB-specific query helpers. The main SQL seams are `src/query/sql/`, `src/query/db_sql.rs`, and `src/query/structure/`.
@@ -55,7 +58,7 @@
 - Prefer existing builder and helper layers over ad hoc SQL or duplicated logic.
 - Maintain the global database initialization model built around `TideConfig::init()` rather than introducing alternate connection flows unless explicitly requested.
 - When a non-test Rust file grows large, prefer extracting focused sibling modules instead of continuing to grow a monolith. Keep non-test helper `mod` declarations near the top of the file.
-- Preserve runtime-only relation helper state across serialization-based model overwrites by keeping the `refresh_runtime_relations_from` flow intact.
+- Preserve runtime-only relation helper state across serialization-based model overwrites by rebuilding the wrappers from the model's columns (`InternalModel::__rebuild_relations`).
 - The crate denies unsafe code. Avoid introducing `unsafe`.
 
 ## Safety-Critical Rules
@@ -107,7 +110,7 @@
 
 ## What To Avoid
 
-- Do not expose SeaORM internals through public TideORM APIs by accident.
+- Do not expose engine internals through public TideORM APIs by accident.
 - Do not bypass feature gates when adding imports, exports, docs, tests, or benchmarks.
 - Do not hand-roll SQL escaping or identifier quoting.
 - Do not bypass the runtime relation refresh path in serialization helpers when overwriting models from serde data.

@@ -52,11 +52,8 @@ pub(super) fn bench_combined_operations(c: &mut Criterion) {
             .attach_many("images", vec!["img1.jpg", "img2.jpg", "img3.jpg"])
             .unwrap();
 
-        let mut opts_ar = HashMap::new();
-        opts_ar.insert("language".to_string(), "ar".to_string());
-
         b.iter(|| {
-            black_box(product.to_translated_json(Some(opts_ar.clone())));
+            black_box(product.to_translated_json_in("ar"));
             black_box(product.to_json_with_all_translations());
         });
     });

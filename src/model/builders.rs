@@ -1,3 +1,4 @@
+use crate::columns::{IntoColumnNames, column_names};
 use crate::error::Result;
 
 use super::Model;
@@ -13,14 +14,18 @@ use super::Model;
 /// [`OnConflictBuilder::update_columns`] or [`OnConflictBuilder::update_all_except`].
 ///
 /// ```ignore
-/// User::on_conflict(vec!["email"])
-///     .update_all_except(vec!["role"])
+/// User::on_conflict(["email"])
+///     .update_all_except(["role"])
 ///     .insert(user)
 ///     .await?;
+///
+/// // Typed columns work everywhere a column is named.
+/// User::on_conflict([User::columns.email]).do_nothing().insert(user).await?;
 /// ```
 ///
 /// The fields are public because macro-generated model code constructs and
 /// reads this type; they are not part of the supported API.
+#[must_use = "an upsert builder does nothing until `insert` is awaited"]
 pub struct OnConflictBuilder<M: Model> {
     #[doc(hidden)]
     pub _marker: std::marker::PhantomData<M>,
@@ -37,7 +42,6 @@ impl<M: Model> OnConflictBuilder<M> {
     ///
     /// Prefer [`Model::on_conflict`](crate::model::Model::on_conflict), which
     /// calls this for you.
-    #[must_use]
     pub fn new(conflict_columns: Vec<String>) -> Self {
         Self {
             _marker: std::marker::PhantomData,
@@ -54,9 +58,11 @@ impl<M: Model> OnConflictBuilder<M> {
     /// MySQL and MariaDB reject primary-key columns in this list before writing.
     /// Mutually exclusive with
     /// [`OnConflictBuilder::update_all_except`]; when both are set, this one wins.
-    #[must_use]
-    pub fn update_columns(mut self, columns: Vec<&str>) -> Self {
-        self.update_columns = Some(columns.into_iter().map(|s| s.to_string()).collect());
+    ///
+    /// Columns are names or typed columns (`User::columns.name`); to update
+    /// nothing, use [`OnConflictBuilder::do_nothing`].
+    pub fn update_columns(mut self, columns: impl IntoColumnNames) -> Self {
+        self.update_columns = Some(column_names(&columns));
         self
     }
 
@@ -65,9 +71,18 @@ impl<M: Model> OnConflictBuilder<M> {
     ///
     /// The usual reason to reach for this is to protect insert-only columns
     /// while letting new values win everywhere else.
-    #[must_use]
-    pub fn update_all_except(mut self, columns: Vec<&str>) -> Self {
-        self.exclude_columns = Some(columns.into_iter().map(|s| s.to_string()).collect());
+    pub fn update_all_except(mut self, columns: impl IntoColumnNames) -> Self {
+        self.exclude_columns = Some(column_names(&columns));
+        self
+    }
+
+    /// Keep the stored row unchanged on conflict.
+    ///
+    /// [`OnConflictBuilder::insert`] then returns the row already stored, or
+    /// the new one when nothing collided, so the call reads "insert unless it
+    /// exists" and always yields the row.
+    pub fn do_nothing(mut self) -> Self {
+        self.update_columns = Some(Vec::new());
         self
     }
 

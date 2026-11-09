@@ -9,19 +9,21 @@
 //! inlining them as literals.
 
 mod consolidation;
+mod window;
 
 use super::Order;
 use super::db_sql;
 use crate::config::DatabaseType;
-use crate::internal::Value;
 use crate::model::Model;
 use std::fmt::Write as _;
 use std::marker::PhantomData;
 
 pub use consolidation::JoinResultConsolidator;
+pub use window::{FrameBound, FrameType, WindowFunction, WindowFunctionType};
 
 /// Type of JOIN operation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum JoinType {
     /// `INNER JOIN` — keeps only rows that matched on both sides.
     Inner,
@@ -45,6 +47,15 @@ impl JoinType {
             JoinType::Right => "RIGHT JOIN",
         }
     }
+
+    /// The join as the statement builder takes it.
+    pub(crate) fn to_builder(self) -> crate::orm::sql_builder::JoinType {
+        match self {
+            JoinType::Inner => crate::orm::sql_builder::JoinType::InnerJoin,
+            JoinType::Left => crate::orm::sql_builder::JoinType::LeftJoin,
+            JoinType::Right => crate::orm::sql_builder::JoinType::RightJoin,
+        }
+    }
 }
 
 /// One JOIN registered on a query by
@@ -61,18 +72,18 @@ impl JoinType {
 /// The `ON` condition is always a single equality between two columns; there is
 /// no representation for a composite or non-equi join.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct JoinClause {
+pub(crate) struct JoinClause {
     /// Which JOIN keyword to emit.
-    pub join_type: JoinType,
+    pub(crate) join_type: JoinType,
     /// Name of the joined table.
-    pub table: String,
+    pub(crate) table: String,
     /// Optional `AS` alias. When set, this — not [`table`](Self::table) — is the
     /// qualifier other clauses must use to reference the joined columns.
-    pub alias: Option<String>,
+    pub(crate) alias: Option<String>,
     /// Left-hand side of the `ON` equality, normally `this_table.column`.
-    pub left_column: String,
+    pub(crate) left_column: String,
     /// Right-hand side of the `ON` equality, normally `joined_table.column`.
-    pub right_column: String,
+    pub(crate) right_column: String,
 }
 
 impl JoinClause {
@@ -89,16 +100,12 @@ impl JoinClause {
 }
 
 /// A scalar subquery projected by
-/// [`select_subquery()`](super::QueryBuilder::select_subquery).
-///
-/// Like [`UnionClause`], the subquery is kept as parameterized SQL with its
-/// bound values beside it; rendering renumbers its placeholders for its
-/// position in the projection.
+/// [`select_subquery()`](super::QueryBuilder::select_subquery), rendered with
+/// the statement.
 #[derive(Debug, Clone)]
 pub(crate) struct SubquerySelect {
-    pub(crate) query_sql: String,
+    pub(crate) query: std::sync::Arc<dyn super::Embedded>,
     pub(crate) alias: String,
-    pub(crate) params: Vec<Value>,
     pub(crate) source: Option<(String, String)>,
     /// Captured before the subquery loses its model and join-alias scope.
     pub(crate) encrypted_column: Option<crate::model::EncryptedColumn>,
@@ -107,7 +114,7 @@ pub(crate) struct SubquerySelect {
 
 /// Which compound-select operator joins two result sets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum UnionType {
+pub(crate) enum UnionType {
     /// `UNION` — combines both sides and removes duplicate rows, which forces
     /// the backend to sort or hash the whole result.
     Union,
@@ -118,35 +125,24 @@ pub enum UnionType {
 }
 
 impl UnionType {
-    /// The keyword sequence emitted between two compound-select operands.
-    pub fn as_sql(&self) -> &'static str {
+    /// The operator as the statement builder takes it.
+    pub(crate) fn to_builder(self) -> crate::orm::sql_builder::UnionType {
         match self {
-            UnionType::Union => "UNION",
-            UnionType::UnionAll => "UNION ALL",
+            UnionType::Union => crate::orm::sql_builder::UnionType::Distinct,
+            UnionType::UnionAll => crate::orm::sql_builder::UnionType::All,
         }
     }
 }
 
 /// One operand of a compound select (`UNION`, `UNION ALL`, ...).
-///
-/// `query_sql` is executable SQL that is concatenated into the outer statement,
-/// so it never carries inline literals for builder-supplied values: operands
-/// rendered from a `QueryBuilder` are parameterized and their bound values
-/// travel next to the SQL in `params`. Raw operands are trusted SQL supplied by
-/// the caller and bind nothing.
 #[derive(Debug, Clone)]
-pub struct UnionClause {
+pub(crate) struct UnionClause {
     /// Which compound operator precedes this operand.
-    pub union_type: UnionType,
-    /// The operand's own select statement.
-    ///
-    /// It is spliced into the outer statement rather than re-parsed, with two
-    /// backend adjustments made at assembly time: PostgreSQL placeholders are
-    /// renumbered for the operand's position among the already-bound values, and
-    /// the operand is wrapped in parentheses on PostgreSQL and MySQL but not on
+    pub(crate) union_type: UnionType,
+    /// The operand: a query, rendered with the statement, or a caller's
+    /// trusted SQL. It is parenthesized on PostgreSQL and MySQL but not on
     /// SQLite, whose compound-select grammar rejects a parenthesized operand.
-    pub query_sql: String,
-    pub(crate) params: Vec<Value>,
+    pub(crate) operand: super::Operand,
     /// Whether the operand is caller-written SQL of unknown shape, or a query
     /// reading `table.*` because it holds one.
     pub(crate) raw: bool,
@@ -186,463 +182,22 @@ pub(crate) fn union_column_types_compatible(
 }
 
 impl UnionClause {
-    /// Build an operand from trusted SQL that carries no bound values.
-    ///
-    /// This is the constructor behind [`union_raw()`](super::QueryBuilder::union_raw)
-    /// and [`union_all_raw()`](super::QueryBuilder::union_all_raw). Prefer
-    /// [`union()`](super::QueryBuilder::union), which renders the operand from a
-    /// second builder and keeps its values as bound parameters.
-    pub fn new(union_type: UnionType, query_sql: String) -> Self {
+    pub(crate) fn new(union_type: UnionType, operand: super::Operand) -> Self {
         Self {
             union_type,
-            query_sql,
-            params: Vec::new(),
-            raw: true,
+            operand,
+            raw: false,
             projection: None,
         }
-    }
-
-    /// Build an operand from parameterized SQL and the values bound to it.
-    ///
-    /// `params` must be ordered exactly as the placeholders appear in
-    /// `query_sql`; the assembler splices them into the outer statement in that
-    /// order.
-    pub(crate) fn with_params(
-        union_type: UnionType,
-        query_sql: String,
-        params: Vec<Value>,
-    ) -> Self {
-        Self {
-            params,
-            raw: false,
-            ..Self::new(union_type, query_sql)
-        }
-    }
-}
-
-/// One end of a window frame.
-///
-/// How the offsets are counted depends on the accompanying [`FrameType`]: under
-/// [`Rows`](FrameType::Rows) they are physical row counts, under
-/// [`Range`](FrameType::Range) they are offsets from the current row's ORDER BY
-/// value, and under [`Groups`](FrameType::Groups) they count peer groups.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum FrameBound {
-    /// Start the frame at the first row of the partition.
-    UnboundedPreceding,
-    /// End the frame at the last row of the partition.
-    UnboundedFollowing,
-    /// The current row (or, under `RANGE`/`GROUPS`, the current row's whole peer
-    /// group).
-    CurrentRow,
-    /// `n` units before the current row.
-    Preceding(u64),
-    /// `n` units after the current row.
-    Following(u64),
-}
-
-impl FrameBound {
-    /// Render this bound. The value of a `PRECEDING`/`FOLLOWING` offset is a
-    /// `u64` and is therefore safe to interpolate.
-    pub fn as_sql(&self) -> String {
-        match self {
-            FrameBound::UnboundedPreceding => "UNBOUNDED PRECEDING".to_string(),
-            FrameBound::UnboundedFollowing => "UNBOUNDED FOLLOWING".to_string(),
-            FrameBound::CurrentRow => "CURRENT ROW".to_string(),
-            FrameBound::Preceding(n) => format!("{} PRECEDING", n),
-            FrameBound::Following(n) => format!("{} FOLLOWING", n),
-        }
-    }
-}
-
-/// The unit a window frame's bounds are measured in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum FrameType {
-    /// Count physical rows. Ties in the ORDER BY are split, so two peer rows can
-    /// see different frames — which is what makes this the right choice for a
-    /// running total.
-    Rows,
-    /// Count by ORDER BY *value*, so peers (rows that compare equal) always
-    /// enter and leave the frame together. Requires an ORDER BY, and an offset
-    /// bound requires exactly one ordering column of a type the offset can be
-    /// added to.
-    Range,
-    /// Count peer groups rather than rows. Requires an ORDER BY, and is
-    /// unsupported by MySQL and MariaDB — PostgreSQL 11+ and SQLite 3.28+ accept
-    /// it.
-    Groups,
-}
-
-impl FrameType {
-    /// The frame keyword emitted in front of the bounds.
-    pub fn as_sql(&self) -> &'static str {
-        match self {
-            FrameType::Rows => "ROWS",
-            FrameType::Range => "RANGE",
-            FrameType::Groups => "GROUPS",
-        }
-    }
-}
-
-/// Which window function a [`WindowFunction`] computes.
-///
-/// Column arguments are quoted as identifiers when rendered, so they are safe to
-/// take from a caller; [`Custom`](Self::Custom) and the `default` argument of
-/// [`Lag`](Self::Lag)/[`Lead`](Self::Lead) are the two exceptions and are
-/// emitted verbatim as trusted SQL.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum WindowFunctionType {
-    /// `ROW_NUMBER()` — 1-based position within the partition, never tied.
-    RowNumber,
-    /// `RANK()` — tied rows share a rank and the next rank skips the gap.
-    Rank,
-    /// `DENSE_RANK()` — tied rows share a rank with no gap after them.
-    DenseRank,
-    /// `NTILE(n)` — distribute the partition over `n` buckets as evenly as it
-    /// divides.
-    Ntile(u32),
-    /// `LAG(column, offset, default)` — a value from an earlier row of the
-    /// partition.
-    ///
-    /// The offset and default are only rendered when the offset is `Some`: a
-    /// default supplied alongside `None` is silently dropped, because SQL has no
-    /// way to pass the third argument without the second. MariaDB takes no
-    /// third argument at all, so on MySQL and MariaDB the window renders the
-    /// default itself; see [`WindowFunction::to_sql_for_db`].
-    Lag(String, Option<i32>, Option<String>),
-    /// `LEAD(column, offset, default)` — a value from a later row, with the same
-    /// argument rule as [`Lag`](Self::Lag).
-    Lead(String, Option<i32>, Option<String>),
-    /// `FIRST_VALUE(column)` — the column's value in the frame's first row.
-    FirstValue(String),
-    /// `LAST_VALUE(column)` — the column's value in the frame's *last* row.
-    ///
-    /// The default frame ends at the current row, so without a frame that
-    /// extends to [`UnboundedFollowing`](FrameBound::UnboundedFollowing) this
-    /// returns the current row's own value.
-    LastValue(String),
-    /// `NTH_VALUE(column, n)` — the column's value in the frame's `n`-th row,
-    /// 1-based.
-    NthValue(String, u32),
-    /// `SUM(column)` evaluated over the frame instead of collapsing the rows.
-    Sum(String),
-    /// `AVG(column)` evaluated over the frame.
-    Avg(String),
-    /// `COUNT(column)`, or `COUNT(*)` when the column is `None`.
-    Count(Option<String>),
-    /// `MIN(column)` evaluated over the frame.
-    Min(String),
-    /// `MAX(column)` evaluated over the frame.
-    Max(String),
-    /// A caller-supplied function expression, emitted verbatim.
-    ///
-    /// **Trusted SQL only.** It is checked by the shared raw-fragment validator
-    /// (statement separators, comments and NUL bytes are rejected), but that is
-    /// a backstop and not a sanitizer — never build one out of request input.
-    Custom(String),
-}
-
-impl WindowFunctionType {
-    /// The column the function reads, if it takes one.
-    pub(crate) fn column(&self) -> Option<&str> {
-        match self {
-            Self::Lag(column, ..)
-            | Self::Lead(column, ..)
-            | Self::FirstValue(column)
-            | Self::LastValue(column)
-            | Self::NthValue(column, _)
-            | Self::Sum(column)
-            | Self::Avg(column)
-            | Self::Count(Some(column))
-            | Self::Min(column)
-            | Self::Max(column) => Some(column),
-            Self::RowNumber
-            | Self::Rank
-            | Self::DenseRank
-            | Self::Ntile(_)
-            | Self::Count(None)
-            | Self::Custom(_) => None,
-        }
-    }
-
-    /// The column whose own values this function returns (`LAG`, `LEAD`, the
-    /// `*_VALUE` functions, `MIN`, `MAX`), so its output decodes and decrypts
-    /// as that column. A sum, an average or a count is a new value.
-    pub(crate) fn value_column(&self) -> Option<&str> {
-        match self {
-            Self::Lag(column, ..)
-            | Self::Lead(column, ..)
-            | Self::FirstValue(column)
-            | Self::LastValue(column)
-            | Self::NthValue(column, _)
-            | Self::Min(column)
-            | Self::Max(column) => Some(column),
-            _ => None,
-        }
-    }
-
-    /// This function with its column argument, if any, passed through `column`.
-    fn map_column(&self, column: &dyn Fn(&str) -> String) -> Self {
-        match self {
-            Self::Lag(col, offset, default) => Self::Lag(column(col), *offset, default.clone()),
-            Self::Lead(col, offset, default) => Self::Lead(column(col), *offset, default.clone()),
-            Self::FirstValue(col) => Self::FirstValue(column(col)),
-            Self::LastValue(col) => Self::LastValue(column(col)),
-            Self::NthValue(col, n) => Self::NthValue(column(col), *n),
-            Self::Sum(col) => Self::Sum(column(col)),
-            Self::Avg(col) => Self::Avg(column(col)),
-            Self::Count(Some(col)) => Self::Count(Some(column(col))),
-            Self::Min(col) => Self::Min(column(col)),
-            Self::Max(col) => Self::Max(column(col)),
-            Self::RowNumber
-            | Self::Rank
-            | Self::DenseRank
-            | Self::Ntile(_)
-            | Self::Count(None)
-            | Self::Custom(_) => self.clone(),
-        }
-    }
-
-    /// Render the function call itself — no `OVER (..)` clause, which
-    /// [`WindowFunction::to_sql_for_db`] adds around it.
-    ///
-    /// Column arguments go through the strict column formatter, so anything that
-    /// is not a plain `column`/`table.column` reference is quoted as one
-    /// identifier rather than passed through as SQL. Numeric arguments are
-    /// integers and safe to interpolate.
-    pub fn as_sql_for_db(&self, db_type: DatabaseType) -> String {
-        let quote_column = |column: &str| db_sql::format_column(db_type, column);
-
-        match self {
-            WindowFunctionType::RowNumber => "ROW_NUMBER()".to_string(),
-            WindowFunctionType::Rank => "RANK()".to_string(),
-            WindowFunctionType::DenseRank => "DENSE_RANK()".to_string(),
-            WindowFunctionType::Ntile(n) => format!("NTILE({})", n),
-            WindowFunctionType::Lag(col, offset, default)
-            | WindowFunctionType::Lead(col, offset, default) => {
-                let name = if matches!(self, WindowFunctionType::Lag(..)) {
-                    "LAG"
-                } else {
-                    "LEAD"
-                };
-                let mut s = format!("{}({}", name, quote_column(col));
-                if let Some(o) = offset {
-                    let _ = write!(s, ", {}", o);
-                    if let Some(d) = default {
-                        s.push_str(", ");
-                        s.push_str(d);
-                    }
-                }
-                s.push(')');
-                s
-            }
-            WindowFunctionType::FirstValue(col) => {
-                format!("FIRST_VALUE({})", quote_column(col))
-            }
-            WindowFunctionType::LastValue(col) => {
-                format!("LAST_VALUE({})", quote_column(col))
-            }
-            WindowFunctionType::NthValue(col, n) => {
-                format!("NTH_VALUE({}, {})", quote_column(col), n)
-            }
-            WindowFunctionType::Sum(col) => format!("SUM({})", quote_column(col)),
-            WindowFunctionType::Avg(col) => format!("AVG({})", quote_column(col)),
-            WindowFunctionType::Count(col) => match col {
-                Some(c) => format!("COUNT({})", quote_column(c)),
-                None => "COUNT(*)".to_string(),
-            },
-            WindowFunctionType::Min(col) => format!("MIN({})", quote_column(col)),
-            WindowFunctionType::Max(col) => format!("MAX({})", quote_column(col)),
-            WindowFunctionType::Custom(expr) => expr.clone(),
-        }
-    }
-}
-
-/// A window function and the `OVER (..)` clause it is evaluated in.
-///
-/// Registered on a query with [`window()`](super::QueryBuilder::window); the
-/// named helpers ([`row_number()`](super::QueryBuilder::row_number),
-/// [`running_sum()`](super::QueryBuilder::running_sum), ...) assemble the common
-/// shapes. Window functions are appended to the projection *after* every other
-/// select source and never replace the default projection, so a query that
-/// selects nothing else still returns the model's own columns alongside them.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct WindowFunction {
-    /// The function being computed.
-    pub function: WindowFunctionType,
-    /// `PARTITION BY` columns. Empty means the whole result set is one
-    /// partition.
-    pub partition_by: Vec<String>,
-    /// The window's own `ORDER BY`, independent of the query's. Ranking
-    /// functions are meaningless without it, and a `RANGE`/`GROUPS` frame
-    /// requires it.
-    pub order_by: Vec<(String, Order)>,
-    /// Frame unit. Rendered only together with
-    /// [`frame_start`](Self::frame_start).
-    pub frame_type: Option<FrameType>,
-    /// Frame start bound. Nothing is rendered unless both this and
-    /// [`frame_type`](Self::frame_type) are set.
-    pub frame_start: Option<FrameBound>,
-    /// Frame end bound. With it the frame renders as `BETWEEN start AND end`;
-    /// without it, as the shorthand `<unit> <start>`. Setting only the end bound
-    /// renders no frame at all.
-    pub frame_end: Option<FrameBound>,
-    /// Output column name. Quoted when rendered, and validated as an identifier
-    /// when the query is checked.
-    pub alias: String,
-}
-
-impl WindowFunction {
-    /// Start an unpartitioned, unordered, unframed window under `alias`.
-    ///
-    /// Refine it with [`partition_by()`](Self::partition_by),
-    /// [`order_by()`](Self::order_by) and [`frame()`](Self::frame) before
-    /// handing it to [`window()`](super::QueryBuilder::window).
-    pub fn new(function: WindowFunctionType, alias: &str) -> Self {
-        Self {
-            function,
-            partition_by: Vec::new(),
-            order_by: Vec::new(),
-            frame_type: None,
-            frame_start: None,
-            frame_end: None,
-            alias: alias.to_string(),
-        }
-    }
-
-    /// This window with every column it names passed through `column`: its
-    /// function's argument and its `PARTITION BY` and `ORDER BY` columns.
-    pub(crate) fn map_columns(&self, column: &dyn Fn(&str) -> String) -> Self {
-        Self {
-            function: self.function.map_column(column),
-            partition_by: self.partition_by.iter().map(|c| column(c)).collect(),
-            order_by: self
-                .order_by
-                .iter()
-                .map(|(c, direction)| (column(c), *direction))
-                .collect(),
-            frame_type: self.frame_type,
-            frame_start: self.frame_start.clone(),
-            frame_end: self.frame_end.clone(),
-            alias: self.alias.clone(),
-        }
-    }
-
-    /// Append a `PARTITION BY` column. Repeated calls accumulate left to right.
-    pub fn partition_by(mut self, column: impl crate::columns::IntoColumnName) -> Self {
-        self.partition_by
-            .push(crate::columns::column_reference(&column, None));
-        self
-    }
-
-    /// Append an `ORDER BY` term to the window. Repeated calls accumulate into a
-    /// compound sort key; this is the window's own ordering and does not affect
-    /// the row order the query returns.
-    pub fn order_by(
-        mut self,
-        column: impl crate::columns::IntoColumnName,
-        direction: Order,
-    ) -> Self {
-        self.order_by
-            .push((crate::columns::column_reference(&column, None), direction));
-        self
-    }
-
-    /// Set the whole frame at once, as `BETWEEN start AND end`.
-    ///
-    /// The classic running-total frame is
-    /// `frame(FrameType::Rows, FrameBound::UnboundedPreceding, FrameBound::CurrentRow)`,
-    /// which is what [`running_sum()`](super::QueryBuilder::running_sum)
-    /// installs.
-    pub fn frame(mut self, frame_type: FrameType, start: FrameBound, end: FrameBound) -> Self {
-        self.frame_type = Some(frame_type);
-        self.frame_start = Some(start);
-        self.frame_end = Some(end);
-        self
-    }
-
-    /// Render `<function> OVER (PARTITION BY .. ORDER BY .. <frame>) AS <alias>`
-    /// for `db_type`. This is the rendering the executable path uses.
-    ///
-    /// Empty clauses are omitted rather than emitted empty, so an unpartitioned,
-    /// unordered, unframed window renders as a bare `OVER ()`. On MySQL and
-    /// MariaDB a `LAG`/`LEAD` default is chosen by a `CASE` around the call.
-    pub fn to_sql_for_db(&self, db_type: DatabaseType) -> String {
-        let over = self.over_clause_for_db(db_type);
-        let with_default = match &self.function {
-            WindowFunctionType::Lag(column, Some(offset), Some(default)) => {
-                Some(("LAG", column, offset, default))
-            }
-            WindowFunctionType::Lead(column, Some(offset), Some(default)) => {
-                Some(("LEAD", column, offset, default))
-            }
-            _ => None,
-        };
-        let call = match with_default {
-            // MariaDB's LAG and LEAD take no default. The same window finds no
-            // row for a constant exactly where the default applies, where a
-            // COALESCE would also replace a NULL value.
-            Some((name, column, offset, default))
-                if matches!(db_type, DatabaseType::MySQL | DatabaseType::MariaDB) =>
-            {
-                format!(
-                    "CASE WHEN {name}(1, {offset}) OVER ({over}) IS NULL THEN {default} \
-                     ELSE {name}({}, {offset}) OVER ({over}) END",
-                    db_sql::format_column(db_type, column)
-                )
-            }
-            _ => format!("{} OVER ({over})", self.function.as_sql_for_db(db_type)),
-        };
-        format!("{call} AS {}", db_sql::quote_ident(db_type, &self.alias))
-    }
-
-    /// What goes inside `OVER (..)`: the partition, the order and the frame.
-    fn over_clause_for_db(&self, db_type: DatabaseType) -> String {
-        let mut clauses = Vec::new();
-
-        if !self.partition_by.is_empty() {
-            let cols: Vec<String> = self
-                .partition_by
-                .iter()
-                .map(|c| db_sql::format_column(db_type, c))
-                .collect();
-            clauses.push(format!("PARTITION BY {}", cols.join(", ")));
-        }
-
-        if !self.order_by.is_empty() {
-            let orders: Vec<String> = self
-                .order_by
-                .iter()
-                .map(|(col, dir)| {
-                    format!("{} {}", db_sql::format_column(db_type, col), dir.as_str())
-                })
-                .collect();
-            clauses.push(format!("ORDER BY {}", orders.join(", ")));
-        }
-
-        if let (Some(frame_type), Some(start)) = (&self.frame_type, &self.frame_start) {
-            let frame_sql = if let Some(end) = &self.frame_end {
-                format!(
-                    "{} BETWEEN {} AND {}",
-                    frame_type.as_sql(),
-                    start.as_sql(),
-                    end.as_sql()
-                )
-            } else {
-                format!("{} {}", frame_type.as_sql(), start.as_sql())
-            };
-            clauses.push(frame_sql);
-        }
-
-        clauses.join(" ")
     }
 }
 
 /// A named `WITH` clause body spliced in front of the outer select.
 ///
-/// Like [`UnionClause`], a body rendered from a `QueryBuilder` is parameterized
-/// and keeps its bound values in `params` instead of inlining them as literals.
+/// A body [`with_query()`](super::QueryBuilder::with_query) takes is kept as
+/// its query and rendered with the statement, its values bound.
 #[derive(Debug, Clone)]
+#[must_use = "a CTE does nothing until a query takes it"]
 pub struct CTE {
     /// The name the outer query references the CTE by. Quoted when rendered and
     /// validated as an identifier when the query is checked.
@@ -650,8 +205,8 @@ pub struct CTE {
     /// Optional explicit output column list, rendered as `name (a, b) AS (..)`.
     /// `None` keeps whatever names the body itself projects.
     pub columns: Option<Vec<String>>,
-    /// The CTE body: a complete select statement, spliced into the outer
-    /// statement with its PostgreSQL placeholders renumbered for its position.
+    /// The CTE body: a complete select statement in trusted SQL. Empty for a
+    /// body taken from a query.
     pub query_sql: String,
     /// Whether the body refers to the CTE's own name.
     ///
@@ -659,7 +214,7 @@ pub struct CTE {
     /// entire `WITH` prefix to `WITH RECURSIVE`, which is exactly what the SQL
     /// standard requires.
     pub recursive: bool,
-    pub(crate) params: Vec<Value>,
+    pub(crate) query: Option<std::sync::Arc<dyn super::Embedded>>,
 }
 
 impl CTE {
@@ -669,13 +224,13 @@ impl CTE {
     /// sanitized. Prefer [`with_query()`](super::QueryBuilder::with_query),
     /// which renders the body from a second builder and keeps its values as
     /// bound parameters.
-    pub fn new(name: &str, query_sql: String) -> Self {
+    pub fn new(name: impl Into<String>, query_sql: impl Into<String>) -> Self {
         Self {
-            name: name.to_string(),
+            name: name.into(),
             columns: None,
-            query_sql,
+            query_sql: query_sql.into(),
             recursive: false,
-            params: Vec::new(),
+            query: None,
         }
     }
 
@@ -683,21 +238,22 @@ impl CTE {
     ///
     /// Carries the same trusted-SQL caveat as [`new()`](Self::new). The column
     /// list must have exactly as many entries as the body projects.
-    pub fn with_columns(name: &str, columns: Vec<&str>, query_sql: String) -> Self {
+    pub fn with_columns(
+        name: impl Into<String>,
+        columns: impl crate::columns::IntoColumnNames,
+        query_sql: impl Into<String>,
+    ) -> Self {
         Self {
-            columns: Some(columns.into_iter().map(|s| s.to_string()).collect()),
+            columns: Some(crate::columns::column_names(&columns)),
             ..Self::new(name, query_sql)
         }
     }
 
-    /// Build a CTE from parameterized SQL and the values bound to it.
-    ///
-    /// `params` must be ordered exactly as the placeholders appear in
-    /// `query_sql`.
-    pub(crate) fn with_params(name: &str, query_sql: String, params: Vec<Value>) -> Self {
+    /// A CTE whose body is `query`.
+    pub(crate) fn of_query(name: &str, query: impl super::Embedded + 'static) -> Self {
         Self {
-            params,
-            ..Self::new(name, query_sql)
+            query: Some(std::sync::Arc::new(query)),
+            ..Self::new(name, String::new())
         }
     }
 
@@ -712,41 +268,13 @@ impl CTE {
         self.recursive = true;
         self
     }
-
-    /// Render the CTE for `db_type`, quoting the name and the optional column
-    /// list with that backend's identifier quote character.
-    ///
-    /// This is the rendering the executable path uses. It emits only the
-    /// `name (columns) AS (body)` entry — the `WITH` / `WITH RECURSIVE` keyword
-    /// and the commas between entries belong to the statement, not to a single
-    /// CTE.
-    pub fn to_sql_for_db(&self, db_type: DatabaseType) -> String {
-        self.to_sql_with_body_for_db(db_type, &self.query_sql)
-    }
-
-    /// Render the `name (columns) AS (..)` shell for `db_type` around an
-    /// already-rendered body.
-    pub(crate) fn to_sql_with_body_for_db(&self, db_type: DatabaseType, body_sql: &str) -> String {
-        let mut sql = db_sql::quote_ident(db_type, &self.name);
-
-        if let Some(ref cols) = self.columns {
-            sql.push_str(" (");
-            sql.push_str(&crate::internal::sql_safety::column_list(db_type, cols, ""));
-            sql.push(')');
-        }
-
-        sql.push_str(" AS (");
-        sql.push_str(body_sql);
-        sql.push(')');
-        sql
-    }
 }
 
 /// A reusable snapshot of a [`QueryBuilder`](super::QueryBuilder)'s clauses.
 ///
 /// A fragment stores clauses verbatim rather than rendered SQL, so it carries no
 /// inline literals and stays backend-agnostic: HAVING clauses keep their `?`
-/// placeholders next to their bound values, exactly as [`UnionClause`] and
+/// placeholders next to their bound values, exactly as `UnionClause` and
 /// [`CTE`] operands do.
 ///
 /// Produced by [`QueryBuilder::consolidate()`](super::QueryBuilder::consolidate)
@@ -754,6 +282,7 @@ impl CTE {
 /// whose documentation defines the merge semantics. Its clauses are private,
 /// so a fragment can only come from a builder that already validated them.
 #[derive(Debug, Clone)]
+#[must_use = "a fragment does nothing until `apply()` takes it"]
 pub struct QueryFragment<M: Model> {
     pub(crate) _marker: PhantomData<M>,
     pub(crate) clauses: super::clauses::Clauses,

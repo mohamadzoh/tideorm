@@ -7,6 +7,7 @@ use super::{
     flush_sort_key, order_self_references, plan_flush_order,
 };
 use crate::error::{DbFailure, DbFailureKind, Error};
+use crate::orm::sql_builder::{Value, ValueKey};
 
 /// A managed entry that only describes a table and its declared relations.
 ///
@@ -39,8 +40,8 @@ impl OrderingEntry {
         entry.links.push(RowLink {
             foreign_key: "parent_id",
             referenced: "id",
-            provides: Some(id.to_string()),
-            requires: parent.map(str::to_string),
+            provides: Some(ValueKey::new(id.into())),
+            requires: parent.map(|parent| ValueKey::new(parent.into())),
         });
         entry
     }
@@ -112,7 +113,12 @@ fn flush_tables_in_order(entries: &[Arc<dyn ManagedOps>]) -> Vec<&'static str> {
 fn flush_rows_in_order(entries: &[Arc<dyn ManagedOps>]) -> Vec<String> {
     flush_order(entries)
         .iter()
-        .map(|entry| entry.row_links()[0].provides.clone().unwrap_or_default())
+        .map(
+            |entry| match entry.row_links()[0].provides.as_ref().map(ValueKey::value) {
+                Some(Value::String(Some(id))) => id.to_string(),
+                other => panic!("a node's id is text, not {other:?}"),
+            },
+        )
         .collect()
 }
 

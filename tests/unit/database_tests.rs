@@ -43,7 +43,7 @@ fn a_disconnected_database_fails_its_accessors_and_reports_safe_defaults() {
     let db = Database::disconnected();
 
     assert!(db.__internal_connection().is_err());
-    assert!(db.__internal_backend().is_err());
+    assert!(db.try_backend().is_err());
     assert!(db.__get_connection().is_err());
     assert_eq!(db.backend(), crate::config::DatabaseType::Postgres);
     assert_eq!(format!("{:?}", db), "Database { connected: false }");
@@ -84,26 +84,26 @@ async fn metadata_answers_for_the_handle_it_was_called_on() {
     // transaction running around it.
     let other = Database::disconnected();
 
-    db.transaction(move |_| {
-        Box::pin(async move {
-            assert!(
-                other.__internal_backend().is_err(),
-                "a handle must report its own backend, not the ambient transaction's"
-            );
-            assert!(
-                other.ping().await.is_err(),
-                "a handle must be pinged through its own connection"
-            );
+    db.transaction(async move |_| {
+        assert!(
+            other.try_backend().is_err(),
+            "a handle must report its own backend, not the ambient transaction's"
+        );
+        assert!(
+            other.ping().await.is_err(),
+            "a handle must be pinged through its own connection"
+        );
 
-            // Execution still joins the ambient transaction: that is what
-            // makes a nested `transaction` a SAVEPOINT instead of a second,
-            // independent top-level one.
-            let nested: crate::error::Result<()> =
-                other.transaction(|_| Box::pin(async { Ok(()) })).await;
-            nested.expect("a nested transaction should join the ambient one");
+        // Execution follows the handle too: the ambient transaction belongs to
+        // another pool, so a handle with no connection of its own fails
+        // instead of running there.
+        let nested: crate::error::Result<()> = other.transaction(async |_| Ok(())).await;
+        assert!(
+            nested.is_err(),
+            "a handle must not run its transaction on another pool's"
+        );
 
-            Ok(())
-        })
+        Ok(())
     })
     .await
     .expect("the outer transaction should commit");
@@ -118,14 +118,15 @@ async fn transaction_override_remains_visible_when_scoped_future_moves_threads()
     let db = Database::connect("sqlite::memory:")
         .await
         .expect("sqlite in-memory connection should succeed");
-    let transaction = db
+    let pool = db
         .current_inner()
-        .expect("database should expose internal connection")
+        .expect("database should expose internal connection");
+    let transaction = pool
         .connection()
         .begin()
         .await
         .expect("transaction should begin successfully");
-    let handle = super::ConnectionRef::Transaction(Arc::new(transaction), Default::default());
+    let handle = super::ConnectionRef::Transaction(Arc::new(transaction), pool, Default::default());
     let polled_threads = Arc::new(Mutex::new(Vec::new()));
     let mut future = Box::pin(super::state::with_connection_override(
         handle,
@@ -211,14 +212,7 @@ async fn raw_json_reads_sqlite_values_by_declared_type_or_storage_class() {
             ]),
         ),
     ] {
-        let db = Database::connect("sqlite::memory:")
-            .await
-            .expect("sqlite in-memory connection should succeed");
-        for statement in setup {
-            db.__execute_with_params(statement, vec![])
-                .await
-                .unwrap_or_else(|error| panic!("{statement}: {error}"));
-        }
+        let db = crate::test_support::sqlite_memory(&setup).await;
 
         let rows = db
             .__raw_json_with_params(query, vec![])
@@ -256,6 +250,18 @@ fn database_builder_debug_masks_the_url_credentials() {
     assert!(debug.contains("postgres://***@db:5432/app"), "{debug}");
 }
 
+#[cfg(feature = "postgres")]
+#[test]
+fn database_builder_debug_leaves_driver_options_out() {
+    let password = format!("pw{}", std::process::id());
+    let builder = Database::builder()
+        .postgres_options(crate::prelude::PgConnectOptions::new().password(&password));
+    let debug = format!("{builder:?}");
+
+    assert!(!debug.contains(&password), "{debug}");
+    assert!(debug.contains("target: Some(Postgres(..))"), "{debug}");
+}
+
 /// A transaction is joined by the handles of its own database only: inside
 /// one on `first`, a statement through `second` runs on `second`.
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
@@ -277,13 +283,11 @@ async fn a_transaction_is_joined_only_by_its_own_database() {
 
     let (own, other) = (first.clone(), second.clone());
     let (own_rows, other_rows) = first
-        .transaction(move |_| {
-            Box::pin(async move {
-                let sql = "SELECT name FROM which_database";
-                let own_rows = own.__raw_json_with_params(sql, vec![]).await?;
-                let other_rows = other.__raw_json_with_params(sql, vec![]).await?;
-                Ok((own_rows, other_rows))
-            })
+        .transaction(async move |_| {
+            let sql = "SELECT name FROM which_database";
+            let own_rows = own.__raw_json_with_params(sql, vec![]).await?;
+            let other_rows = other.__raw_json_with_params(sql, vec![]).await?;
+            Ok((own_rows, other_rows))
         })
         .await
         .unwrap();

@@ -12,7 +12,7 @@ pub(super) struct PostgresObjects {
 pub(super) async fn postgres_dependencies(conn: &impl ConnectionTrait) -> Result<PostgresObjects> {
     // These objects can be required by views, constraints, indexes or routines.
     // Refuse the export before write_schema touches its output file.
-    let mut unsupported = query(conn, Backend::Postgres,
+    let mut unsupported = query(conn, DatabaseType::Postgres,
         "SELECT pg_catalog.pg_describe_object(o.classid, o.oid, 0) AS object
          FROM (
              SELECT 'pg_catalog.pg_proc'::regclass AS classid, oid, pronamespace AS namespace
@@ -29,7 +29,7 @@ pub(super) async fn postgres_dependencies(conn: &impl ConnectionTrait) -> Result
            AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
                            WHERE d.classid=o.classid AND d.objid=o.oid AND d.deptype='e')
          ORDER BY object", Vec::new()).await?;
-    unsupported.extend(query(conn, Backend::Postgres,
+    unsupported.extend(query(conn, DatabaseType::Postgres,
         "SELECT format('foreign server %I', srvname) AS object FROM pg_catalog.pg_foreign_server ORDER BY srvname",
         Vec::new()).await?);
     if !unsupported.is_empty() {
@@ -97,7 +97,7 @@ pub(super) async fn postgres_dependencies(conn: &impl ConnectionTrait) -> Result
                WHERE d.classid = 'pg_catalog.pg_class'::regclass AND d.objid = c.oid AND d.deptype IN ('i', 'e'))
          ORDER BY n.nspname, c.relname", Vec::new(), &["definition", "owner"]).await?);
 
-    let rows = query(conn, Backend::Postgres,
+    let rows = query(conn, DatabaseType::Postgres,
         "WITH RECURSIVE edges AS (
              SELECT objid AS owner, refobjid AS dependency FROM pg_catalog.pg_depend
              WHERE classid = 'pg_catalog.pg_type'::regclass
@@ -131,7 +131,7 @@ pub(super) async fn postgres_dependencies(conn: &impl ConnectionTrait) -> Result
              UNION
              SELECT e.dependency FROM required r JOIN edges e ON e.owner = r.oid
          )
-         SELECT t.oid::bigint AS id, format('%I.%I', n.nspname, t.typname) AS name,
+         SELECT t.oid AS id, format('%I.%I', n.nspname, t.typname) AS name,
                 (t.typelem <> 0 AND t.typlen = -1) OR COALESCE(c.relkind IN ('r', 'p', 'v', 'm'), false) OR EXISTS (
                     SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid = 'pg_catalog.pg_type'::regclass
                     AND d.objid = t.oid AND d.deptype = 'e') AS implicit,
@@ -200,8 +200,8 @@ pub(super) async fn postgres_dependencies(conn: &impl ConnectionTrait) -> Result
     // still have catalog dependencies, which are ordered below.
     prelude.push("SET check_function_bodies = false".into());
 
-    for row in query(conn, Backend::Postgres,
-        "SELECT p.oid::bigint AS id, pg_catalog.pg_get_functiondef(p.oid) AS definition,
+    for row in query(conn, DatabaseType::Postgres,
+        "SELECT p.oid AS id, pg_catalog.pg_get_functiondef(p.oid) AS definition,
                 format('ALTER %s %I.%I(%s) OWNER TO %I',
                     CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END,
                     n.nspname, p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid),
@@ -216,8 +216,8 @@ pub(super) async fn postgres_dependencies(conn: &impl ConnectionTrait) -> Result
         let definitions = vec![get(&row, "definition")?, get(&row, "owner")?];
         nodes.insert(("routine".into(), id), definitions);
     }
-    for row in query(conn, Backend::Postgres,
-        "SELECT c.oid::bigint AS id,
+    for row in query(conn, DatabaseType::Postgres,
+        "SELECT c.oid AS id,
                 format('CREATE %s %I.%I (%s)%s AS %s%s',
                     CASE c.relkind WHEN 'm' THEN 'MATERIALIZED VIEW' ELSE 'VIEW' END,
                     n.nspname, c.relname,
@@ -268,7 +268,7 @@ impl PostgresObjects {
         // calling user routines are restored after tables to avoid row-type cycles.
         // Row types and array types are implicit nodes linking their users to
         // the table or element type that actually creates them.
-        let rows = query(conn, Backend::Postgres,
+        let rows = query(conn, DatabaseType::Postgres,
             "WITH objects AS (
                 SELECT 'type' AS kind, oid, 'pg_catalog.pg_type'::regclass AS classid FROM pg_catalog.pg_type
                 UNION ALL SELECT 'routine', oid, 'pg_catalog.pg_proc'::regclass FROM pg_catalog.pg_proc
@@ -307,7 +307,7 @@ impl PostgresObjects {
                 SELECT 'type', t.oid, 'type', a.atttypid FROM pg_catalog.pg_type t
                 JOIN pg_catalog.pg_class c ON c.oid=t.typrelid AND c.relkind='c'
                 JOIN pg_catalog.pg_attribute a ON a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped
-             ) SELECT kind, oid::bigint AS id, refkind, refoid::bigint AS refid FROM edges",
+             ) SELECT kind, oid AS id, refkind, refoid AS refid FROM edges",
             Vec::new()).await?;
         let mut dependencies: BTreeMap<(String, i64), Vec<(String, i64)>> = BTreeMap::new();
         for row in rows {

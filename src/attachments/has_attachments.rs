@@ -76,11 +76,15 @@ pub trait HasAttachments {
     }
 
     /// Attach multiple files to a `hasMany` relation.
-    fn attach_many(&mut self, relation: &str, file_keys: Vec<&str>) -> Result<(), AttachmentError> {
+    fn attach_many(
+        &mut self,
+        relation: &str,
+        file_keys: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Result<(), AttachmentError> {
         require_has_many::<Self>(relation, ", use attach() instead")?;
         edit_files(self, |files| {
             for key in file_keys {
-                files.add_many(relation, FileAttachment::new(key));
+                files.add_many(relation, FileAttachment::new(key.as_ref()));
             }
         })
     }
@@ -108,16 +112,28 @@ pub trait HasAttachments {
     }
 
     /// Remove multiple keys from a `hasMany` relation.
-    fn detach_many(&mut self, relation: &str, file_keys: Vec<&str>) -> Result<(), AttachmentError> {
+    fn detach_many(
+        &mut self,
+        relation: &str,
+        file_keys: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Result<(), AttachmentError> {
         require_has_many::<Self>(relation, "")?;
         edit_files(self, |files| {
-            files.remove_many(relation, &file_keys);
+            files.remove_many(relation, file_keys);
         })
     }
 
-    /// Replace the current relation contents with a new list of file keys.
-    fn sync(&mut self, relation: &str, file_keys: Vec<&str>) -> Result<(), AttachmentError> {
-        let attachments = file_keys.into_iter().map(FileAttachment::new).collect();
+    /// Replace the current relation contents with a new list of file keys;
+    /// an empty list clears it.
+    fn sync(
+        &mut self,
+        relation: &str,
+        file_keys: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Result<(), AttachmentError> {
+        let attachments = file_keys
+            .into_iter()
+            .map(|key| FileAttachment::new(key.as_ref()))
+            .collect();
         self.sync_with_metadata(relation, attachments)
     }
 

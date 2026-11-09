@@ -1,6 +1,10 @@
 use std::fmt;
 
-use crate::migration::write_report_section;
+use crate::migration::{BatchFailure, write_report_section};
+
+/// A [`Seeder`](super::Seeder) batch command that stopped on an error, with
+/// the seeds it ran or rolled back before it.
+pub type SeedFailure = BatchFailure<SeedResult>;
 
 /// Result of seed operations
 #[derive(Debug, Clone, Default)]

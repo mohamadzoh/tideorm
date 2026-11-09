@@ -12,7 +12,8 @@ fn test_postgres_compound_select_renumbers_placeholders_left_to_right() {
         )
         .where_eq("name", "base-value")
         .union_all(QueryBuilder::<QueryTestUser>::new().where_eq("name", "union-value"))
-        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres)
+        .unwrap();
 
     let columns = "\"query_test_users\".\"id\", \"query_test_users\".\"name\"";
     assert_eq!(
@@ -35,33 +36,32 @@ fn test_postgres_compound_select_renumbers_placeholders_left_to_right() {
 
 #[test]
 fn test_positional_placeholder_compound_select_binds_values_left_to_right() {
-    // MySQL and SQLite operands carry bare `?` markers that are never renumbered,
-    // so only the order values are pushed keeps them matched to their markers.
-    let bind = |value: &str| crate::internal::json_to_db_value(&serde_json::json!(value));
-
-    let mut query = QueryBuilder::<QueryTestUser>::new().where_eq("name", "base-value");
-    query.clauses.ctes.push(CTE::with_params(
-        "recent_users",
-        "SELECT `id` FROM `query_test_users` WHERE `name` = ?".to_string(),
-        vec![bind("cte-value")],
-    ));
-    query.clauses.unions.push(UnionClause::with_params(
-        UnionType::UnionAll,
-        "SELECT `id` FROM `query_test_users` WHERE `name` = ?".to_string(),
-        vec![bind("union-value")],
-    ));
-
-    let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::MySQL);
+    // MySQL markers are bare `?`s, so only the order values are bound in
+    // keeps them matched to their markers. The operands render with the
+    // statement, for its backend.
+    let (sql, params) = QueryBuilder::<QueryTestUser>::new()
+        .with_query(
+            "recent_users",
+            QueryBuilder::<QueryTestUser>::new().where_eq("name", "cte-value"),
+        )
+        .where_eq("name", "base-value")
+        .union_all(QueryBuilder::<QueryTestUser>::new().where_eq("name", "union-value"))
+        .build_select_sql_with_params_for_db(DatabaseType::MySQL)
+        .unwrap();
 
     assert_eq!(sql.matches('?').count(), 3, "sql: {sql}");
-    // MySQL quotes the CTE name with backticks, not double quotes.
+    // MySQL quotes every identifier with backticks, the operands' included.
     assert!(
-        sql.starts_with("WITH `recent_users` AS (SELECT"),
+        sql.starts_with("WITH `recent_users` AS (SELECT") && !sql.contains('"'),
         "sql: {sql}"
     );
     assert_eq!(
         params,
-        vec![bind("cte-value"), bind("base-value"), bind("union-value")]
+        vec![
+            Value::String(Some("cte-value".to_string())),
+            Value::String(Some("base-value".to_string())),
+            Value::String(Some("union-value".to_string())),
+        ]
     );
 }
 
@@ -72,6 +72,7 @@ fn test_compound_operand_parenthesization_is_dialect_specific() {
             .where_eq("name", "alice")
             .union_all_raw("SELECT id FROM query_test_users")
             .build_select_sql_with_params_for_db(db_type)
+            .unwrap()
             .0
     };
 
@@ -105,7 +106,9 @@ fn test_union_operand_keeps_comment_like_values_out_of_the_sql() {
         .ensure_query_is_valid()
         .expect("a bound operand value must never be scanned as raw SQL");
 
-    let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::Postgres);
+    let (sql, params) = query
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres)
+        .unwrap();
 
     assert!(!sql.contains("DROP TABLE"), "sql: {sql}");
     assert!(!sql.contains("--"), "sql: {sql}");
@@ -145,10 +148,10 @@ fn test_window_function_types_render_their_calls() {
             WindowFunctionType::Lag("price".to_string(), Some(1), Some("0".to_string())),
             "LAG(\"price\", 1, 0)",
         ),
-        // SQL cannot pass a default without an offset, so it is dropped.
+        // SQL cannot pass a default without an offset, so it takes offset 1.
         (
             WindowFunctionType::Lag("price".to_string(), None, Some("0".to_string())),
-            "LAG(\"price\")",
+            "LAG(\"price\", 1, 0)",
         ),
         (
             WindowFunctionType::Lead("date".to_string(), Some(1), None),
@@ -235,19 +238,29 @@ fn test_cte_sql_uses_backend_identifier_quoting() {
     for (db_type, expected) in [
         (
             DatabaseType::Postgres,
-            "\"recent\" (\"id\", \"name\") AS (SELECT id, name FROM query_test_users)",
+            "WITH \"recent\" (\"id\", \"name\") AS (SELECT id, name FROM query_test_users) SELECT",
         ),
         (
             DatabaseType::MySQL,
-            "`recent` (`id`, `name`) AS (SELECT id, name FROM query_test_users)",
+            "WITH `recent` (`id`, `name`) AS (SELECT id, name FROM query_test_users) SELECT",
         ),
     ] {
-        let cte = CTE::with_columns("recent", vec!["id", "name"], body.to_string());
-        assert_eq!(cte.to_sql_for_db(db_type), expected);
+        let sql = QueryTestUser::query()
+            .with_cte(CTE::with_columns(
+                "recent",
+                vec!["id", "name"],
+                body.to_string(),
+            ))
+            .build_select_sql_for_db(db_type);
+        assert!(sql.starts_with(expected), "{sql}");
     }
-    assert_eq!(
-        CTE::new("recent", body.to_string()).to_sql_for_db(DatabaseType::Postgres),
-        "\"recent\" AS (SELECT id, name FROM query_test_users)"
+    let sql = QueryTestUser::query()
+        .with_cte(CTE::new("recent", body.to_string()))
+        .debug()
+        .sql;
+    assert!(
+        sql.contains("WITH \"recent\" AS (SELECT id, name FROM query_test_users) SELECT"),
+        "{sql}"
     );
 }
 
@@ -291,13 +304,14 @@ fn a_cte_body_keeps_its_ordering_and_limit() {
                 .limit(10)
                 .offset(20),
         )
-        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres)
+        .unwrap();
 
     assert!(
         sql.contains("ORDER BY \"id\" DESC LIMIT 10 OFFSET $1)"),
         "sql: {sql}"
     );
-    assert_eq!(params, vec![Value::BigInt(Some(20))]);
+    assert_eq!(params, vec![Value::BigUnsigned(Some(20))]);
 }
 
 #[test]
@@ -310,18 +324,21 @@ fn a_union_operand_keeps_its_ordering_and_limit() {
 
     let (sql, _) = QueryBuilder::<QueryTestUser>::new()
         .union(operand())
-        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres)
+        .unwrap();
     assert!(
         sql.contains("UNION (SELECT") && sql.ends_with("DESC LIMIT 10)"),
         "sql: {sql}"
     );
 
     // SQLite takes no parenthesized operand, so a limited one is read through
-    // a derived table. (An operand renders for the connected backend, and
-    // this test has none, so the operand is asked for SQLite directly.)
-    let (sql, _) = operand().build_compound_operand_sql_for_db(DatabaseType::SQLite);
+    // a derived table.
+    let (sql, _) = QueryBuilder::<QueryTestUser>::new()
+        .union(operand())
+        .build_select_sql_with_params_for_db(DatabaseType::SQLite)
+        .unwrap();
     assert!(
-        sql.starts_with("SELECT * FROM (SELECT")
+        sql.contains(" UNION SELECT * FROM (SELECT")
             && sql.ends_with("DESC LIMIT 10) AS \"tideorm_union_operand\""),
         "sql: {sql}"
     );
@@ -357,4 +374,44 @@ fn a_lag_default_is_chosen_by_a_case_on_the_mysql_family() {
         lead.to_sql_for_db(DatabaseType::MariaDB),
         "LEAD(`amount`, 2) OVER () AS `next`"
     );
+
+    // A default without an offset keeps its default, at offset 1.
+    let lead = WindowFunction::new(
+        WindowFunctionType::Lead("amount".to_string(), None, Some("0".to_string())),
+        "next",
+    );
+    assert_eq!(
+        lead.to_sql_for_db(DatabaseType::MySQL),
+        "CASE WHEN LEAD(1, 1) OVER () IS NULL THEN 0 ELSE LEAD(`amount`, 1) OVER () END AS `next`"
+    );
+}
+
+#[test]
+fn a_groups_frame_is_refused_on_the_mysql_family() {
+    let query = || {
+        QueryBuilder::<QueryTestUser>::new().window(
+            WindowFunction::new(WindowFunctionType::Count(None), "peers")
+                .order_by("name", Order::Asc)
+                .frame(
+                    FrameType::Groups,
+                    FrameBound::Preceding(1),
+                    FrameBound::CurrentRow,
+                ),
+        )
+    };
+    for db_type in [DatabaseType::MySQL, DatabaseType::MariaDB] {
+        let err = query()
+            .build_select_sql_with_params_for_db(db_type)
+            .unwrap_err();
+        assert!(err.to_string().contains("framed by GROUPS"), "{err}");
+    }
+    for db_type in [DatabaseType::Postgres, DatabaseType::SQLite] {
+        let (sql, _) = query()
+            .build_select_sql_with_params_for_db(db_type)
+            .unwrap();
+        assert!(
+            sql.contains("GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW"),
+            "{sql}"
+        );
+    }
 }

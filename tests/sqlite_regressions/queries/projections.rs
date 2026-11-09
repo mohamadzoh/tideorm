@@ -65,7 +65,7 @@ async fn window_output_can_complete_a_model_projection() {
     let db = chunk_projection_database().await;
     let query = ChunkProjection::query_with(&db)
         .select(vec!["id"])
-        .row_number("rank", None, "id", Order::Asc)
+        .row_number("rank", (), "id", Order::Asc)
         .order_asc("id");
     let rows = query.get().await.unwrap();
     assert_eq!(
@@ -78,14 +78,14 @@ async fn window_output_can_complete_a_model_projection() {
     assert!(
         ChunkProjection::query_with(&db)
             .select(vec!["rank"])
-            .row_number("id", None, "rank", Order::Asc)
+            .row_number("id", (), "rank", Order::Asc)
             .get()
             .await
             .is_err()
     );
     let rows = ChunkProjection::query_with(&db)
         .select(vec!["rank"])
-        .row_number("stored_id", None, "rank", Order::Asc)
+        .row_number("stored_id", (), "rank", Order::Asc)
         .get()
         .await
         .unwrap();
@@ -122,12 +122,12 @@ async fn window_alias_cannot_replace_a_model_primary_key() {
     for query in [
         base.clone(),
         base.clone().distinct(),
-        base.clone().select(vec![]),
+        base.clone().select(Vec::<&str>::new()),
         base.clone().select(vec!["*"]),
         base.clone().select(vec!["review_projection_people.*"]),
         base.clone().select_raw("review_projection_people.*"),
     ] {
-        let query = query.row_number("id", None, "id", Order::Asc);
+        let query = query.row_number("id", (), "id", Order::Asc);
         assert!(
             query
                 .clone()
@@ -139,7 +139,7 @@ async fn window_alias_cannot_replace_a_model_primary_key() {
         );
         assert!(query.get().await.is_err());
     }
-    let query = base.row_number("position", None, "id", Order::Asc);
+    let query = base.row_number("position", (), "id", Order::Asc);
     assert_eq!(query.clone().get_json().await.unwrap()[0]["position"], 1);
     let mut row = query.first_or_fail().await.unwrap();
     assert_eq!(row.id, 7);
@@ -332,7 +332,7 @@ async fn window_alias_uses_the_expression_type() {
         .unwrap();
     let rows = User::query_with(&db)
         .select(vec!["id"])
-        .row_number("active", None, "id", Order::Asc)
+        .row_number("active", (), "id", Order::Asc)
         .order_asc("id")
         .get_json()
         .await
@@ -346,7 +346,7 @@ async fn window_alias_uses_the_expression_type() {
     assert!(
         User::query_with(&db)
             .select(vec!["active"])
-            .row_number("active", None, "id", Order::Asc)
+            .row_number("active", (), "id", Order::Asc)
             .validate()
             .is_err()
     );
@@ -389,7 +389,7 @@ async fn empty_selection_loads_the_default_model_columns() {
     let db = chunk_projection_database().await;
     for distinct in [false, true] {
         let query = ChunkProjection::query_with(&db)
-            .select(vec![])
+            .select(Vec::<&str>::new())
             .order_asc("id");
         let query = if distinct { query.distinct() } else { query };
         assert_eq!(query.clone().get_json().await.unwrap().len(), 2);

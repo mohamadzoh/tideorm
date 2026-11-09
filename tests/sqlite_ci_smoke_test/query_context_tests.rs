@@ -14,7 +14,8 @@ async fn insert_local(db: &Database, email: &str, name: &str, active: bool) -> i
         name: name.to_string(),
         active,
     }
-    .into_active_model()
+    .try_into_active_model()
+    .expect("the model converts")
     .insert(&conn)
     .await
     .expect("failed to seed local user")

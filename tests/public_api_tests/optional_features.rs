@@ -225,9 +225,10 @@ mod translations_extended_tests {
             .set_translation("description", "en", "English Description")
             .unwrap();
 
+        let json = product.to_translated_json_in("ar");
         let mut opts = std::collections::HashMap::new();
         opts.insert("language".to_string(), "ar".to_string());
-        let json = product.to_translated_json(Some(opts));
+        assert_eq!(json, product.to_translated_json(Some(opts)));
 
         assert_eq!(json.get("name"), Some(&serde_json::json!("منتج عربي")));
         assert_eq!(

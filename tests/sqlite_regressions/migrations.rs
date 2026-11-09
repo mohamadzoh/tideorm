@@ -3,6 +3,9 @@
 
 use tideorm::prelude::*;
 
+#[path = "migrations/runner.rs"]
+mod runner;
+
 #[tokio::test]
 async fn schema_export_ignores_shadow_names_in_other_schemas() {
     for schema in ["aux", "temp"] {
@@ -196,86 +199,6 @@ async fn concurrent_sqlite_migrators_apply_once() {
 }
 
 #[tokio::test]
-async fn independent_sqlite_pools_share_the_migration_lock() {
-    use tideorm::migration::__run_sql_migration;
-    let path = crate::fixtures::TempFile::new("migration-audit", "sqlite");
-    let url = format!("sqlite://{}?mode=rwc", path.display());
-    let a = crate::fixtures::single_connection(&url).await;
-    let b = crate::fixtures::single_connection(&url).await;
-    let migration = |db| {
-        __run_sql_migration(
-            db,
-            "_migrations",
-            "once",
-            "once",
-            vec!["CREATE TABLE audit_once(id INTEGER PRIMARY KEY)".into()],
-            true,
-        )
-    };
-    let (a_result, b_result) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        tokio::join!(migration(&a), migration(&b))
-    })
-    .await
-    .unwrap();
-    assert_ne!(a_result.unwrap(), b_result.unwrap());
-    // A failed later migration rolls back its own DDL and releases the lock.
-    assert!(
-        __run_sql_migration(
-            &a,
-            "_migrations",
-            "fail",
-            "fail",
-            vec![
-                "CREATE TABLE audit_rollback(id INTEGER)".into(),
-                "INSERT INTO missing_table VALUES(1)".into()
-            ],
-            true
-        )
-        .await
-        .is_err()
-    );
-    assert!(
-        __run_sql_migration(
-            &b,
-            "_migrations",
-            "fail",
-            "fail",
-            vec!["CREATE TABLE audit_rollback(id INTEGER)".into()],
-            true
-        )
-        .await
-        .unwrap()
-    );
-    drop((a, b));
-}
-
-/// `sqlite:///C:/..` is how the CLI writes a Windows path, and SQLx then names
-/// the file `/C:/..`, which Windows cannot resolve: the lock follows the file
-/// SQLite opened, whatever the URL's spelling.
-#[tokio::test]
-async fn migration_lock_follows_the_opened_file_for_any_url_spelling() {
-    use tideorm::migration::__run_sql_migration;
-    let path = crate::fixtures::TempFile::new("migration-url", "sqlite");
-    let slashed = path.display().to_string().replace('\\', "/");
-    let url = format!("sqlite:///{}?mode=rwc", slashed.trim_start_matches('/'));
-    let db = crate::fixtures::single_connection(&url).await;
-    let applied = __run_sql_migration(
-        &db,
-        "_migrations",
-        "url",
-        "url",
-        vec!["CREATE TABLE audit_url(id INTEGER PRIMARY KEY)".into()],
-        true,
-    )
-    .await
-    .unwrap();
-    assert!(applied);
-    let lock = format!("{}.tideorm-migrations.lock", path.display());
-    assert!(std::path::Path::new(&lock).exists(), "{lock}");
-    drop(db);
-}
-
-#[tokio::test]
 async fn sqlite_export_keeps_names_similar_to_reserved_prefix() {
     crate::fixtures::global_memory_database(
         "CREATE TABLE sqlitex_items(id INTEGER PRIMARY KEY, name TEXT); \
@@ -340,7 +263,7 @@ async fn migrator_runs_inside_a_transaction_on_a_one_connection_pool() {
     let db = crate::fixtures::global_memory_database("").await;
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        db.transaction(|_| Box::pin(async { Migrator::new().add(CreateTable).run().await })),
+        db.transaction(async |_| Ok(Migrator::new().add(CreateTable).run().await?)),
     )
     .await
     .expect("the migrator waited for a second connection");
@@ -434,7 +357,7 @@ async fn dropping_a_renamed_unique_column_removes_its_original_index() {
     schema
         .alter_table("renamed_unique", |table| {
             table
-                .add_column("code", ColumnType::String)
+                .add_column("code", ColumnType::string(None))
                 .nullable()
                 .unique();
         })
@@ -463,7 +386,7 @@ async fn dropping_a_renamed_unique_column_removes_its_original_index() {
             schema
                 .alter_table("renamed_table", |table| {
                     table
-                        .add_column("code", ColumnType::String)
+                        .add_column("code", ColumnType::string(None))
                         .nullable()
                         .unique();
                 })
@@ -474,7 +397,7 @@ async fn dropping_a_renamed_unique_column_removes_its_original_index() {
             .alter_table("renamed_table", |table| {
                 if added_in_same_call {
                     table
-                        .add_column("code", ColumnType::String)
+                        .add_column("code", ColumnType::string(None))
                         .nullable()
                         .unique();
                 }
@@ -517,8 +440,8 @@ async fn schema_sync_rejects_index_names_owned_by_another_table() {
         for table in ["collision_first", "collision_second"] {
             SyncRegistry::register_schema(
                 ModelSchema::new(table)
-                    .column(ColumnDef::new("id", "i64").primary_key())
-                    .column(ColumnDef::new("code", "String"))
+                    .column(ColumnDef::new("id", ColumnType::BigInteger).primary_key())
+                    .column(ColumnDef::new("code", ColumnType::Text))
                     .indexes(vec![IndexDefinition {
                         name: "shared_unique".into(),
                         columns: vec!["code".into()],
@@ -843,6 +766,9 @@ async fn rolling_back_past_an_unregistered_migration_is_an_error() {
 
     let _db = crate::fixtures::global_memory_database("").await;
     let migrator = tideorm::migration::Migrator::new().add(Probe);
+    let pending = migrator.status().await.unwrap();
+    assert!(!pending[0].applied);
+    assert_eq!(pending[0].applied_at, None);
     migrator.run().await.unwrap();
     Database::execute("INSERT INTO _migrations (version, name) VALUES ('002', 'missing')")
         .await
@@ -855,5 +781,279 @@ async fn rolling_back_past_an_unregistered_migration_is_an_error() {
     );
     assert!(migrator.rollback_steps(2).await.is_err());
     assert!(migrator.reset().await.is_err());
-    assert!(migrator.status().await.unwrap()[0].applied);
+    let status = migrator.status().await.unwrap();
+    assert!(status[0].applied);
+    let applied_at = status[0]
+        .applied_at
+        .expect("an applied migration says when");
+    assert_eq!(
+        Some(applied_at),
+        migrator
+            .applied()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|migration| migration.version == status[0].version)
+            .map(|migration| migration.applied_at)
+    );
+}
+
+/// Creates `teams` and `players`, a key from one to the other, and checks
+/// what the scope's connection holds along the way.
+struct CreatePlayers;
+
+#[tideorm::async_trait::async_trait]
+impl tideorm::migration::Migration for CreatePlayers {
+    fn version(&self) -> &str {
+        "001"
+    }
+    fn name(&self) -> &str {
+        "create_players"
+    }
+    async fn up(&self, schema: &mut tideorm::migration::Schema) -> tideorm::Result<()> {
+        assert_eq!(
+            schema.database_type(),
+            tideorm::config::DatabaseType::SQLite
+        );
+        assert!(!schema.has_table("teams").await?);
+        schema
+            .create_table("teams", |t| {
+                t.id();
+                t.string("name").not_null();
+            })
+            .await?;
+        schema
+            .create_table("players", |t| {
+                t.id();
+                t.foreign_id("team_id")
+                    .not_null()
+                    .references("teams", "id")
+                    .on_delete(ForeignKeyAction::Cascade);
+                t.string("handle").not_null();
+            })
+            .await?;
+        // The migration's own transaction sees what it created.
+        assert!(schema.has_table("TEAMS").await?);
+        assert!(schema.has_column("players", "Handle").await?);
+        assert!(!schema.has_column("players", "missing").await?);
+        schema
+            .create_unique_index("players", "players_handle", &["handle"])
+            .await?;
+        schema
+            .create_index_if_not_exists("players", "players_team", &["team_id"])
+            .await?;
+        schema
+            .create_index_if_not_exists("players", "players_team", &["team_id"])
+            .await?;
+        schema
+            .drop_index_if_exists("players", "never_created")
+            .await
+    }
+    async fn down(&self, schema: &mut tideorm::migration::Schema) -> tideorm::Result<()> {
+        schema.drop_table("players").await?;
+        schema.drop_table("teams").await
+    }
+}
+
+#[tokio::test]
+async fn a_migrator_given_a_database_migrates_that_one() {
+    use tideorm::migration::{MigrationInfo, Migrator};
+    let global = crate::fixtures::global_memory_database("").await;
+    let tenant = crate::fixtures::memory_database("").await;
+    let migrator = Migrator::new().add(CreatePlayers).database(&tenant);
+    assert_eq!(migrator.run().await.unwrap().applied.len(), 1);
+
+    let count = |db: Database, table: &'static str| async move {
+        db.query_raw_json(&format!(
+            "SELECT count(*) AS n FROM sqlite_master WHERE name = '{table}'"
+        ))
+        .await
+        .unwrap()[0]["n"]
+            .clone()
+    };
+    assert_eq!(count(tenant.clone(), "players").await, 1);
+    assert_eq!(count(global.clone(), "players").await, 0);
+    assert_eq!(count(global.clone(), "_migrations").await, 0);
+
+    // The key is enforced, and cascades.
+    tenant
+        .exec_raw("INSERT INTO teams (id, name) VALUES (1, 'reds')")
+        .await
+        .unwrap();
+    tenant
+        .exec_raw("INSERT INTO players (team_id, handle) VALUES (1, 'ann')")
+        .await
+        .unwrap();
+    assert!(
+        tenant
+            .exec_raw("INSERT INTO players (team_id, handle) VALUES (9, 'bob')")
+            .await
+            .is_err()
+    );
+    assert!(
+        tenant
+            .exec_raw("INSERT INTO players (team_id, handle) VALUES (1, 'ann')")
+            .await
+            .is_err(),
+        "the unique index holds"
+    );
+    tenant.exec_raw("DELETE FROM teams").await.unwrap();
+    assert_eq!(count_rows(&tenant, "players").await, 0);
+
+    let applied = migrator.applied().await.unwrap();
+    assert_eq!(applied.len(), 1);
+    assert_eq!(
+        (applied[0].version.as_str(), applied[0].name.as_str()),
+        ("001", "create_players")
+    );
+    assert!(migrator.unregistered().await.unwrap().is_empty());
+    tenant
+        .exec_raw("INSERT INTO _migrations (version, name) VALUES ('002', 'elsewhere')")
+        .await
+        .unwrap();
+    assert_eq!(
+        migrator.unregistered().await.unwrap(),
+        [MigrationInfo {
+            version: "002".to_string(),
+            name: "elsewhere".to_string(),
+        }]
+    );
+    assert_eq!(migrator.applied().await.unwrap().len(), 2);
+    assert!(migrator.reset().await.is_err());
+    Database::reset_global();
+}
+
+async fn count_rows(db: &Database, table: &str) -> i64 {
+    db.query_raw_json(&format!("SELECT count(*) AS n FROM {table}"))
+        .await
+        .unwrap()[0]["n"]
+        .as_i64()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn sqlite_adds_a_column_with_its_foreign_key_and_refuses_the_rest() {
+    use tideorm::config::DatabaseType;
+    use tideorm::migration::Schema;
+    let db = crate::fixtures::global_memory_database(
+        "CREATE TABLE crews(id INTEGER PRIMARY KEY); \
+         CREATE TABLE sailors(id INTEGER PRIMARY KEY, name TEXT DEFAULT 'x'); \
+         INSERT INTO crews VALUES (1); INSERT INTO sailors (id) VALUES (1)",
+    )
+    .await;
+    Schema::new(DatabaseType::SQLite)
+        .alter_table("sailors", |t| {
+            t.foreign_id("crew_id").references("crews", "id");
+            t.add_index(&["crew_id"]);
+        })
+        .await
+        .unwrap();
+    db.exec_raw("UPDATE sailors SET crew_id = 1").await.unwrap();
+    assert!(db.exec_raw("UPDATE sailors SET crew_id = 2").await.is_err());
+
+    // What SQLite cannot do fails before anything runs: `note` stays out.
+    let refusals: [fn(&mut tideorm::migration::AlterTableBuilder); 3] = [
+        |t| {
+            t.add_foreign_key(&["crew_id"], "crews", &["id"]);
+        },
+        |t| {
+            t.drop_foreign_key("fk_sailors_crew_id");
+        },
+        |t| {
+            t.alter_column("name").drop_default();
+        },
+    ];
+    for refusal in refusals {
+        let error = Schema::new(DatabaseType::SQLite)
+            .alter_table("sailors", |t| {
+                t.text("note");
+                refusal(t);
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, tideorm::Error::BackendNotSupported { .. }),
+            "{error}"
+        );
+    }
+    let schema = Schema::new(DatabaseType::SQLite);
+    assert!(schema.has_column("sailors", "crew_id").await.unwrap());
+    assert!(!schema.has_column("sailors", "note").await.unwrap());
+    Database::reset_global();
+}
+
+/// `Additive` adds the column a table lacks and keeps its rows; `Recreate`
+/// drops the table and creates it afresh.
+#[tokio::test]
+async fn sync_modes_add_to_or_recreate_a_table() {
+    use tideorm::sync::{ColumnDef, ModelSchema, SyncMode, SyncRegistry, sync_database_with};
+    let db = crate::fixtures::memory_database(
+        "CREATE TABLE sync_modes(id INTEGER PRIMARY KEY); INSERT INTO sync_modes VALUES (1)",
+    )
+    .await;
+    SyncRegistry::clear();
+    SyncRegistry::register_schema(
+        ModelSchema::new("sync_modes")
+            .column(ColumnDef::new("id", ColumnType::BigInteger).primary_key())
+            .column(ColumnDef::new("label", ColumnType::Text)),
+    );
+    sync_database_with(&db, SyncMode::Additive).await.unwrap();
+    db.exec_raw("UPDATE sync_modes SET label = 'kept'")
+        .await
+        .unwrap();
+    assert_eq!(count_rows(&db, "sync_modes").await, 1);
+
+    sync_database_with(&db, SyncMode::Recreate).await.unwrap();
+    assert_eq!(count_rows(&db, "sync_modes").await, 0);
+    db.exec_raw("INSERT INTO sync_modes (id, label) VALUES (2, 'new')")
+        .await
+        .unwrap();
+    SyncRegistry::clear();
+}
+
+/// The export reads the database it is given, with no global one set.
+#[tokio::test]
+async fn schema_export_reads_the_database_it_is_given() {
+    use tideorm::schema::SchemaWriter;
+    Database::reset_global();
+    let db = crate::fixtures::memory_database(
+        "CREATE TABLE exported_alone(id INTEGER PRIMARY KEY, note TEXT NOT NULL)",
+    )
+    .await;
+    let sql = SchemaWriter::schema_sql(&db).await.unwrap();
+    assert!(sql.contains("exported_alone"), "{sql}");
+    let path = crate::fixtures::TempFile::new("schema-for", "sql");
+    SchemaWriter::write_schema_for(&db, &*path).await.unwrap();
+    assert_eq!(std::fs::read_to_string(&*path).unwrap(), sql);
+    // The shorthand reads the global database, and there is none.
+    assert!(SchemaWriter::write_schema(&*path).await.is_err());
+}
+
+/// `add_model` renders a model's table as schema sync would create it, so
+/// the script creates a table the model reads and writes.
+#[tokio::test]
+async fn a_schema_generator_renders_a_models_table() {
+    use crate::fixtures::MoneyRow;
+    use rust_decimal::Decimal;
+    use tideorm::config::DatabaseType;
+    use tideorm::schema::SchemaGenerator;
+    let sql = SchemaGenerator::new(DatabaseType::SQLite)
+        .add_model::<MoneyRow>()
+        .generate();
+    let _db = crate::fixtures::global_memory_database(&sql).await;
+    MoneyRow {
+        id: 1,
+        amount: Some(Decimal::new(1250, 2)),
+        marker: 7,
+    }
+    .save()
+    .await
+    .unwrap();
+    let row = MoneyRow::find(1).await.unwrap().unwrap();
+    assert_eq!(
+        (row.amount, row.marker),
+        (Some(Decimal::new(1250, 2)), 7),
+        "{sql}"
+    );
+    Database::reset_global();
 }

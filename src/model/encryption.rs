@@ -5,83 +5,93 @@ use crate::types::encrypted;
 
 use super::{ModelMeta, UpdateValue};
 
-pub(crate) fn encrypt_model_field<T>(
-    value: T,
+/// The payload sealing `value`'s JSON, or `None` (NULL) for a `null`
+/// document.
+pub(crate) fn encrypt_model_field<T: Serialize>(
+    value: &T,
     table_name: &str,
     field_name: &str,
     column_name: &str,
-) -> Result<T>
-where
-    T: Serialize + DeserializeOwned,
-{
-    let json = serde_json::to_value(&value).map_err(|error| {
+) -> Result<Option<String>> {
+    let json = serde_json::to_value(value).map_err(|error| {
         Error::conversion(format!(
             "Failed to serialize encrypted field '{}' before write: {}",
             encrypted_field_label(field_name, column_name),
             error
         ))
     })?;
-
     if json.is_null() {
-        return Ok(value);
+        return Ok(None);
     }
-
-    let encrypted = encrypted::encrypt_json_value_for_attribute(&json, table_name, column_name)
-        .map_err(|error| annotate_crypto_error(error, "encrypt", field_name, column_name))?;
-    serde_json::from_value(serde_json::Value::String(encrypted)).map_err(|error| {
-        Error::configuration(format!(
-            "Encrypted field '{}' must use String/Text storage or Option<String>/Option<Text>: {}",
-            encrypted_field_label(field_name, column_name),
-            error
-        ))
-    })
+    seal(&json, table_name, field_name, column_name).map(Some)
 }
 
-pub(crate) fn decrypt_model_field<T>(
-    value: T,
+/// The field a column's text `stored` decrypts into; `None` for NULL when
+/// the field cannot hold `null`.
+pub(crate) fn decrypt_model_field<T: DeserializeOwned>(
+    stored: Option<String>,
     table_name: &str,
     field_name: &str,
     column_name: &str,
-) -> Result<T>
-where
-    T: Serialize + DeserializeOwned,
-{
-    let json = serde_json::to_value(&value).map_err(|error| {
-        Error::conversion(format!(
-            "Failed to inspect encrypted field '{}' after read: {}",
-            encrypted_field_label(field_name, column_name),
-            error
-        ))
-    })?;
+) -> Result<Option<T>> {
+    let Some(text) = stored else {
+        return Ok(serde_json::from_value(serde_json::Value::Null).ok());
+    };
+    let decrypted = decrypt_text(&text, table_name, field_name, column_name)?;
+    serde_json::from_value(decrypted)
+        .map(Some)
+        .map_err(|error| {
+            Error::conversion(format!(
+                "Failed to deserialize decrypted field '{}': {}",
+                encrypted_field_label(field_name, column_name),
+                error
+            ))
+        })
+}
 
-    match json {
+/// A JSON row's encrypted value: a string decrypted into the document it
+/// seals, `null` as itself.
+pub(crate) fn decrypt_json_value(
+    value: serde_json::Value,
+    table_name: &str,
+    field_name: &str,
+    column_name: &str,
+) -> Result<serde_json::Value> {
+    match value {
         serde_json::Value::Null => Ok(value),
-        serde_json::Value::String(text) => {
-            if !encrypted::is_encrypted_json_value(&text) {
-                return Err(Error::conversion(format!(
-                    "Encrypted field '{}' loaded plaintext data; expected a TideORM encrypted payload or null",
-                    encrypted_field_label(field_name, column_name)
-                )));
-            }
-
-            let decrypted =
-                encrypted::decrypt_json_value_for_attribute(&text, table_name, column_name)
-                    .map_err(|error| {
-                        annotate_crypto_error(error, "decrypt", field_name, column_name)
-                    })?;
-            serde_json::from_value(decrypted).map_err(|error| {
-                Error::conversion(format!(
-                    "Failed to deserialize decrypted field '{}': {}",
-                    encrypted_field_label(field_name, column_name),
-                    error
-                ))
-            })
-        }
+        serde_json::Value::String(text) => decrypt_text(&text, table_name, field_name, column_name),
         _ => Err(Error::configuration(format!(
             "Encrypted field '{}' must load from a string or null database column",
             encrypted_field_label(field_name, column_name)
         ))),
     }
+}
+
+/// The document a stored payload seals; plaintext is refused.
+fn decrypt_text(
+    text: &str,
+    table_name: &str,
+    field_name: &str,
+    column_name: &str,
+) -> Result<serde_json::Value> {
+    if !encrypted::is_encrypted_json_value(text) {
+        return Err(Error::conversion(format!(
+            "Encrypted field '{}' loaded plaintext data; expected a TideORM encrypted payload or null",
+            encrypted_field_label(field_name, column_name)
+        )));
+    }
+    encrypted::decrypt_json_value_for_attribute(text, table_name, column_name)
+        .map_err(|error| annotate_crypto_error(error, "decrypt", field_name, column_name))
+}
+
+fn seal(
+    document: &serde_json::Value,
+    table_name: &str,
+    field_name: &str,
+    column_name: &str,
+) -> Result<String> {
+    encrypted::encrypt_json_value_for_attribute(document, table_name, column_name)
+        .map_err(|error| annotate_crypto_error(error, "encrypt", field_name, column_name))
 }
 
 pub(crate) fn prepare_batch_update_value<M: ModelMeta>(
@@ -94,14 +104,13 @@ pub(crate) fn prepare_batch_update_value<M: ModelMeta>(
         field: field_name,
         column: column_name,
         ..
-    }) = super::__encrypted_column::<M>(field_or_column)?
+    }) = super::__encrypted_column::<M>(field_or_column)
     else {
         return Ok(value);
     };
 
-    let encrypt = |value| encrypt_batch_json_value(value, M::table_name(), field_name, column_name);
+    let encrypt = |value| encrypt_batch_value::<M>(value, field_name, column_name);
     let operation = match value {
-        UpdateValue::SqlNull | UpdateValue::CoalesceSqlNull => return Ok(value),
         UpdateValue::Value(value) => return Ok(UpdateValue::Value(encrypt(value)?)),
         UpdateValue::Coalesce(value) => return Ok(UpdateValue::Coalesce(encrypt(value)?)),
         UpdateValue::UnsafeRaw(_) => "trusted raw SQL",
@@ -116,28 +125,24 @@ pub(crate) fn prepare_batch_update_value<M: ModelMeta>(
     unsupported_batch_operation(operation, field_name, column_name)
 }
 
-fn encrypt_batch_json_value(
-    value: serde_json::Value,
-    table_name: &str,
+fn encrypt_batch_value<M: ModelMeta>(
+    value: crate::DbValue,
     field_name: &str,
     column_name: &str,
-) -> Result<serde_json::Value> {
-    if value.is_null() {
-        return Ok(serde_json::Value::Null);
-    }
-    // The field is a `String` and decrypts back into one: any other JSON value
-    // would be stored, then fail every load of the row.
-    if !value.is_string() {
+) -> Result<crate::DbValue> {
+    let document = crate::internal::value_document(&value);
+    // Any other value would be stored, then fail every load of the row.
+    if !M::__encrypted_field_holds(field_name, &document) {
         return Err(Error::query(format!(
-            "Encrypted field '{}' takes a string or null, not a JSON {}",
+            "Encrypted field '{}' cannot hold a JSON {}",
             encrypted_field_label(field_name, column_name),
-            json_kind(&value)
+            json_kind(&document)
         )));
     }
-
-    encrypted::encrypt_json_value_for_attribute(&value, table_name, column_name)
-        .map(serde_json::Value::String)
-        .map_err(|error| annotate_crypto_error(error, "encrypt", field_name, column_name))
+    if document.is_null() {
+        return Ok(value);
+    }
+    seal(&document, M::table_name(), field_name, column_name).map(crate::DbValue::from)
 }
 
 fn json_kind(value: &serde_json::Value) -> &'static str {

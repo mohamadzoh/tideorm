@@ -1,8 +1,7 @@
 use super::HasManyThrough;
-use crate::database::{__in_db_scope, Database};
+use crate::database::Database;
 use crate::entity_manager::EntityManager;
 use crate::model::Model as _;
-use serde_json::json;
 use std::sync::Arc;
 
 const POST_TABLE: &str = "many_to_many_entity_manager_test_posts";
@@ -63,7 +62,7 @@ async fn setup_database() -> crate::error::Result<Option<Arc<Database>>> {
 async fn seed_relations(
     db: &Database,
 ) -> crate::error::Result<(ManyToManyEntityManagerPost, ManyToManyEntityManagerTag)> {
-    __in_db_scope(db, async {
+    db.scope(async {
         let post = ManyToManyEntityManagerPost {
             id: 0,
             title: "Graph Post".to_string(),
@@ -128,7 +127,7 @@ async fn has_many_through_entity_manager_load_collapses_duplicate_pivot_rows()
         return Ok(());
     };
     let (post, tag) = seed_relations(db.as_ref()).await?;
-    __in_db_scope(db.as_ref(), async {
+    db.scope(async {
         ManyToManyEntityManagerPostTag {
             id: 0,
             post_id: post.id,
@@ -168,12 +167,10 @@ async fn has_many_through_entity_manager_load_collapses_duplicate_pivot_rows()
 #[tokio::test]
 async fn has_many_through_cached_load_keeps_the_tracked_instance() -> crate::error::Result<()> {
     let entity_manager = EntityManager::new(Arc::new(Database::disconnected()));
-    entity_manager
-        .register(ManyToManyEntityManagerTag {
-            id: 7,
-            name: "edited-in-memory".to_string(),
-        })
-        .await;
+    entity_manager.register(ManyToManyEntityManagerTag {
+        id: 7,
+        name: "edited-in-memory".to_string(),
+    });
 
     let mut relation =
         HasManyThrough::<ManyToManyEntityManagerTag, ManyToManyEntityManagerPostTag>::new(
@@ -184,7 +181,7 @@ async fn has_many_through_cached_load_keeps_the_tracked_instance() -> crate::err
             PIVOT_TABLE,
         )
         .with_metadata("tags", POST_TABLE)
-        .with_parent_pk(json!(1));
+        .with_parent_pk(1, false);
     relation.set_cached(vec![ManyToManyEntityManagerTag {
         id: 7,
         name: "stale-eager-copy".to_string(),

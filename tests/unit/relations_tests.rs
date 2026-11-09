@@ -144,7 +144,7 @@ async fn a_morph_to_with_null_columns_has_no_owner() {
 /// left to the collation.
 #[test]
 fn keys_a_collation_could_fold_together_are_left_to_the_database() {
-    use super::eager::fold_together;
+    use super::eager::keys::fold_together;
 
     assert!(fold_together(&[json!("abc"), json!("ABC ")]));
     assert!(fold_together(&[json!("cafe"), json!("café")]));
@@ -166,7 +166,7 @@ async fn a_pivot_table_other_than_the_pivot_models_is_refused() {
         "id",
         "some_other_table",
     )
-    .with_parent_pk(json!(1));
+    .with_parent_pk(1, false);
 
     let error = relation.count().await.expect_err("the pivot is refused");
     assert!(

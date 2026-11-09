@@ -1,9 +1,9 @@
 use super::*;
 
 mod comparison_pattern_list;
+mod condition_helpers;
 mod dispatch;
 mod range_json_array;
-mod sea_condition_helpers;
 
 /// Whether a column of `column_type` holds JSON, which compares as documents,
 /// not text.

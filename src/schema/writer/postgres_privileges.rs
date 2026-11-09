@@ -1,10 +1,13 @@
 //! Object ACLs are restored explicitly, including empty ACLs. Destination
 //! default privileges must not grant access absent from the source.
+use std::fmt::Write as _;
+
 use super::*;
+use crate::config::DatabaseType;
 
 pub(super) async fn postgres_privileges(conn: &impl ConnectionTrait) -> Result<Vec<String>> {
     let mut output = Vec::new();
-    let objects = query(conn, Backend::Postgres,
+    let objects = query(conn, DatabaseType::Postgres,
         "WITH objects AS (
           SELECT format('SCHEMA %I',nspname) AS target, 'pg_catalog.pg_namespace' AS catalog,
                  format('nspname=%L',nspname) AS lookup, 'nspacl' AS acl_column, 'nspowner' AS owner_column,
@@ -73,7 +76,7 @@ pub(super) async fn postgres_privileges(conn: &impl ConnectionTrait) -> Result<V
         )?;
         table_grants.insert(target, source);
     }
-    for row in query(conn, Backend::Postgres,
+    for row in query(conn, DatabaseType::Postgres,
         "SELECT format('TABLE %I.%I',n.nspname,c.relname) AS target,quote_ident(pg_catalog.pg_get_userbyid(c.relowner)) AS owner_name,quote_ident(n.nspname) AS namespace,quote_ident(a.attname) AS column_name,
              format('SELECT CASE WHEN x.grantee=0 THEN ''PUBLIC'' ELSE quote_ident(pg_catalog.pg_get_userbyid(x.grantee)) END FROM pg_catalog.pg_attribute, LATERAL pg_catalog.aclexplode(attacl) x WHERE attrelid=%L::regclass AND attname=%L',format('%I.%I',n.nspname,c.relname),a.attname) AS lookup,
              (SELECT json_agg(json_build_object('role',CASE WHEN x.grantee=0 THEN 'PUBLIC' ELSE quote_ident(pg_catalog.pg_get_userbyid(x.grantee)) END,
@@ -88,7 +91,7 @@ pub(super) async fn postgres_privileges(conn: &impl ConnectionTrait) -> Result<V
         grantor_access(&mut output, &get::<String>(&row,"namespace")?, &get::<Option<serde_json::Value>>(&row,"grants")?)?;
         output.push(revoke(&target,&format!("ALL ({})",get::<String>(&row,"column_name")?),&get::<String>(&row,"lookup")?));
         grants(&mut output, &target, &get::<String>(&row, "owner_name")?, get(&row, "grants")?,
-            table_grants.get(&target).map(Vec::as_slice).unwrap_or(&[]))?;
+            table_grants.get(&target).map_or(&[], Vec::as_slice))?;
     }
     // Schema USAGE can have been revoked without removing an object grant
     // chain. Remove the temporary lookup access only after restoring that chain.
@@ -180,10 +183,11 @@ fn grants(
                 grant.privilege, grant.role
             ),
         ] {
-            body.push_str(&format!(
+            let _ = write!(
+                body,
                 "EXECUTE {}; ",
                 postgres_dependencies::literal(&statement)
-            ));
+            );
         }
         if grant.grantable {
             available.insert((grant.role, grant.privilege));
@@ -200,7 +204,7 @@ fn grants(
 
 async fn default_privileges(conn: &impl ConnectionTrait) -> Result<Vec<String>> {
     let mut output = Vec::new();
-    for row in query(conn, Backend::Postgres,
+    for row in query(conn, DatabaseType::Postgres,
         "SELECT format('ALTER DEFAULT PRIVILEGES FOR ROLE %I%s',pg_catalog.pg_get_userbyid(d.defaclrole),
                    CASE WHEN d.defaclnamespace=0 THEN '' ELSE format(' IN SCHEMA %I',n.nspname) END) AS prefix,
              CASE d.defaclobjtype WHEN 'r' THEN 'TABLES' WHEN 'S' THEN 'SEQUENCES' WHEN 'f' THEN 'FUNCTIONS'

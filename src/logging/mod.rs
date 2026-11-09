@@ -44,11 +44,11 @@ mod format;
 mod logger;
 
 pub use self::debug::QueryDebugInfo;
-pub(crate) use self::engine::{log_engine_statement, log_statement, logged_by_caller};
+pub(crate) use self::engine::{EngineLog, observe_engine_statement};
 pub(crate) use self::entry::StatsCounters;
 pub use self::entry::{LogLevel, QueryLogEntry, QueryOperation, QueryStats, QueryTimer};
-pub(crate) use self::logger::DEFAULT_SLOW_QUERY_THRESHOLD_MS;
-pub use self::logger::{QueryLogger, QueryLoggerBuilder};
+pub(crate) use self::logger::slow_query_threshold_from_env;
+pub use self::logger::{QueryLogSink, QueryLogger, QueryLoggerBuilder};
 
 /// Whether the environment variable `name` is set to `1` or `true` (any case).
 ///
@@ -71,8 +71,7 @@ pub(crate) fn query_logging_enabled() -> bool {
 /// Warnings and status messages print unless the logger level was set to
 /// `Off` or `Error`. Debug detail prints at `Debug` and `Trace`, or when
 /// `TIDE_LOG_QUERIES` asks for executed SQL.
-#[doc(hidden)]
-pub fn __message_enabled(level: LogLevel) -> bool {
+pub(crate) fn message_enabled(level: LogLevel) -> bool {
     if level >= LogLevel::Debug {
         QueryLogger::level() >= LogLevel::Debug || query_logging_enabled()
     } else {
@@ -85,37 +84,32 @@ pub fn __message_enabled(level: LogLevel) -> bool {
 mod tests;
 
 // Internal structured logging macros: one `[TideORM ...]` prefix for every
-// operational message the crate prints. Not part of the public API.
+// operational message the crate prints.
 
 /// Internal info-level log (operational status messages)
-#[doc(hidden)]
-#[macro_export]
 macro_rules! tide_info {
     ($($arg:tt)*) => {
-        if $crate::logging::__message_enabled($crate::logging::LogLevel::Info) {
+        if $crate::logging::message_enabled($crate::logging::LogLevel::Info) {
             eprintln!("[TideORM] {}", format_args!($($arg)*));
         }
     };
 }
 
 /// Internal warning-level log (non-fatal issues)
-#[doc(hidden)]
-#[macro_export]
 macro_rules! tide_warn {
     ($($arg:tt)*) => {
-        if $crate::logging::__message_enabled($crate::logging::LogLevel::Warn) {
+        if $crate::logging::message_enabled($crate::logging::LogLevel::Warn) {
             eprintln!("[TideORM WARN] {}", format_args!($($arg)*));
         }
     };
 }
 
 /// Internal debug-level log (verbose operational detail)
-#[doc(hidden)]
-#[macro_export]
 macro_rules! tide_debug {
     ($($arg:tt)*) => {
-        if $crate::logging::__message_enabled($crate::logging::LogLevel::Debug) {
+        if $crate::logging::message_enabled($crate::logging::LogLevel::Debug) {
             eprintln!("[TideORM DEBUG] {}", format_args!($($arg)*));
         }
     };
 }
+pub(crate) use {tide_debug, tide_info, tide_warn};

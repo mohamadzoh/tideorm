@@ -1,12 +1,11 @@
+use super::error_translation::driver_failure;
 use super::{
-    ConnAcquireErr, DbFailureKind, Error, InternalModel, bindable_value, build_count_select,
-    build_exists_any_statement, check_fields_storable, count_to_u64, driver_failure,
-    json_to_db_value, mask_url_credentials, one_row_statement, page_statement, push_param,
-    reject_encryption_blind_conversion, scoped_find, translate_connect_error, translate_error,
+    ConnAcquireErr, Error, InternalModel, bindable_value, build_count_select, json_to_db_value,
+    mask_url_credentials, push_param, reclassify_error, scoped_find, translate_error,
 };
 use crate::config::DatabaseType;
-use crate::internal::{Backend, OrmBackend, OrmError, QueryTrait, Value};
-use crate::model::ModelMeta;
+use crate::error::DbFailureKind;
+use crate::internal::{OrmError, QuerySelect, QueryTrait, SelectExt, Value};
 use std::error::Error as StdError;
 
 #[tideorm::model(table = "internal_count_users")]
@@ -24,48 +23,13 @@ struct InternalSoftDeleteUser {
     deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[tideorm::model(table = "internal_narrow_integers")]
-struct InternalNarrowIntegers {
-    #[tideorm(primary_key, auto_increment)]
-    id: i64,
-    count: u32,
-    total: Option<u64>,
-    level: u8,
-}
-
-#[test]
-fn driver_limited_fields_lists_the_integer_types_a_driver_cannot_read_back() {
-    assert_eq!(
-        InternalNarrowIntegers::driver_limited_fields(),
-        &[("total", "u64"), ("level", "u8")]
-    );
-    assert!(InternalCountUser::driver_limited_fields().is_empty());
-}
-
-#[test]
-fn fields_a_driver_cannot_read_back_are_refused_before_the_write() {
-    let error = check_fields_storable::<InternalNarrowIntegers>(Backend::Sqlite)
-        .expect_err("SQLite cannot read a u64 back");
-    assert!(
-        matches!(&error, Error::Conversion { message } if message.contains("total") && message.contains("`i64`")),
-        "{error:?}"
-    );
-
-    let error = check_fields_storable::<InternalNarrowIntegers>(Backend::Postgres)
-        .expect_err("PostgreSQL cannot read a u64 or a u8 back");
-    assert!(error.to_string().contains("total"), "{error}");
-
-    assert!(check_fields_storable::<InternalNarrowIntegers>(Backend::MySql).is_ok());
-    assert!(check_fields_storable::<InternalCountUser>(Backend::Postgres).is_ok());
-}
-
 #[test]
 fn json_to_db_value_preserves_large_unsigned_numbers() {
     let unsigned = i64::MAX as u64 + 1;
     let value = serde_json::json!(unsigned);
 
     // Exact, and not `BigUnsigned`, which the SQLite and PostgreSQL drivers
-    // panic converting to their signed integer.
+    // cannot bind as their signed integer.
     match json_to_db_value(&value) {
         Value::Decimal(Some(actual)) => assert_eq!(actual, rust_decimal::Decimal::from(unsigned)),
         other => panic!("expected an exact decimal, got {other:?}"),
@@ -88,12 +52,16 @@ fn bindable_value_only_rewrites_unsigned_values_past_i64_max() {
 }
 
 #[test]
-fn page_statement_writes_the_limit_and_binds_the_offset_after_other_values() {
+fn a_page_writes_its_limit_and_binds_its_offset_after_other_values() {
     use crate::internal::{ColumnTrait, QueryFilter};
 
     let name = InternalCountUser::column_from_str("name").unwrap();
-    let select = scoped_find::<InternalCountUser>().filter(name.eq("ada"));
-    let statement = page_statement(select, OrmBackend::Postgres, 20, 40);
+    let statement = scoped_find::<InternalCountUser>()
+        .filter(name.eq("ada"))
+        .limit(20)
+        .offset(40)
+        .build(DatabaseType::Postgres)
+        .unwrap();
 
     assert!(
         statement.sql.ends_with(" LIMIT 20 OFFSET $2"),
@@ -104,22 +72,9 @@ fn page_statement_writes_the_limit_and_binds_the_offset_after_other_values() {
         statement.values.unwrap().0,
         vec![
             Value::String(Some("ada".to_string())),
-            Value::BigInt(Some(40))
+            Value::BigUnsigned(Some(40))
         ]
     );
-
-    let statement = page_statement(
-        scoped_find::<InternalCountUser>(),
-        OrmBackend::Sqlite,
-        20,
-        0,
-    );
-    assert!(
-        statement.sql.ends_with(" LIMIT 20 OFFSET ?"),
-        "{}",
-        statement.sql
-    );
-    assert_eq!(statement.values.unwrap().0, vec![Value::BigInt(Some(0))]);
 }
 
 #[test]
@@ -157,7 +112,9 @@ fn push_param_uses_backend_specific_placeholders() {
 
 #[test]
 fn count_select_omits_where_without_condition() {
-    let statement = build_count_select::<InternalCountUser>().build(OrmBackend::Postgres);
+    let statement = build_count_select::<InternalCountUser>()
+        .build(DatabaseType::Postgres)
+        .unwrap();
 
     assert_eq!(
         statement.sql,
@@ -167,21 +124,30 @@ fn count_select_omits_where_without_condition() {
 
 #[test]
 fn exists_any_probe_reads_at_most_one_row_and_keeps_the_soft_delete_scope() {
+    fn probe<E: crate::internal::EntityTrait>(select: crate::internal::Select<E>) -> String {
+        DatabaseType::Postgres
+            .build(&select.exists_query())
+            .unwrap()
+            .sql
+    }
     assert_eq!(
-        build_exists_any_statement::<InternalCountUser>(OrmBackend::Postgres).sql,
-        "SELECT 1 AS \"tideorm_exists\" FROM \"internal_count_users\" LIMIT 1"
+        probe(scoped_find::<InternalCountUser>()),
+        "SELECT 1 FROM \"internal_count_users\" LIMIT 1"
     );
     assert_eq!(
-        build_exists_any_statement::<InternalSoftDeleteUser>(OrmBackend::Postgres).sql,
-        "SELECT 1 AS \"tideorm_exists\" FROM \"internal_soft_delete_users\" \
+        probe(scoped_find::<InternalSoftDeleteUser>()),
+        "SELECT 1 FROM \"internal_soft_delete_users\" \
          WHERE \"internal_soft_delete_users\".\"deleted_at\" IS NULL LIMIT 1"
     );
 }
 
 #[test]
-fn one_row_statement_writes_its_limit_into_the_sql() {
+fn a_one_row_read_writes_its_limit_into_the_sql() {
     // A bound `LIMIT ?` makes recent SQLite recompile the statement on every run.
-    let statement = one_row_statement(scoped_find::<InternalSoftDeleteUser>(), OrmBackend::Sqlite);
+    let statement = scoped_find::<InternalSoftDeleteUser>()
+        .limit(1)
+        .build(DatabaseType::SQLite)
+        .unwrap();
 
     assert!(
         statement.sql.ends_with(" IS NULL LIMIT 1"),
@@ -195,13 +161,15 @@ fn one_row_statement_writes_its_limit_into_the_sql() {
 fn scoped_find_leaves_trashed_rows_out_only_for_soft_delete_models() {
     assert_eq!(
         scoped_find::<InternalCountUser>()
-            .build(OrmBackend::Postgres)
+            .build(DatabaseType::Postgres)
+            .unwrap()
             .sql,
         "SELECT \"internal_count_users\".\"id\", \"internal_count_users\".\"name\" FROM \"internal_count_users\""
     );
     assert_eq!(
         scoped_find::<InternalSoftDeleteUser>()
-            .build(OrmBackend::Postgres)
+            .build(DatabaseType::Postgres)
+            .unwrap()
             .sql,
         "SELECT \"internal_soft_delete_users\".\"id\", \"internal_soft_delete_users\".\"name\", \
          \"internal_soft_delete_users\".\"deleted_at\" FROM \"internal_soft_delete_users\" \
@@ -225,30 +193,16 @@ fn translate_error_maps_each_engine_error_to_its_variant() {
             },
             |error| matches!(error, Error::Query { .. }),
         ),
-        // A query error, as the migrator reports its own failures.
+        // A statement refused on an aborted transaction.
         (
-            OrmError::Migration("relation exists".to_string()),
-            |error| matches!(error, Error::Query { message, .. } if message == "relation exists"),
-        ),
-        (
-            OrmError::AccessDenied {
-                permission: "delete".to_string(),
-                resource: "users".to_string(),
+            OrmError::TransactionAborted {
+                reason: "it deadlocked".to_string(),
+                cause: None,
             },
-            |error| {
-                matches!(error, Error::AccessDenied { permission, resource }
-                    if permission == "delete" && resource == "users")
-            },
-        ),
-        (
-            OrmError::RbacError("denied".to_string()),
-            |error| matches!(error, Error::Rbac { message } if message == "denied"),
+            |error| matches!(error, Error::Transaction { message, .. } if message == "it deadlocked"),
         ),
         // Engine errors without a TideORM counterpart stay internal.
         (OrmError::Custom("boom".to_string()), |error| {
-            matches!(error, Error::Internal { .. })
-        }),
-        (OrmError::MutexPoisonError, |error| {
             matches!(error, Error::Internal { .. })
         }),
     ];
@@ -257,14 +211,6 @@ fn translate_error_maps_each_engine_error_to_its_variant() {
         let translated = translate_error(engine_error);
         assert!(expected(&translated), "{described} became {translated:?}");
     }
-}
-
-#[test]
-fn count_to_u64_rejects_negative_counts() {
-    let err = count_to_u64(-1, "count(*)").unwrap_err();
-
-    assert!(err.to_string().contains("negative count"));
-    assert!(err.to_string().contains("count(*)"));
 }
 
 #[test]
@@ -281,12 +227,56 @@ fn a_connection_that_breaks_under_a_statement_is_retryable() {
     // MySQL's KILL and a server restart close the socket without an error
     // packet, so the driver reports I/O, not a database error.
     let broken = std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "aborted");
-    let translated = translate_error(OrmError::Query(crate::orm::RuntimeErr::SqlxError(
-        std::sync::Arc::new(crate::orm::sqlx::Error::Io(broken)),
+    let translated = translate_error(OrmError::Query(crate::orm::RuntimeErr::DriverError(
+        std::sync::Arc::new(crate::orm::driver::Error::Io(broken)),
     )));
 
     assert_eq!(translated.failure_kind(), DbFailureKind::ConnectionClosed);
     assert!(translated.is_retryable());
+}
+
+/// A driver failure with no database error behind it is classified by what
+/// went wrong: a refused connection, TLS, or the connection settings.
+#[test]
+fn connection_failures_without_a_database_error_keep_their_class() {
+    use crate::orm::driver::Error as DriverError;
+
+    let refused = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused");
+    for (error, kind) in [
+        (DriverError::Io(refused), DbFailureKind::ConnectionRefused),
+        (
+            DriverError::Tls("bad certificate".into()),
+            DbFailureKind::TlsFailed,
+        ),
+        (
+            DriverError::Configuration("bad port".into()),
+            DbFailureKind::InvalidConfiguration,
+        ),
+    ] {
+        let translated = translate_error(OrmError::Conn(crate::orm::RuntimeErr::DriverError(
+            std::sync::Arc::new(error),
+        )));
+        assert!(
+            matches!(translated, Error::Connection { .. }),
+            "{translated:?}"
+        );
+        assert_eq!(translated.failure_kind(), kind);
+    }
+}
+
+/// A statement refused on an aborted transaction fails as the one that
+/// aborted it did, so it is retryable exactly when that one was.
+#[test]
+fn a_refused_statement_carries_the_failure_that_aborted_its_transaction() {
+    let refused = translate_error(OrmError::TransactionAborted {
+        reason: "it failed".to_string(),
+        cause: Some(std::sync::Arc::new(OrmError::ConnectionAcquire(
+            ConnAcquireErr::ConnectionClosed,
+        ))),
+    });
+    assert!(matches!(refused, Error::Transaction { .. }), "{refused:?}");
+    assert_eq!(refused.failure_kind(), DbFailureKind::ConnectionClosed);
+    assert!(refused.is_retryable());
 }
 
 #[test]
@@ -306,104 +296,21 @@ fn the_engine_error_survives_as_the_source_of_the_translated_error() {
 
 #[test]
 fn engine_bookkeeping_errors_carry_no_driver_failure() {
-    assert!(driver_failure(&OrmError::MutexPoisonError).is_none());
+    assert!(driver_failure(&OrmError::UnpackInsertId).is_none());
     assert!(driver_failure(&OrmError::RecordNotInserted).is_none());
 }
 
-#[test]
-fn every_backend_round_trips_through_the_engine_enum() {
-    for backend in [Backend::Postgres, Backend::MySql, Backend::Sqlite] {
-        assert_eq!(Backend::from(OrmBackend::from(backend)), backend);
-        assert_eq!(
-            Backend::from_orm_backend(OrmBackend::from(backend)),
-            Some(backend)
-        );
-    }
-}
-
-#[derive(Clone)]
-struct PlainModel;
-
-impl ModelMeta for PlainModel {
-    type PrimaryKey = i64;
-
-    fn table_name() -> &'static str {
-        "plain_models"
-    }
-
-    fn primary_key_names() -> &'static [&'static str] {
-        &["id"]
-    }
-
-    fn primary_key_display(primary_key: &Self::PrimaryKey) -> String {
-        primary_key.to_string()
-    }
-
-    fn column_names() -> &'static [&'static str] {
-        &["id", "name"]
-    }
-
-    fn field_names() -> &'static [&'static str] {
-        &["id", "name"]
-    }
-}
-
-#[derive(Clone)]
-struct EncryptedModel;
-
-impl ModelMeta for EncryptedModel {
-    type PrimaryKey = i64;
-
-    fn table_name() -> &'static str {
-        "encrypted_models"
-    }
-
-    fn primary_key_names() -> &'static [&'static str] {
-        &["id"]
-    }
-
-    fn primary_key_display(primary_key: &Self::PrimaryKey) -> String {
-        primary_key.to_string()
-    }
-
-    fn column_names() -> &'static [&'static str] {
-        &["id", "secret"]
-    }
-
-    fn field_names() -> &'static [&'static str] {
-        &["id", "secret"]
-    }
-
-    fn encrypted_fields() -> Vec<&'static str> {
-        vec!["secret"]
-    }
-}
-
-#[test]
-fn only_an_encrypted_model_is_refused_the_plaintext_conversion() {
-    assert!(reject_encryption_blind_conversion::<PlainModel>("try_into_active_model").is_ok());
-
-    let error = reject_encryption_blind_conversion::<EncryptedModel>("try_from_entity_model")
-        .expect_err("the plaintext fallback cannot decrypt");
-    let message = error.to_string();
-
-    assert!(message.contains("try_from_entity_model"), "{message}");
-    assert!(message.contains("encrypted_models"), "{message}");
-    assert!(message.contains("secret"), "{message}");
-}
-
-/// The engine quotes a URL it cannot parse, password included, and a
-/// connection error is exactly what gets logged.
-#[test]
-fn connect_errors_mask_the_url_credentials() {
+/// The engine quotes a URL it cannot parse, with its credentials masked, and
+/// a connection error is exactly what gets logged.
+#[tokio::test]
+async fn connect_errors_mask_the_url_credentials() {
     let password = format!("pw{}", std::process::id());
     let url = format!("postgres://app:{password}@db.internal:99999/app");
-    let error = translate_connect_error(
-        OrmError::Conn(crate::orm::RuntimeErr::Internal(format!(
-            "The connection string '{url}' cannot be parsed."
-        ))),
-        &url,
-    );
+    let error = crate::Database::builder()
+        .url(url.as_str())
+        .build()
+        .await
+        .expect_err("port 99999 does not parse");
     let shown = format!("{error} {error:?}");
 
     assert!(matches!(error, Error::Connection { .. }), "{shown}");
@@ -412,6 +319,21 @@ fn connect_errors_mask_the_url_credentials() {
         shown.contains("postgres://***@db.internal:99999/app"),
         "{shown}"
     );
+}
+
+/// A reclassified error keeps the message TideORM translated, not the
+/// engine's own text.
+#[test]
+fn reclassified_errors_keep_the_translated_message() {
+    let aborted = OrmError::TransactionAborted {
+        reason: "it deadlocked".to_string(),
+        cause: None,
+    };
+    let error = reclassify_error(aborted, |message, source| Error::Transaction {
+        message,
+        source,
+    });
+    assert_eq!(error.to_string(), "Transaction error: it deadlocked");
 }
 
 #[test]

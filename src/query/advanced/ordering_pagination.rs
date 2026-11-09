@@ -23,7 +23,6 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().order_by(User::ID, Order::Asc).validate().unwrap();
     /// ```
-    #[must_use]
     pub fn order_by(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -72,7 +71,6 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().sort("-id,name").validate().unwrap();
     /// ```
-    #[must_use]
     pub fn sort(mut self, spec: &str) -> Self {
         for term in spec
             .split(',')
@@ -104,7 +102,6 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().reorder(User::NAME, Order::Asc).validate().unwrap();
     /// ```
-    #[must_use]
     pub fn reorder(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -138,7 +135,6 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().order_by_raw("LOWER(name)", Order::Asc).validate().unwrap();
     /// ```
-    #[must_use]
     pub fn order_by_raw(mut self, expression: &str, direction: Order) -> Self {
         self.clauses
             .order_by
@@ -154,7 +150,6 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().order_asc(User::ID).validate().unwrap();
     /// ```
-    #[must_use]
     pub fn order_asc(self, column: impl crate::columns::IntoColumnName) -> Self {
         self.order_by(column, Order::Asc)
     }
@@ -167,7 +162,6 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().order_desc(User::ID).validate().unwrap();
     /// ```
-    #[must_use]
     pub fn order_desc(self, column: impl crate::columns::IntoColumnName) -> Self {
         self.order_by(column, Order::Desc)
     }
@@ -180,7 +174,6 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().latest().validate().unwrap();
     /// ```
-    #[must_use]
     pub fn latest(self) -> Self {
         self.order_desc("created_at")
     }
@@ -193,9 +186,34 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().oldest().validate().unwrap();
     /// ```
-    #[must_use]
     pub fn oldest(self) -> Self {
         self.order_asc("created_at")
+    }
+
+    /// Order by `column`, newest first: [`latest()`](Self::latest) for a
+    /// model whose timestamp is not `created_at`.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().latest_by(User::DELETED_AT).validate().unwrap();
+    /// ```
+    pub fn latest_by(self, column: impl crate::columns::IntoColumnName) -> Self {
+        self.order_desc(column)
+    }
+
+    /// Order by `column`, oldest first: [`oldest()`](Self::oldest) for a
+    /// model whose timestamp is not `created_at`.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().oldest_by(User::DELETED_AT).validate().unwrap();
+    /// ```
+    pub fn oldest_by(self, column: impl crate::columns::IntoColumnName) -> Self {
+        self.order_asc(column)
     }
 
     /// Limit the number of results
@@ -206,7 +224,6 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().limit(10).validate().unwrap();
     /// ```
-    #[must_use]
     pub fn limit(mut self, n: u64) -> Self {
         self.clauses.limit_value = Some(n);
         self
@@ -224,7 +241,6 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().offset(10).validate().unwrap();
     /// ```
-    #[must_use]
     pub fn offset(mut self, n: u64) -> Self {
         self.clauses.offset_value = Some(n);
         self
@@ -248,7 +264,6 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().page(2, 10).validate().unwrap();
     /// ```
-    #[must_use]
     pub fn page(mut self, page: u64, per_page: u64) -> Self {
         match page_offset(page, per_page) {
             Ok(offset) => self.limit(per_page).offset(offset),

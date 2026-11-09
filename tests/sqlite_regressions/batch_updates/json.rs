@@ -295,8 +295,8 @@ async fn sqlite_array_removal_keeps_original_json_numbers() {
 }
 
 /// JSON writes a NaN or an infinite float as `null`, so the JSON setters
-/// refuse one rather than store a `null` nobody asked for, and still store a
-/// `null` passed as one.
+/// refuse one, alone or in an array, rather than store a `null` nobody asked
+/// for, and still store a `null` passed as one.
 #[tokio::test]
 async fn json_setters_refuse_nonfinite_values_but_keep_an_intentional_null() {
     let db = exact_json_database().await;
@@ -314,7 +314,7 @@ async fn json_setters_refuse_nonfinite_values_but_keep_an_intentional_null() {
             ("json_set", update(2).json_set("items", "$.a", value)),
             (
                 "json_set of an array",
-                update(2).json_set("items", "$.a", vec![Some(value)]),
+                update(2).json_set("items", "$.a", vec![value]),
             ),
         ] {
             assert!(update.execute().await.is_err(), "{setter} of {value}");

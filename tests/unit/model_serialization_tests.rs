@@ -1,4 +1,4 @@
-use super::{hash_map_output_key, to_json};
+use super::to_json;
 use serde_json::json;
 
 #[tideorm::model(table = "serialization_column_collision")]
@@ -224,7 +224,13 @@ fn to_hash_map_leaves_out_only_a_structured_params_field() {
     assert_eq!(map.get("params"), None);
     assert_eq!(map.get("_params"), None);
 
-    assert_eq!(hash_map_output_key("params", &json!(["minimal"])), None);
+    let map = StructuredParamsModel {
+        id: 9,
+        params: json!(["minimal"]),
+        title: "Listed Output".to_string(),
+    }
+    .to_hash_map();
+    assert_eq!(map.get("params"), None);
 }
 
 // Three models wired into a two-hop chain (post -> author -> profile) so the

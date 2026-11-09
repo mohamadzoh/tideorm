@@ -1,152 +1,47 @@
 use crate::config::DatabaseType;
-use crate::internal::{
-    MysqlQueryBuilder, PostgresQueryBuilder, SqliteQueryBuilder, Token, Tokenizer, Value,
-    inject_parameters, placeholder,
-};
-use std::borrow::Cow;
-use std::fmt::Write as _;
+use crate::internal::Value;
+use crate::internal::sql_lexer::{Kind, Token, tokens};
+use crate::orm::sql_builder::BoundSql;
 
-/// One marker per bound value, numbered from 1.
-pub(crate) fn placeholders(db_type: DatabaseType, count: usize) -> Vec<String> {
-    (1..=count)
-        .map(|index| placeholder(db_type, index))
-        .collect()
-}
-
-/// Render `sql` with every bound value written in as a literal, for display only.
-///
-/// The literals come from sea-query's own [`inject_parameters`], so they are
-/// spelled exactly as the backend's query builder spells them. That function
-/// indexes `params` by each placeholder it finds and panics on one without a
-/// value — which a caller's raw fragment can easily carry — so a statement whose
-/// placeholders do not line up with its values is returned unchanged.
+/// Render bound values for display, preserving the SQL when substitution is
+/// invalid. The markers are read under the backend's own lexical rules, so a
+/// backslash ends a literal where that backend says it does.
 pub(crate) fn inline_parameters(db_type: DatabaseType, sql: &str, params: &[Value]) -> String {
-    if !placeholders_match_values(db_type, sql, params.len()) {
-        return sql.to_string();
-    }
-
-    match db_type {
-        DatabaseType::Postgres => inject_parameters(sql, params, &PostgresQueryBuilder),
-        DatabaseType::MySQL | DatabaseType::MariaDB => {
-            inject_parameters(sql, params, &MysqlQueryBuilder)
-        }
-        DatabaseType::SQLite => inject_parameters(sql, params, &SqliteQueryBuilder),
-    }
+    db_type
+        .dialect()
+        .inline_values(sql, params)
+        .unwrap_or_else(|_| sql.to_string())
 }
 
-/// Whether the placeholders `inject_parameters` will find in `sql` are exactly
-/// the `bound` values.
-///
-/// The public tokenizer always scans like MySQL, and the backends only disagree
-/// about a backslash escaping a quote. Generated SQL is backslash-free, so a
-/// statement that contains one — only a raw fragment can — is left alone.
-fn placeholders_match_values(db_type: DatabaseType, sql: &str, bound: usize) -> bool {
-    if sql.contains('\\') {
-        return false;
-    }
-
-    let mut tokens = Tokenizer::new(sql).iter().peekable();
-    let mut seen = vec![false; bound];
-    let mut positional = 0;
-
-    while let Some(token) = tokens.next() {
-        match (db_type, token) {
-            (DatabaseType::Postgres, Token::Punctuation("$")) => {
-                let Some(Token::Unquoted(number)) = tokens.peek() else {
-                    continue;
-                };
-                let Ok(index) = number.parse::<usize>() else {
-                    continue;
-                };
-                match index.checked_sub(1).and_then(|slot| seen.get_mut(slot)) {
-                    Some(slot) => *slot = true,
-                    None => return false,
-                }
-            }
-            (
-                DatabaseType::MySQL | DatabaseType::MariaDB | DatabaseType::SQLite,
-                Token::Punctuation("?"),
-            ) => positional += 1,
-            _ => {}
-        }
-    }
-
-    match db_type {
-        DatabaseType::Postgres => seen.into_iter().all(|used| used),
-        DatabaseType::MySQL | DatabaseType::MariaDB | DatabaseType::SQLite => positional == bound,
-    }
+/// Whether `token` is a template's `?` placeholder: quoted text, quoted
+/// identifiers and comments hide one.
+fn is_placeholder(token: &Token<'_>) -> bool {
+    token.text == "?" && token.kind == Kind::Symbol
 }
 
-/// A fragment rendered on its own, spliced behind `offset` values already
-/// bound in the surrounding statement.
-///
-/// PostgreSQL's `$n` markers are numbered, so they are shifted past those
-/// values; MySQL and SQLite's `?` markers depend only on the order values are
-/// bound in, so their fragment is spliced in unchanged, without a copy.
-pub(crate) fn rebase_placeholders(db_type: DatabaseType, sql: &str, offset: usize) -> Cow<'_, str> {
-    match db_type {
-        DatabaseType::Postgres => offset_postgres_placeholders(sql, offset),
-        DatabaseType::MySQL | DatabaseType::MariaDB | DatabaseType::SQLite => Cow::Borrowed(sql),
+/// A caller's trusted `template` with each `?` placeholder binding the next
+/// of `values`, so it follows the statement to whichever backend renders it.
+/// Without values it is written as given: reading its placeholders would
+/// refuse a `?` meant as an operator. Validation has matched the count.
+pub(crate) fn template_bound(template: &str, values: Vec<Value>) -> BoundSql {
+    if values.is_empty() {
+        return BoundSql::sql(template);
     }
-}
-
-/// Shift every `$n` placeholder in `sql` up by `offset`.
-///
-/// Fragments rendered on their own number their placeholders from `$1`; spliced
-/// behind `offset` values already bound in the surrounding statement, they have
-/// to continue that numbering instead. Quoted literals, quoted identifiers,
-/// comments and dollar-quoted strings are skipped, so a `$5` inside any of them
-/// is left alone.
-fn offset_postgres_placeholders(sql: &str, offset: usize) -> Cow<'_, str> {
-    if offset == 0 {
-        return Cow::Borrowed(sql);
-    }
-
-    let mut output = String::with_capacity(sql.len());
-    for token in crate::internal::sql_lexer::tokens(sql) {
-        if token.kind == crate::internal::sql_lexer::Kind::Parameter
-            && let Ok(number) = token.text[1..].parse::<usize>()
-            && number > 0
-            && let Some(rebased) = number.checked_add(offset)
+    let mut values = values.into_iter();
+    let mut bound = BoundSql::default();
+    for token in tokens(template) {
+        if is_placeholder(&token)
+            && let Some(value) = values.next()
         {
-            let _ = write!(output, "${rebased}");
+            bound.push(value);
         } else {
-            output.push_str(token.text);
+            bound.push(token.text);
         }
     }
-    Cow::Owned(output)
-}
-
-/// Replace template markers outside quoted text and comments.
-pub(crate) fn map_template_placeholders(
-    template: &str,
-    mut next: impl FnMut() -> String,
-) -> String {
-    let mut rendered = String::with_capacity(template.len());
-    for token in crate::internal::sql_lexer::tokens(template) {
-        if token.text == "?" && token.kind == crate::internal::sql_lexer::Kind::Symbol {
-            rendered.push_str(&next());
-        } else {
-            rendered.push_str(token.text);
-        }
-    }
-    rendered
-}
-
-/// `template` with each `?` placeholder turned into the backend's marker,
-/// numbered from `first`.
-pub(crate) fn render_template(db_type: DatabaseType, template: &str, first: usize) -> String {
-    let mut index = first;
-    map_template_placeholders(template, || {
-        let marker = placeholder(db_type, index);
-        index += 1;
-        marker
-    })
+    bound
 }
 
 /// How many parameters a template takes, without allocating rendered SQL.
 pub(crate) fn count_template_placeholders(template: &str) -> usize {
-    crate::internal::sql_lexer::tokens(template)
-        .filter(|token| token.text == "?" && token.kind == crate::internal::sql_lexer::Kind::Symbol)
-        .count()
+    tokens(template).filter(is_placeholder).count()
 }

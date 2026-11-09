@@ -272,7 +272,7 @@ async fn exists_preserves_aggregate_cardinality_and_having_aliases() {
             QueryShape::query_with(&db)
                 .where_eq("id", id)
                 .select_raw("COUNT(*) AS total")
-                .having("total > 0")
+                .having_raw("total > 0")
                 .exists()
                 .await
                 .unwrap(),

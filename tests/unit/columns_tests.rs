@@ -1,42 +1,74 @@
 use super::*;
+use crate::DbValue;
 use crate::query::{ConditionValue, Operator};
-use serde_json::json;
 
 #[test]
-fn test_a_column_of_any_serializable_type_compares_and_lists() {
-    #[derive(serde::Serialize)]
-    #[serde(rename_all = "snake_case")]
+fn test_a_column_of_any_type_a_column_holds_compares_and_lists() {
     enum Status {
         Active,
         Banned,
+    }
+    impl From<Status> for DbValue {
+        fn from(status: Status) -> Self {
+            match status {
+                Status::Active => "active",
+                Status::Banned => "banned",
+            }
+            .into()
+        }
+    }
+    impl crate::orm::sql_builder::Nullable for Status {
+        fn null() -> DbValue {
+            DbValue::String(None)
+        }
     }
 
     let status: Column<Status> = Column::of("users", "status");
     let cond = status.eq(Status::Active);
     assert_eq!(cond.column, "users.status");
     assert_eq!(cond.operator, Operator::Eq);
-    assert_eq!(cond.value, ConditionValue::Single(json!("active")));
+    assert_eq!(cond.value, ConditionValue::Single("active".into()));
 
     let listed = Column::<Status>::of("users", "status").is_in([Status::Active, Status::Banned]);
     assert_eq!(listed.operator, Operator::In);
     assert_eq!(
         listed.value,
-        ConditionValue::List(vec![json!("active"), json!("banned")])
+        ConditionValue::List(vec!["active".into(), "banned".into()])
     );
 
     // A nullable column compares with the plain value, and with None.
     let nullable: Column<Option<Status>> = Column::new("previous_status");
     assert_eq!(
         nullable.ne(Status::Banned).value,
-        ConditionValue::Single(json!("banned"))
+        ConditionValue::Single("banned".into())
     );
-    // A `None` is SQL NULL, apart from any value that serializes to `null`.
+    // A `None` is SQL NULL, apart from the JSON `null` document.
     let nullable: Column<Option<Status>> = Column::new("previous_status");
     assert_eq!(nullable.eq(None).value, ConditionValue::None);
+    let document: Column<serde_json::Value> = Column::new("settings");
+    assert_eq!(
+        document.eq(serde_json::Value::Null).value,
+        ConditionValue::Single(DbValue::Json(Some(Box::new(serde_json::Value::Null))))
+    );
     let ids: Column<Option<i64>> = Column::new("owner_id");
     assert_eq!(
         ids.is_in([1, 2]).value,
-        ConditionValue::List(vec![json!(1), json!(2)])
+        ConditionValue::List(vec![1i64.into(), 2i64.into()])
+    );
+}
+
+#[test]
+fn a_value_keeps_its_own_type() {
+    let id: Column<uuid::Uuid> = Column::new("id");
+    let uuid = uuid::Uuid::nil();
+    assert_eq!(id.eq(uuid).value, ConditionValue::Single(uuid.into()));
+    let amount: Column<rust_decimal::Decimal> = Column::new("amount");
+    let exact = rust_decimal::Decimal::new(1050, 2);
+    assert_eq!(amount.gt(exact).value, ConditionValue::Single(exact.into()));
+    let big: Column<u64> = Column::new("big");
+    assert_eq!(
+        big.eq(u64::MAX).value,
+        ConditionValue::Single(DbValue::BigUnsigned(Some(u64::MAX)))
     );
 }
 
@@ -59,5 +91,5 @@ fn a_nan_or_infinite_float_is_refused_rather_than_read_as_null() {
     // A None still means NULL, and a finite float binds.
     let nullable_price: Column<Option<f64>> = Column::new("price");
     assert_eq!(nullable_price.eq(None).value, ConditionValue::None);
-    assert_eq!(price.eq(1.5).value, ConditionValue::Single(json!(1.5)));
+    assert_eq!(price.eq(1.5).value, ConditionValue::Single(1.5f64.into()));
 }

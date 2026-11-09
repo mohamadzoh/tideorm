@@ -220,12 +220,12 @@ impl FileAttachment {
         crate::config::Config::get_file_url_generator()(field_name, self)
     }
 
-    /// Generate a public URL using a one-off generator function.
+    /// Generate a public URL with a one-off generator, such as a closure.
     #[inline]
     pub fn url_with_generator(
         &self,
         field_name: &str,
-        generator: crate::config::FileUrlGenerator,
+        generator: impl Fn(&str, &FileAttachment) -> String,
     ) -> String {
         generator(field_name, self)
     }

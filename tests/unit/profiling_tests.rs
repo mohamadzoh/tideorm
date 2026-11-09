@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use super::*;
+use crate::logging::QueryOperation;
 
 #[test]
 fn report_select_star_uses_sql_tokens_like_the_analyzer() {
@@ -82,38 +83,6 @@ fn test_query_complexity() {
     ));
 }
 
-#[tokio::test]
-async fn test_profile_future_records_enabled_queries() {
-    GlobalProfiler::enable();
-    GlobalProfiler::reset();
-
-    let value = __profile_future(async { 42_u64 }).await;
-
-    assert_eq!(value, 42);
-    assert_eq!(GlobalProfiler::stats().total_queries, 1);
-
-    GlobalProfiler::disable();
-    GlobalProfiler::reset();
-}
-
-#[tokio::test]
-async fn test_profile_future_skips_timing_when_disabled_at_entry() {
-    GlobalProfiler::disable();
-    GlobalProfiler::reset();
-
-    let value = __profile_future(async {
-        GlobalProfiler::enable();
-        9_u64
-    })
-    .await;
-
-    assert_eq!(value, 9);
-    assert_eq!(GlobalProfiler::stats().total_queries, 0);
-
-    GlobalProfiler::disable();
-    GlobalProfiler::reset();
-}
-
 #[test]
 fn test_analyzer_flags_an_id_compared_with_a_string() {
     for sql in [
@@ -130,14 +99,48 @@ fn test_analyzer_flags_an_id_compared_with_a_string() {
 }
 
 #[test]
+fn test_analyzer_leaves_uuids_and_other_columns_alone() {
+    for sql in [
+        "SELECT * FROM users WHERE id = '550e8400-e29b-41d4-a716-446655440000'",
+        "SELECT * FROM orders WHERE paid = 'yes'",
+        "SELECT * FROM users WHERE uid = '5'",
+    ] {
+        assert!(
+            !QueryAnalyzer::analyze(sql)
+                .iter()
+                .any(|suggestion| suggestion.title == "Possible type mismatch"),
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn test_order_by_without_limit_reads_the_outer_statement() {
+    let flagged = |sql: &str| {
+        QueryAnalyzer::analyze(sql)
+            .iter()
+            .any(|suggestion| suggestion.title == "ORDER BY without LIMIT")
+    };
+    // A subquery's LIMIT does not bound the outer rows.
+    assert!(flagged(
+        "SELECT id FROM users WHERE id IN (SELECT user_id FROM posts LIMIT 5) ORDER BY id"
+    ));
+    // A window's ORDER BY sorts no rows of the result.
+    assert!(!flagged(
+        "SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS n FROM users"
+    ));
+    assert!(!flagged("SELECT id FROM users ORDER BY id LIMIT 10"));
+}
+
+#[test]
 fn test_report_slow_query_suggestion_uses_the_profiler_threshold() {
-    GlobalProfiler::set_slow_threshold(50);
+    GlobalProfiler::set_slow_threshold(Duration::from_millis(50));
 
     let mut profiler = Profiler::start();
     profiler.record("SELECT 1", Duration::from_millis(60));
     let suggestions = profiler.stop().suggestions();
 
-    GlobalProfiler::set_slow_threshold(100);
+    GlobalProfiler::set_slow_threshold(Duration::from_millis(100));
 
     assert!(
         suggestions
@@ -186,4 +189,47 @@ fn diagnostics_inspect_structure_not_literal_text() {
         crate::logging::QueryOperation::from_sql("-- lead\nSELECT 1"),
         crate::logging::QueryOperation::Select
     );
+}
+
+#[test]
+fn suggestions_take_a_threshold_and_list_the_most_read_table_first() {
+    let mut profiler = Profiler::start();
+    for (table, reads) in [("b_items", 11), ("c_items", 12), ("a_items", 11)] {
+        for _ in 0..reads {
+            profiler.record_full(
+                ProfiledQuery::new("SELECT id FROM t", Duration::from_millis(1)).with_table(table),
+            );
+        }
+    }
+    profiler.record_full(ProfiledQuery::new(
+        "UPDATE t SET a = 1",
+        Duration::from_millis(9),
+    ));
+    let report = profiler.stop();
+
+    let suggestions = report.suggestions_with(Duration::from_millis(5));
+    let tables: Vec<_> = suggestions
+        .iter()
+        .filter_map(|s| s.split('\'').nth(1))
+        .collect();
+    assert_eq!(tables, ["c_items", "a_items", "b_items"], "{suggestions:?}");
+    assert!(
+        suggestions
+            .iter()
+            .any(|s| s.starts_with("1 slow queries detected (>= 5ms)")),
+        "{suggestions:?}"
+    );
+    assert_eq!(
+        report.suggestions_with(Duration::from_millis(5)),
+        suggestions
+    );
+
+    assert_eq!(report.queries[0].operation_kind(), QueryOperation::Select);
+    assert_eq!(
+        report.queries.last().unwrap().operation_kind(),
+        QueryOperation::Update
+    );
+    let mut labelled = ProfiledQuery::new("SELECT 1", Duration::ZERO);
+    labelled.operation = "begin".into();
+    assert_eq!(labelled.operation_kind(), QueryOperation::Unknown);
 }

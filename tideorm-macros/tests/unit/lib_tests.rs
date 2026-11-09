@@ -93,13 +93,8 @@ fn active_model_setters<'a>(expanded: &'a str, fn_marker: &str) -> &'a str {
         .expect("the ActiveModel literal should close")]
 }
 
-/// The INSERT path, `InternalModel::into_active_model`.
+/// The INSERT path, `InternalModel::try_into_active_model`.
 fn insert_setters(expanded: &str) -> &str {
-    active_model_setters(expanded, "fninto_active_model(self)")
-}
-
-/// The encrypting INSERT path, emitted for encrypted models only.
-fn encrypted_insert_setters(expanded: &str) -> &str {
     active_model_setters(expanded, "fntry_into_active_model(self)")
 }
 
@@ -275,41 +270,44 @@ fn a_relation_without_a_kind_attribute_is_wired_from_its_wrapper_type() {
 
     assert!(expanded.contains("::tideorm::relations::HasOne::new(\"parent_id\",\"id\")"));
     assert!(!expanded.contains("self.child=Default::default()"));
-    assert!(expanded.contains(
-        "impl::tideorm::orm::Related<<Childas::tideorm::internal::InternalModel>::Entity>forEntity"
-    ));
+    assert!(expanded.contains("const_:()=assert!(<Child>::__has_column_name(\"parent_id\")"));
     assert!(!expanded.contains("hasnoeagerpathforHasOnerelations"));
 }
 
+/// A column's definition is its type's `ValueType::column_type()`, whatever
+/// the spelling: the compiler resolves aliases, paths and newtypes. An
+/// encrypted field's column holds its payload's text.
 #[test]
-fn utc_timestamp_columns_are_recognised_structurally() {
-    for ty in [
-        parse_quote!(DateTime<Utc>),
-        parse_quote!(chrono::DateTime<chrono::Utc>),
-        parse_quote!(::chrono::DateTime<::chrono::Utc>),
-        parse_quote!(Option<tideorm::chrono::DateTime<tideorm::chrono::Utc>>),
-    ] {
-        let tokens = normalize_tokens(&field_with_type(ty).column_type_expr().unwrap().to_string());
-        assert!(tokens.contains("TimestampWithTimeZone"), "{tokens}");
-    }
+fn column_definitions_come_from_the_value_type() {
+    let encrypted_tokens = |ty: Type, encrypted: bool| {
+        normalize_tokens(&field_with_type(ty).column_type_expr(encrypted).to_string())
+    };
+    let tokens = |ty: Type, nullable: bool| {
+        let mut field = field_with_type(ty);
+        field.nullable = nullable;
+        normalize_tokens(&field.column_type_expr(false).to_string())
+    };
 
-    // A collection of timestamps is not a timestamp column.
-    let message = field_with_type(parse_quote!(Vec<DateTime<Utc>>))
-        .column_type_expr()
-        .unwrap_err()
-        .to_string();
-    assert!(
-        message.starts_with("unsupported TideORM column type 'Vec<DateTime<Utc>>'"),
-        "{message}"
+    assert_eq!(
+        tokens(parse_quote!(chrono::DateTime<chrono::FixedOffset>), false),
+        "<chrono::DateTime<chrono::FixedOffset>as::tideorm::orm::sql_builder::ValueType>::column_type().def()"
     );
-
-    let tokens = normalize_tokens(
-        &field_with_type(parse_quote!(chrono::NaiveDate))
-            .column_type_expr()
-            .unwrap()
-            .to_string(),
+    assert_eq!(
+        tokens(parse_quote!(Option<u32>), false),
+        "<Option<u32>as::tideorm::orm::sql_builder::ValueType>::column_type().def().nullable()"
     );
-    assert!(tokens.contains("ColumnType::Date.def()"), "{tokens}");
+    assert_eq!(
+        tokens(parse_quote!(Status), true),
+        "<Statusas::tideorm::orm::sql_builder::ValueType>::column_type().def().nullable()"
+    );
+    assert_eq!(
+        encrypted_tokens(parse_quote!(u32), true),
+        "<::std::string::Stringas::tideorm::orm::sql_builder::ValueType>::column_type().def()"
+    );
+    assert_eq!(
+        encrypted_tokens(parse_quote!(Option<Address>), true),
+        "<::std::string::Stringas::tideorm::orm::sql_builder::ValueType>::column_type().def().nullable()"
+    );
 }
 
 #[test]
@@ -516,10 +514,25 @@ fn encrypted_fields_accept_field_and_column_names_and_canonicalize_metadata() {
     .expect("build context should be constructed");
 
     assert_eq!(ctx.encrypted_fields, vec!["phone_number", "backup_phone"]);
-    assert_eq!(
-        ctx.encrypted_column_names,
-        vec!["customer_phone_number", "backup_phone"]
-    );
+}
+
+/// `ModelMeta::encrypted_fields` is one `(field, column)` list.
+#[test]
+fn encrypted_field_metadata_pairs_each_field_with_its_column() {
+    let expanded = expand_model_tokens(parse_quote! {
+        #[tideorm(encrypted = "customer_phone_number, backup_phone")]
+        struct Customer {
+            #[tideorm(primary_key, auto_increment)]
+            id: i64,
+            #[tideorm(column = "customer_phone_number")]
+            phone_number: String,
+            backup_phone: Option<String>,
+        }
+    });
+
+    assert!(expanded.contains(
+        "&[(\"phone_number\",\"customer_phone_number\"),(\"backup_phone\",\"backup_phone\")]"
+    ));
 }
 
 #[test]
@@ -536,22 +549,34 @@ fn encrypted_fields_accept_fully_qualified_optional_string_types() {
     .expect("fully qualified encrypted string fields should be accepted");
 }
 
+/// Any serde type can be encrypted: its column holds the payload's text.
 #[test]
-fn encrypted_fields_reject_non_string_storage_types() {
-    let error = build_error_for(&parse_quote! {
-        #[tideorm(encrypted = "age")]
+fn encrypted_fields_take_any_type_and_store_text() {
+    let expanded = expand_model_tokens(parse_quote! {
+        #[tideorm(encrypted = "age, address")]
         struct Customer {
             #[tideorm(primary_key)]
             id: i64,
             age: i64,
+            address: Address,
         }
     });
 
-    assert!(error.contains("#[tideorm(encrypted = ...)] only supports String/Text fields"));
+    for column in ["age", "address"] {
+        assert!(
+            expanded.contains(&format!(
+                "::tideorm::sync::ColumnDef::new(\"{column}\",<::std::string::Stringas::tideorm::orm::sql_builder::ValueType>::column_type())"
+            )),
+            "{column}"
+        );
+    }
+    // The column is text, so no integer bound applies to it.
+    assert!(!expanded.contains("\"age\"=>Some(("));
 }
 
-/// The plaintext conversions of an encrypted model must never carry an encrypted
-/// column, and only an encrypted model needs the fallible overrides at all.
+/// An encrypted column crosses the boundary only through the cipher hooks: a
+/// write encrypts the field, and the row decrypts as it decodes, so no load
+/// step decrypts.
 #[test]
 fn encrypted_columns_only_cross_the_boundary_through_the_cipher_hooks() {
     let expanded = expand_model_tokens(parse_quote! {
@@ -563,15 +588,22 @@ fn encrypted_columns_only_cross_the_boundary_through_the_cipher_hooks() {
         }
     });
 
-    assert!(insert_setters(&expanded).contains("phone:ActiveValue::NotSet"));
-    assert!(encrypted_insert_setters(&expanded).contains(
-        "phone:ActiveValue::Set(::tideorm::model::__encrypt_model_field(self.phone,\"customers\",\"phone\",\"phone\")?)"
+    assert!(insert_setters(&expanded).contains(
+        "phone:ActiveValue::Set(::tideorm::model::__encrypt_model_field::<Self,_>(&self.phone,\"phone\",\"phone\",)?)"
     ));
+    assert!(
+        expanded.contains("letphone=::tideorm::orm::__read_model_field::<::std::string::String>(")
+    );
+    assert!(
+        expanded.contains(
+            "phone:::tideorm::model::__decrypt_model_field::<Self,String>(phone,\"phone\","
+        )
+    );
+    assert!(expanded.contains("::tideorm::model::__encrypted_field_value(&self.phone)"));
+    assert!(expanded.contains("self.phone=::tideorm::model::__encrypted_field_from_value(v)?"));
     assert!(expanded.contains(
-        "phone:::tideorm::model::__decrypt_model_field(model.phone,\"customers\",\"phone\",\"phone\")?"
+        "fnfinish_load(self,connection:&::tideorm::database::ConnectionRef)->Self{letmutmodel=self.with_relations();"
     ));
-    assert!(expanded.contains("fntry_to_entity_model(&self)"));
-    assert!(!expanded.contains("fnfrom_entity_model"));
 
     let plain = expand_model_tokens(parse_quote! {
         struct Tag {
@@ -580,10 +612,8 @@ fn encrypted_columns_only_cross_the_boundary_through_the_cipher_hooks() {
             name: String,
         }
     });
-    assert!(!plain.contains("fntry_into_active_model"));
-    assert!(!plain.contains("fntry_to_entity_model"));
-    assert!(!plain.contains("fnfrom_entity_model"));
-    assert!(plain.contains("fntry_from_entity_model"));
+    assert!(!plain.contains("__decrypt_model_field"));
+    assert!(!plain.contains("__encrypt_model_field"));
 }
 
 #[test]
@@ -797,18 +827,16 @@ fn skipped_fields_are_defaulted_in_generated_constructors() {
         }
     });
 
-    assert!(expanded.contains("id:model.id,email:model.email,cached_label:Default::default(),"));
-    assert!(!expanded.contains("cached_label:model.cached_label"));
+    // A decoded row holds the field's default, and the field has no column.
+    assert!(expanded.contains("cached_label:Default::default()"));
+    assert!(!expanded.contains("Column::CachedLabel"));
 }
 
-/// Two relations to the same model both compile, each with its own join.
-///
-/// Rust permits one `Related<X>` impl per entity pair, so only the first
-/// relation to a model gets one. TideORM reads no relation through `Related` —
-/// `with(..)` and `load()` go by each field's own keys — so `author` and
-/// `editor` still load their own rows.
+/// Two relations to the same model both compile, each checking its own key:
+/// `with(..)` and `load()` go by each field's own keys, and nothing is
+/// generated per related model.
 #[test]
-fn two_relations_to_the_same_model_each_keep_their_join() {
+fn two_relations_to_the_same_model_each_keep_their_keys() {
     let article = expand_model_tokens(parse_quote! {
         struct Article {
             #[tideorm(primary_key, auto_increment)]
@@ -823,11 +851,12 @@ fn two_relations_to_the_same_model_each_keep_their_join() {
     });
 
     assert!(!article.contains("compile_error!"));
-    assert_eq!(article.matches("impl::tideorm::orm::Related<").count(), 1);
-    assert!(article.contains("Self::Author=>"));
-    assert!(article.contains("Self::Editor=>"));
+    let checks_owner_key = "const_:()=assert!(<User>::__has_column_name(\"id\")";
+    assert_eq!(article.matches(checks_owner_key).count(), 2);
+    assert!(article.contains("::tideorm::relations::BelongsTo::new(\"author_id\",\"id\")"));
+    assert!(article.contains("::tideorm::relations::BelongsTo::new(\"editor_id\",\"id\")"));
 
-    // Distinct targets are untouched: one `Related` impl and one `def` arm each.
+    // Distinct targets: one check each.
     let ok = expand_model_tokens(parse_quote! {
         struct Post {
             #[tideorm(primary_key, auto_increment)]
@@ -841,16 +870,16 @@ fn two_relations_to_the_same_model_each_keep_their_join() {
     });
 
     assert!(!ok.contains("compile_error!"));
-    assert_eq!(ok.matches("impl::tideorm::orm::Related<").count(), 2);
-    assert!(ok.contains("Self::Author=>"));
-    assert!(ok.contains("Self::Comments=>"));
+    assert_eq!(ok.matches(checks_owner_key).count(), 1);
+    let checks_foreign_key = "const_:()=assert!(<Comment>::__has_column_name(\"post_id\")";
+    assert_eq!(ok.matches(checks_foreign_key).count(), 1);
 }
 
-/// `Related::to`/`via` delegate to the `def` arm, so a bad key is checked (and
-/// reported) once, and the polymorphic and self-referencing relations — which no
-/// `Related` impl covers — get no `Relation` variant at all.
+/// Each entity relation's keys are checked once, and the polymorphic and
+/// self-referencing relations get no key check here. The engine entity knows
+/// no relations.
 #[test]
-fn relation_joins_are_defined_once_per_entity_relation() {
+fn relation_keys_are_checked_once_per_entity_relation() {
     let expanded = expand_model_tokens(parse_quote! {
         struct Post {
             #[tideorm(primary_key, auto_increment)]
@@ -868,9 +897,9 @@ fn relation_joins_are_defined_once_per_entity_relation() {
         }
     });
 
-    assert!(expanded.contains("pubenumRelation{Author,Tags}"));
-    assert!(expanded.contains("fnto()->RelationDef{Relation::Author.def()}"));
-    assert!(expanded.contains("fnvia()->Option<RelationDef>{Some(Relation::Tags.def())}"));
+    assert!(!expanded.contains("enumRelation"));
+    assert!(!expanded.contains("RelationDef"));
+    assert!(!expanded.contains("orm::Related"));
     assert_eq!(
         expanded
             .matches("const_:()=assert!(<User>::__has_column_name(\"id\")")
@@ -900,7 +929,6 @@ fn morph_to_targets_are_never_treated_as_models() {
         }
     });
 
-    assert!(expanded.contains("pubenumRelation{}"));
     assert!(!expanded.contains("<Commentableas::tideorm::internal::InternalModel>"));
     assert!(!expanded.contains("<Commentableas::tideorm::model::ModelMeta>"));
     assert!(
@@ -1071,8 +1099,9 @@ fn entity_manager_pk_key_falls_back_instead_of_panicking() {
         }
     });
 
-    // The runtime's `__identity_key` falls back to the key's own rendering.
-    assert!(expanded.contains("::tideorm::entity_manager::__identity_key(self)"));
+    // The runtime's `model_identity_key` keys an entity, falling back to the
+    // key's own rendering; the derive emits no key code that could panic.
+    assert!(!expanded.contains("identity_key"));
     assert!(!expanded.contains("entitymanagerprimarykeyshouldserialize"));
 }
 
@@ -1239,11 +1268,11 @@ fn raw_identifier_fields_use_one_unraw_name() {
     assert!(expanded.contains("fnfield_names()->&'static[&'staticstr]{&[\"id\",\"type\"]}"));
     assert!(!expanded.contains("\"r#type\""));
     assert!(!expanded.contains("R#type"));
-    assert!(expanded.contains("errors.__check(\"type\",&self.r#type,"));
+    assert!(expanded.contains("errors.check(\"type\",&self.r#type,"));
     assert!(!expanded.contains("self.type"));
     assert!(expanded.contains("\"type\"=>::tideorm::serde_json::to_value(&self.r#type)"));
-    assert!(encrypted_insert_setters(&expanded).contains(
-        "r#type:ActiveValue::Set(::tideorm::model::__encrypt_model_field(self.r#type,\"docs\",\"type\",\"type\")?)"
+    assert!(insert_setters(&expanded).contains(
+        "r#type:ActiveValue::Set(::tideorm::model::__encrypt_model_field::<Self,_>(&self.r#type,\"type\",\"type\",)?)"
     ));
 }
 
@@ -1337,31 +1366,10 @@ fn index_attributes_reject_unknown_columns() {
     assert!(error.contains("#[unique_index(..)] references unknown field or column 'nickname'"));
 }
 
+/// The sync schema takes each column's type from its field type's `ValueType`,
+/// the mapping the model's `Column::def()` uses.
 #[test]
-fn exported_type_aliases_all_map_to_a_column_type() {
-    let expanded = expand_model_tokens(parse_quote! {
-        struct Doc {
-            #[tideorm(primary_key, auto_increment)]
-            id: i64,
-            body: Text,
-            tags: TextArray,
-            counts: IntArray,
-            payloads: JsonArray,
-            meta: Json,
-            qualified: tideorm::types::Json,
-        }
-    });
-
-    assert!(
-        !expanded.contains("unsupportedTideORMcolumntype"),
-        "every alias exported for model fields must map to a ColumnType"
-    );
-}
-
-/// The sync schema records each column's Rust type as compact source text, which
-/// the macro now renders itself instead of emitting a runtime normalisation call.
-#[test]
-fn sync_schema_records_compact_rust_types() {
+fn sync_schema_takes_column_types_from_the_value_type() {
     let expanded = expand_model_tokens(parse_quote! {
         struct Event {
             #[tideorm(primary_key, auto_increment)]
@@ -1371,10 +1379,10 @@ fn sync_schema_records_compact_rust_types() {
     });
 
     assert!(expanded.contains(
-        "::tideorm::sync::ColumnDef::new(\"happened_at\",\"Option<chrono::DateTime<chrono::Utc>>\")"
+        "::tideorm::sync::ColumnDef::new(\"happened_at\",<Option<chrono::DateTime<chrono::Utc>>as::tideorm::orm::sql_builder::ValueType>::column_type())"
     ));
     assert!(expanded.contains(
-        "::tideorm::sync::ColumnDef::new(\"id\",\"i64\").primary_key().auto_increment().not_null()"
+        "::tideorm::sync::ColumnDef::new(\"id\",<i64as::tideorm::orm::sql_builder::ValueType>::column_type()).primary_key().auto_increment().not_null()"
     ));
     assert!(!expanded.contains("normalize_rust_type"));
     assert!(!expanded.contains("__register_for_sync"));
@@ -1498,27 +1506,6 @@ fn unnamed_indexes_are_named_by_the_runtime_like_a_migration() {
         expanded.contains("::tideorm::model::IndexDefinition::new(\"invitations_by_email\","),
         "{expanded}"
     );
-}
-
-#[test]
-fn qualified_generic_column_types_match_unqualified_types() {
-    for (plain, qualified) in [
-        ("Vec<String>", "std::vec::Vec<std::string::String>"),
-        ("Vec<Json>", "Vec<tideorm::types::Json>"),
-        ("Vec<serde_json::Value>", "std::vec::Vec<serde_json::Value>"),
-        (
-            "Option<Vec<String>>",
-            "std::option::Option<std::vec::Vec<std::string::String>>",
-        ),
-    ] {
-        let column = |ty| {
-            field_with_type(syn::parse_str(ty).unwrap())
-                .column_type_expr()
-                .unwrap()
-                .to_string()
-        };
-        assert_eq!(column(plain), column(qualified), "{qualified}");
-    }
 }
 
 /// The `pub` methods with a receiver that TideORM's source under `src`
@@ -1986,7 +1973,10 @@ fn names_that_cannot_pick_the_wrong_field_are_not_refused() {
     })
     .unwrap_or_else(|error| panic!("the default local key is the primary key: {error}"));
     let wiring = tokens(&ctx.relation_wiring);
-    assert!(wiring.contains("json!(self.id.clone())"), "{wiring}");
+    assert!(
+        wiring.contains("with_parent_pk(self.id.clone(),"),
+        "{wiring}"
+    );
     assert!(!wiring.contains("self.user_id"), "{wiring}");
 
     // The default soft-delete column and a morph's columns are columns.
@@ -2023,5 +2013,8 @@ fn names_that_cannot_pick_the_wrong_field_are_not_refused() {
     })
     .unwrap_or_else(|error| panic!("a morph's derived columns: {error}"));
     let wiring = tokens(&ctx.relation_wiring);
-    assert!(wiring.contains("json!(self.target_id.clone())"), "{wiring}");
+    assert!(
+        wiring.contains("with_values(self.commentable_type.clone(),self.target_id.clone())"),
+        "{wiring}"
+    );
 }

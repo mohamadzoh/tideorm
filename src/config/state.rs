@@ -38,16 +38,6 @@ pub(super) fn set_global_db_type(db_type: Option<DatabaseType>) {
     global_state().write().db_type = db_type;
 }
 
-/// Record that the global connection reaches MariaDB, unless another backend
-/// was configured, so the statements of its transactions, which cannot ask
-/// the pool, render for MariaDB too.
-pub(crate) fn note_detected_mariadb() {
-    let mut state = global_state().write();
-    if matches!(state.db_type, None | Some(DatabaseType::MySQL)) {
-        state.db_type = Some(DatabaseType::MariaDB);
-    }
-}
-
 pub(super) fn global_schema_file_path() -> Option<String> {
     global_state().read().schema_file_path.clone()
 }
@@ -58,7 +48,7 @@ pub(super) fn set_global_schema_file_path(path: Option<String>) {
 
 #[cfg(feature = "attachments")]
 pub(super) fn global_file_url_generator() -> Option<FileUrlGenerator> {
-    global_state().read().file_url_generator
+    global_state().read().file_url_generator.clone()
 }
 
 #[cfg(feature = "attachments")]

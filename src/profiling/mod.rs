@@ -19,7 +19,6 @@ mod utils;
 
 pub use self::analyzer::{QueryAnalyzer, QueryComplexity, QuerySuggestion, SuggestionLevel};
 #[doc(hidden)]
-pub use self::global::__profile_future;
 pub use self::global::{GlobalProfiler, GlobalStats};
 pub use self::report::{ProfileReport, ProfiledQuery, Profiler};
 

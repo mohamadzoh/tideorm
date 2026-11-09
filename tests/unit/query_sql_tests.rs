@@ -44,7 +44,9 @@ fn equality_against_json_null_renders_a_null_check() {
             r#""deleted_at" IS NOT NULL"#,
         ),
     ] {
-        let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::Postgres);
+        let (sql, params) = query
+            .build_select_sql_with_params_for_db(DatabaseType::Postgres)
+            .unwrap();
         assert!(sql.ends_with(&format!("WHERE {expected}")), "sql: {sql}");
         assert!(params.is_empty(), "params: {params:?}");
     }
@@ -190,7 +192,7 @@ fn mutation_guard_rejects_a_query_with_no_restrictive_filter() {
         // An empty candidate set for a negative membership test renders
         // constant-true. Reaching it by accident is easy -- a filter list that
         // came back empty from a form -- and the rendered-SQL check cannot
-        // catch it: sea-query emits an empty `NOT IN` as the bound pair
+        // catch it: `sql_builder` emits an empty `NOT IN` as the bound pair
         // `? = ?`, and a soft-delete model appends `deleted_at IS NULL` to
         // whatever the caller declared.
         (
@@ -345,7 +347,7 @@ fn count_sql_counts_the_rows_the_query_returns() {
             QueryCountGuardUser::query()
                 .select(vec!["name"])
                 .group_by("name")
-                .having("COUNT(*) > 1"),
+                .having_raw("COUNT(*) > 1"),
             format!(
                 "SELECT COUNT(*) AS count FROM (SELECT {users}.\"name\" FROM {users} GROUP BY \"name\" HAVING COUNT(*) > 1) AS \"tideorm_count_subquery\""
             ),
@@ -359,7 +361,7 @@ fn count_sql_counts_the_rows_the_query_returns() {
             format!(
                 "SELECT COUNT(*) AS count FROM (SELECT {users}.\"name\" FROM {users} GROUP BY \"name\" HAVING COUNT(*) > $1) AS \"tideorm_count_subquery\""
             ),
-            vec![Value::BigInt(Some(1))],
+            vec![Value::Int(Some(1))],
         ),
         (
             QueryCountGuardUser::query().select_raw("COUNT(*) AS total_count"),
@@ -369,7 +371,9 @@ fn count_sql_counts_the_rows_the_query_returns() {
             vec![],
         ),
     ] {
-        let (sql, bound) = query.build_count_sql_with_params_for_db(DatabaseType::Postgres);
+        let (sql, bound) = query
+            .build_count_sql_with_params_for_db(DatabaseType::Postgres)
+            .unwrap();
         assert_eq!(sql, expected);
         assert_eq!(bound, params, "{sql}");
     }
@@ -400,7 +404,7 @@ fn exists_sql_selects_a_constant_unless_having_reads_the_projection() {
         (
             QueryCountGuardUser::query()
                 .group_by("name")
-                .having("COUNT(*) > 1"),
+                .having_raw("COUNT(*) > 1"),
             format!("SELECT 1 FROM {users} GROUP BY \"name\" HAVING COUNT(*) > 1"),
             vec![],
         ),
@@ -408,14 +412,16 @@ fn exists_sql_selects_a_constant_unless_having_reads_the_projection() {
             QueryCountGuardUser::query()
                 .select(vec!["name AS label"])
                 .group_by("name")
-                .having("COUNT(*) > 1"),
+                .having_raw("COUNT(*) > 1"),
             format!(
                 "SELECT {users}.\"name\" AS \"label\" FROM {users} GROUP BY \"name\" HAVING COUNT(*) > 1"
             ),
             vec![],
         ),
     ] {
-        let (sql, bound) = query.build_exists_sql_with_params_for_db(DatabaseType::Postgres);
+        let (sql, bound) = query
+            .build_exists_sql_with_params_for_db(DatabaseType::Postgres)
+            .unwrap();
         assert_eq!(
             sql,
             format!("SELECT EXISTS({inner} LIMIT 1) AS \"exists_result\"")
@@ -435,7 +441,8 @@ fn exists_sql_keeps_potential_aggregates_in_every_dialect() {
             let (sql, params) = QueryCountGuardUser::query()
                 .select_raw(expression)
                 .where_eq("name", "alice")
-                .build_exists_sql_with_params_for_db(backend);
+                .build_exists_sql_with_params_for_db(backend)
+                .unwrap();
             assert!(sql.contains(expression), "{sql}");
             assert_eq!(params.len(), 1);
         }
@@ -447,7 +454,8 @@ fn exists_sql_preserves_subquery_wrapper_for_union_queries() {
     let (sql, params) = QueryCountGuardUser::query()
         .where_eq("name", "alice")
         .union_all(QueryCountGuardUser::query().where_eq("name", "bob"))
-        .build_exists_sql_with_params_for_db(DatabaseType::Postgres);
+        .build_exists_sql_with_params_for_db(DatabaseType::Postgres)
+        .unwrap();
 
     // The union operand is parameterized like the base select, so it contributes
     // its own bound value instead of an inline literal.
@@ -466,7 +474,7 @@ fn sql_preview_escapes_values_the_way_the_backend_reads_them() {
     let name = crate::columns::Column::<String>::new("name");
     let postgres = QueryCountGuardUser::query()
         .where_col(name.starts_with(r"100%_\done"))
-        .build_sql_preview_for_db(DatabaseType::Postgres);
+        .build_sql_preview_for(DatabaseType::Postgres);
     assert!(
         postgres.ends_with(r#"WHERE "name" LIKE E'100!%!_\\done%' ESCAPE '!'"#),
         "{postgres}"
@@ -475,7 +483,7 @@ fn sql_preview_escapes_values_the_way_the_backend_reads_them() {
     // MySQL reads `\'` as an escaped quote, so the backslash is doubled.
     let mysql = QueryCountGuardUser::query()
         .where_eq("name", r#"\' OR 1=1 --"#)
-        .build_sql_preview_for_db(DatabaseType::MySQL);
+        .build_sql_preview_for(DatabaseType::MySQL);
     assert!(
         mysql.ends_with(r#"WHERE `name` = '\\\' OR 1=1 --'"#),
         "{mysql}"
@@ -496,6 +504,13 @@ fn debug_output_includes_preview_banner_and_parameterized_sql() {
     assert!(debug_info.sql.contains("-- PARAMETERIZED SQL\nSELECT"));
     assert!(debug_info.sql.contains("query_count_guard_users"));
     assert_eq!(debug_info.params.len(), 1);
+
+    let rendered = debug_info.to_string();
+    assert!(
+        rendered.contains("SQL Preview (non-executable):\n  -- DEBUG PREVIEW"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("SQL:\n"), "{rendered}");
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
@@ -607,7 +622,7 @@ async fn soft_delete_restore_and_force_delete_invalidate_cached_queries() {
 }
 
 /// A condition whose operator and value do not pair up has no SQL rendering,
-/// and every path refuses it: the aggregates' SeaORM path used to drop it from
+/// and every path refuses it: the aggregates' typed path used to drop it from
 /// its WHERE clause, so the aggregate silently covered every row.
 #[tokio::test]
 async fn a_condition_that_cannot_be_rendered_is_refused() {
@@ -616,7 +631,7 @@ async fn a_condition_that_cannot_be_rendered_is_refused() {
         query.clauses.conditions.push(crate::query::WhereCondition {
             column: "id".to_string(),
             operator: crate::query::Operator::Between,
-            value: crate::query::ConditionValue::Single(serde_json::json!(1)),
+            value: crate::query::ConditionValue::Single(1i64.into()),
         });
         query
     };
@@ -659,8 +674,10 @@ fn sql_preview_is_the_executed_statement_with_its_values_inlined() {
                 .where_eq("name", "bob"),
         );
 
-    let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::Postgres);
-    let preview = query.build_sql_preview_for_db(DatabaseType::Postgres);
+    let (sql, params) = query
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres)
+        .unwrap();
+    let preview = query.build_sql_preview_for(DatabaseType::Postgres);
     assert_eq!(
         preview,
         format!(
@@ -689,7 +706,7 @@ fn sql_preview_is_the_executed_statement_with_its_values_inlined() {
 fn sqlite_json_preview_compares_original_numeric_tokens() {
     let preview = MutationGuardUser::query()
         .where_json_contains("name", 5)
-        .build_sql_preview_for_db(DatabaseType::SQLite);
+        .build_sql_preview_for(DatabaseType::SQLite);
 
     assert!(
         preview.contains("\"query_mutation_guard_users\".\"name\" -> '$'"),
@@ -719,8 +736,8 @@ async fn aggregates_run_through_the_logged_statement_path() {
 
     crate::logging::QueryLogger::clear_history();
     crate::logging::QueryLogger::global()
-        .set_level(crate::logging::LogLevel::Error)
-        .set_history_limit(10)
+        .level(crate::logging::LogLevel::Error)
+        .history_limit(10)
         .enable();
 
     let distinct = MutationGuardUser::query().count_distinct("name").await;
@@ -736,7 +753,7 @@ async fn aggregates_run_through_the_logged_statement_path() {
 
     crate::logging::QueryLogger::clear_history();
     crate::logging::QueryLogger::global()
-        .set_history_limit(100)
+        .history_limit(100)
         .enable();
     crate::logging::QueryLogger::disable();
     crate::test_support::reset_globals_and_cache();
@@ -744,7 +761,7 @@ async fn aggregates_run_through_the_logged_statement_path() {
     assert_eq!(distinct.expect("count_distinct should succeed"), 2);
     assert_eq!(total.expect("sum should succeed"), 5);
     assert_eq!(empty.expect("a MAX over no rows is None"), None);
-    // The SeaORM path the unjoined aggregates used to take bypassed the query log.
+    // The typed path the unjoined aggregates used to take bypassed the query log.
     assert!(
         history
             .iter()
@@ -767,7 +784,7 @@ async fn a_query_renders_for_the_transaction_it_runs_in() {
         .expect("sqlite should connect");
 
     let rendered = db
-        .transaction(|_| Box::pin(async { Ok(MutationGuardUser::query().db_type_for_sql()) }))
+        .transaction(async |_| MutationGuardUser::query().db_type_for_sql())
         .await
         .expect("transaction should run");
 

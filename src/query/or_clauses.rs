@@ -2,20 +2,47 @@ use super::{OrBranchBuilder, OrGroup, QueryBuilder, WhereCondition};
 use crate::model::Model;
 
 impl<M: Model> QueryBuilder<M> {
-    /// Add an OR group built by `f`, ANDed with the query's other filters.
+    /// Match rows that meet any of the conditions `f` adds, ANDed with the
+    /// query's other filters: `.where_eq(a).where_any(|g| g.where_eq(b).where_eq(c))`
+    /// is `a AND (b OR c)`. Each call adds a group of its own.
     ///
     /// ```
     /// use tideorm::prelude::*;
     /// # #[tideorm::model(table = "users", soft_delete)]
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
-    /// User::query().or_where(|q| q.where_eq(User::ACTIVE, true).where_eq(User::NAME, "Ada")).validate().unwrap();
+    /// User::query().where_any(|q| q.where_eq(User::ACTIVE, true).where_eq(User::NAME, "Ada")).validate().unwrap();
     /// ```
-    #[must_use]
-    pub fn or_where<F>(mut self, f: F) -> Self
+    pub fn where_any<F>(self, f: F) -> Self
     where
         F: FnOnce(OrGroup) -> OrGroup,
     {
-        let group = f(OrGroup::new());
+        self.push_group(f(OrGroup::new()))
+    }
+
+    /// Match rows that meet all of the conditions `f` adds, as one group
+    /// ANDed with the query's other filters. Its use is nesting:
+    /// `where_all(|g| g.where_eq(a).nested_or(|o| o.where_eq(b).where_eq(c)))`
+    /// is `(a AND (b OR c))`, which [`where_any`](Self::where_any) can then
+    /// hold a group of as well.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query()
+    ///     .where_all(|q| q.where_eq(User::ACTIVE, true).nested_or(|o| o.where_eq(User::NAME, "Ada").where_eq(User::NAME, "Grace")))
+    ///     .validate()
+    ///     .unwrap();
+    /// ```
+    pub fn where_all<F>(self, f: F) -> Self
+    where
+        F: FnOnce(OrGroup) -> OrGroup,
+    {
+        self.push_group(f(OrGroup::and_group()))
+    }
+
+    /// Add `group` among the query's groups unless it holds no condition.
+    fn push_group(mut self, group: OrGroup) -> Self {
         if !group.is_empty() {
             self.clauses.or_groups.push(group);
         }

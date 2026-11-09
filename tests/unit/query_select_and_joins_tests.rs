@@ -270,7 +270,7 @@ fn a_typed_column_of_another_model_in_a_window_keeps_its_table() {
                 .partition_by(WindowOwner::columns.name)
                 .order_by(WindowOwner::columns.id, Order::Asc),
         )
-        .build_sql_preview_for_db(DatabaseType::Postgres);
+        .build_sql_preview_for(DatabaseType::Postgres);
 
     assert!(
         sql.contains(r#"PARTITION BY "window_owners"."name" ORDER BY "window_owners"."id" ASC"#),
@@ -299,7 +299,8 @@ fn a_joined_column_binds_as_its_type_only_in_its_models_schema() {
                 "linked_audit_events.id",
             )
             .where_eq("linked_audit_events.token", uuid::Uuid::nil().to_string())
-            .build_select_sql_with_params_for_db(crate::config::DatabaseType::Postgres);
+            .build_select_sql_with_params_for_db(crate::config::DatabaseType::Postgres)
+            .unwrap();
 
         let expected = if expect_uuid {
             crate::internal::Value::from(uuid::Uuid::nil())

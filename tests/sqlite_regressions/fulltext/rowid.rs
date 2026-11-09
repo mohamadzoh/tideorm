@@ -56,7 +56,7 @@ async fn unsupported_rowid_schemas_fail_before_any_index_is_created() {
             } else {
                 format!("{schema}.rowid_articles")
             };
-            let index = FullTextIndex::new("search", table, vec!["body".into()]);
+            let index = FullTextIndex::new("search", table, ["body"]);
             shadow_error(install(&db, &index).await);
             let objects = db
                 .query_raw_json(&format!(
@@ -78,11 +78,7 @@ async fn legacy_indexes_and_unmodeled_shadow_columns_cannot_return_wrong_matches
         ))
         .await
         .unwrap();
-        let index = FullTextIndex::new(
-            "search",
-            format!("{schema}.rowid_articles"),
-            vec!["body".into()],
-        );
+        let index = FullTextIndex::new("search", format!("{schema}.rowid_articles"), ["body"]);
         // Recreate the pre-fix installation, whose CREATE and trigger definitions
         // used the user column as FTS identity: skip the two guarded statements,
         // the first and the closing rebuild.
@@ -97,14 +93,14 @@ async fn legacy_indexes_and_unmodeled_shadow_columns_cannot_return_wrong_matches
         .unwrap();
         for term in ["alpha", "beta", "missing", ""] {
             if schema == "main" {
-                shadow_error(Article::search(&["body"], term).get().await);
-                shadow_error(Article::search(&["body"], term).first().await);
-                shadow_error(Article::search(&["body"], term).get_ranked().await);
-                shadow_error(Article::search(&["body"], term).count().await);
+                shadow_error(Article::search(["body"], term).get().await);
+                shadow_error(Article::search(["body"], term).first().await);
+                shadow_error(Article::search(["body"], term).get_ranked().await);
+                shadow_error(Article::search(["body"], term).count().await);
             } else {
-                shadow_error(TenantArticle::search(&["body"], term).get().await);
-                shadow_error(TenantArticle::search(&["body"], term).get_ranked().await);
-                shadow_error(TenantArticle::search(&["body"], term).count().await);
+                shadow_error(TenantArticle::search(["body"], term).get().await);
+                shadow_error(TenantArticle::search(["body"], term).get_ranked().await);
+                shadow_error(TenantArticle::search(["body"], term).count().await);
             }
         }
         shadow_error(db.exec_raw(&index.sqlite_rebuild_sql()).await);
@@ -123,7 +119,7 @@ async fn real_rowid_primary_key_alias_supports_search_and_maintenance() {
     let db =
         global_memory_database("CREATE TABLE alias_articles(rowid INTEGER PRIMARY KEY,body TEXT)")
             .await;
-    let index = FullTextIndex::new("search", "alias_articles", vec!["body".into()]);
+    let index = FullTextIndex::new("search", "alias_articles", ["body"]);
     install(&db, &index).await.unwrap();
     AliasArticle {
         id: 1,
@@ -139,7 +135,7 @@ async fn real_rowid_primary_key_alias_supports_search_and_maintenance() {
     .save()
     .await
     .unwrap();
-    let rows = AliasArticle::search(&["body"], "beta")
+    let rows = AliasArticle::search(["body"], "beta")
         .get_ranked()
         .await
         .unwrap();
@@ -153,7 +149,7 @@ async fn real_rowid_primary_key_alias_supports_search_and_maintenance() {
     .await
     .unwrap();
     assert_eq!(
-        AliasArticle::search(&["body"], "beta")
+        AliasArticle::search(["body"], "beta")
             .count()
             .await
             .unwrap(),
@@ -168,7 +164,7 @@ async fn real_rowid_primary_key_alias_supports_search_and_maintenance() {
         .unwrap();
     install(&db, &index).await.unwrap();
     db.exec_raw(&index.sqlite_rebuild_sql()).await.unwrap();
-    let rows = AliasArticle::search(&["body"], "beta").get().await.unwrap();
+    let rows = AliasArticle::search(["body"], "beta").get().await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, 1);
 }
@@ -180,10 +176,10 @@ async fn other_rowid_aliases_do_not_interfere_with_hidden_rowid() {
          INSERT INTO rowid_articles VALUES(1,7,7,'alpha'),(2,7,7,'beta')",
     )
     .await;
-    let index = FullTextIndex::new("search", "rowid_articles", vec!["body".into()]);
+    let index = FullTextIndex::new("search", "rowid_articles", ["body"]);
     install(&db, &index).await.unwrap();
-    let rows = Article::search(&["body"], "beta").get().await.unwrap();
+    let rows = Article::search(["body"], "beta").get().await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, 2);
-    assert_eq!(Article::search(&["body"], "beta").count().await.unwrap(), 1);
+    assert_eq!(Article::search(["body"], "beta").count().await.unwrap(), 1);
 }

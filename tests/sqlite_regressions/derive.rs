@@ -49,3 +49,17 @@ async fn underscored_and_camel_case_fields_compile_quietly_and_round_trip() {
         ("note".into(), "Ada".into())
     );
 }
+
+/// A model in a module that imports `tideorm::Result`, whose one parameter
+/// would not fit a `Result<_, DbErr>` the generated code wrote unqualified.
+mod with_tideorm_result_in_scope {
+    #[allow(unused_imports)]
+    use tideorm::Result;
+
+    #[tideorm::model(table = "scoped_results")]
+    pub struct ScopedResult {
+        #[tideorm(primary_key, auto_increment)]
+        pub id: i64,
+        pub name: String,
+    }
+}

@@ -1,39 +1,108 @@
-use crate::error::{Error, Result};
-use crate::internal::sql_safety::quote_ident;
+use crate::model::IndexDefinition;
 
 use super::ddl::{self, ColumnDefinition};
-use super::{ColumnBuilder, ColumnType, DatabaseType};
+use super::foreign_key::{ForeignKey, ForeignKeyBuilder};
+use super::table::typed_column_methods;
+use super::{ColumnBuilder, ColumnType, DatabaseType, DefaultValue, StringLen};
 
-/// Builder for adding columns in ALTER TABLE
+mod build;
+mod mysql_columns;
+
+use mysql_columns::{KeptAttributes, mysql_column_attributes};
+
+/// Builder for a column [`AlterTableBuilder::add_column`] adds.
 pub type AlterColumnBuilder<'a> = ColumnBuilder<'a, AlterTableBuilder>;
 
 /// Builder for ALTER TABLE operations
+///
+/// Each call adds one change, and [`Schema::alter_table`](super::Schema::alter_table)
+/// runs them in the order they were made.
 pub struct AlterTableBuilder {
     name: String,
     database_type: DatabaseType,
     operations: Vec<AlterOperation>,
-    /// What MySQL's `MODIFY COLUMN` would drop from a column whose type
-    /// changes, by column.
+    /// What MySQL's `MODIFY COLUMN` would drop from a column it restates, by
+    /// column.
     kept_attributes: std::collections::HashMap<String, KeptAttributes>,
     /// Explicit single-column indexes over dropped columns, as (column, index).
     sqlite_column_indexes: Vec<(String, String)>,
     sqlite_index_schema: Option<String>,
 }
 
-/// A MySQL column's declaration besides its type, as `SHOW CREATE TABLE`
-/// writes it.
-#[derive(Debug, Default, PartialEq)]
-struct KeptAttributes {
-    /// Its `CHARACTER SET` and `COLLATE` clauses, which `SHOW CREATE TABLE`
-    /// writes only where they differ from the table's defaults, as written.
-    character: String,
-    /// Everything after them: `NOT NULL DEFAULT '5'`, `AUTO_INCREMENT`,
-    /// `DEFAULT NULL COMMENT '..'`.
-    rest: String,
+/// What [`AlterTableBuilder::alter_column`] changes about a column; `None`
+/// keeps that part as it is.
+#[derive(Debug, Clone, Default)]
+struct ColumnChange {
+    column_type: Option<ColumnType>,
+    nullable: Option<bool>,
+    /// The new default, rendered, or `Some(None)` to drop the default.
+    default: Option<Option<String>>,
+}
+
+impl ColumnChange {
+    /// Whether MySQL has to restate the column with `MODIFY COLUMN`, which
+    /// `ALTER COLUMN .. SET DEFAULT` spares a change of default alone.
+    fn restates(&self) -> bool {
+        self.column_type.is_some() || self.nullable.is_some()
+    }
+}
+
+/// Builder for the change [`AlterTableBuilder::alter_column`] makes to a
+/// column.
+///
+/// The change is added when the builder drops, so
+/// `t.alter_column("email").not_null();` needs no terminating call.
+pub struct ColumnChangeBuilder<'a> {
+    alter: &'a mut AlterTableBuilder,
+    name: String,
+    change: ColumnChange,
+}
+
+impl ColumnChangeBuilder<'_> {
+    /// Change the column's type.
+    pub fn set_type(mut self, column_type: ColumnType) -> Self {
+        self.change.column_type = Some(column_type);
+        self
+    }
+
+    /// Let the column hold NULL.
+    pub fn nullable(mut self) -> Self {
+        self.change.nullable = Some(true);
+        self
+    }
+
+    /// Refuse NULL in the column, which fails while a row holds one.
+    pub fn not_null(mut self) -> Self {
+        self.change.nullable = Some(false);
+        self
+    }
+
+    /// Set the column's default.
+    pub fn default(mut self, value: impl Into<DefaultValue>) -> Self {
+        self.change.default = Some(Some(value.into().to_sql(self.alter.database_type)));
+        self
+    }
+
+    /// Remove the column's default.
+    pub fn drop_default(mut self) -> Self {
+        self.change.default = Some(None);
+        self
+    }
+}
+
+impl Drop for ColumnChangeBuilder<'_> {
+    fn drop(&mut self) {
+        let change = std::mem::take(&mut self.change);
+        let name = std::mem::take(&mut self.name);
+        self.alter
+            .operations
+            .push(AlterOperation::ChangeColumn(name, change));
+    }
 }
 
 impl AlterTableBuilder {
-    /// Create a new alter table builder
+    /// Create a new alter table builder for the table `name`, or
+    /// `schema.table`.
     pub fn new(name: &str, database_type: DatabaseType) -> Self {
         Self {
             name: name.to_string(),
@@ -46,15 +115,26 @@ impl AlterTableBuilder {
     }
 
     /// Add a new column
+    ///
+    /// A column that [`references`](ColumnBuilder::references) another
+    /// table is added with its foreign key, on SQLite too, which can add no
+    /// key to an existing column; SQLite then wants the column to default
+    /// to NULL.
     pub fn add_column(&mut self, name: &str, column_type: ColumnType) -> AlterColumnBuilder<'_> {
         let database_type = self.database_type;
         ColumnBuilder::new(
             self,
             database_type,
             ColumnDefinition::new(name, column_type),
-            |alter, column| alter.operations.push(AlterOperation::AddColumn(column)),
+            |alter, column, key| {
+                alter
+                    .operations
+                    .push(AlterOperation::AddColumn(column, key))
+            },
         )
     }
+
+    typed_column_methods!(add_column);
 
     /// Drop a column
     pub fn drop_column(&mut self, name: &str) -> &mut Self {
@@ -77,29 +157,123 @@ impl AlterTableBuilder {
     /// MySQL and MariaDB, whose `MODIFY COLUMN` restates the whole column,
     /// [`Schema::alter_table`](super::Schema::alter_table) reads them from the
     /// table first. SQLite cannot change a column's type.
+    ///
+    /// The shorthand for `alter_column(name).set_type(column_type)`.
     pub fn change_column(&mut self, name: &str, column_type: ColumnType) -> &mut Self {
-        self.operations.push(AlterOperation::ChangeColumnType(
-            name.to_string(),
-            column_type,
-        ));
+        self.alter_column(name).set_type(column_type);
+        self
+    }
+
+    /// Change a column's type, nullability or default, keeping what the
+    /// builder leaves alone.
+    ///
+    /// ```rust,ignore
+    /// schema.alter_table("users", |t| {
+    ///     t.alter_column("email").not_null();
+    ///     t.alter_column("score").set_type(ColumnType::BigInteger).default(0);
+    ///     t.alter_column("nickname").drop_default();
+    /// }).await?;
+    /// ```
+    ///
+    /// PostgreSQL changes each part in place. MySQL and MariaDB restate the
+    /// column with `MODIFY COLUMN` for a new type or nullability, keeping
+    /// the rest of the definition [`Schema::alter_table`](super::Schema::alter_table)
+    /// reads from the table, and change a default alone with
+    /// `ALTER COLUMN .. SET DEFAULT`. SQLite cannot alter a column, so there
+    /// the alteration fails before it runs anything.
+    pub fn alter_column(&mut self, name: &str) -> ColumnChangeBuilder<'_> {
+        ColumnChangeBuilder {
+            alter: self,
+            name: name.to_string(),
+            change: ColumnChange::default(),
+        }
+    }
+
+    /// Index `columns` under the name [`TableBuilder::index`](super::TableBuilder::index)
+    /// would give it, `idx_<table>_<columns>`, shortened with a hash past 63
+    /// bytes.
+    pub fn add_index(&mut self, columns: &[&str]) -> &mut Self {
+        let name = ddl::index_name(self.table(), columns, false);
+        self.push_index(name, columns, false)
+    }
+
+    /// Index `columns` under `name`.
+    pub fn add_index_named(&mut self, name: &str, columns: &[&str]) -> &mut Self {
+        self.push_index(name.to_string(), columns, false)
+    }
+
+    /// A unique index on `columns`, named `idx_<table>_<columns>_unique`
+    /// (shortened with a hash past 63 bytes).
+    pub fn add_unique_index(&mut self, columns: &[&str]) -> &mut Self {
+        let name = ddl::index_name(self.table(), columns, true);
+        self.push_index(name, columns, true)
+    }
+
+    /// A unique index on `columns`, named `name`.
+    pub fn add_unique_index_named(&mut self, name: &str, columns: &[&str]) -> &mut Self {
+        self.push_index(name.to_string(), columns, true)
+    }
+
+    fn push_index(&mut self, name: String, columns: &[&str], unique: bool) -> &mut Self {
+        self.operations
+            .push(AlterOperation::AddIndex(IndexDefinition::new(
+                name,
+                columns.iter().map(|column| column.to_string()).collect(),
+                unique,
+            )));
+        self
+    }
+
+    /// Drop the table's index `name`.
+    pub fn drop_index(&mut self, name: &str) -> &mut Self {
+        self.operations
+            .push(AlterOperation::DropIndex(name.to_string()));
+        self
+    }
+
+    /// Add a foreign key from `columns` of this table to `references` of
+    /// `table`. Unnamed, it is `fk_<table>_<columns>`, shortened with a hash
+    /// past 63 bytes.
+    ///
+    /// SQLite cannot add a key to an existing table: there the alteration
+    /// fails before it runs anything. Add the key with its column
+    /// ([`add_column`](Self::add_column) and
+    /// [`references`](ColumnBuilder::references)) or rebuild the table.
+    pub fn add_foreign_key(
+        &mut self,
+        columns: &[&str],
+        table: &str,
+        references: &[&str],
+    ) -> ForeignKeyBuilder<'_, Self> {
+        ForeignKeyBuilder::new(
+            self,
+            ForeignKey::new(columns, table, references),
+            |alter, key| alter.operations.push(AlterOperation::AddForeignKey(key)),
+        )
+    }
+
+    /// Drop the table's foreign key `name`. SQLite cannot drop one, so there
+    /// the alteration fails before it runs anything.
+    pub fn drop_foreign_key(&mut self, name: &str) -> &mut Self {
+        self.operations
+            .push(AlterOperation::DropForeignKey(name.to_string()));
         self
     }
 
     /// Whether a MySQL `MODIFY COLUMN` needs the table's current definition.
-    pub(crate) fn changes_mysql_column_types(&self) -> bool {
+    pub(crate) fn restates_mysql_columns(&self) -> bool {
         matches!(
             self.database_type,
             DatabaseType::MySQL | DatabaseType::MariaDB
-        ) && self
-            .operations
-            .iter()
-            .any(|operation| matches!(operation, AlterOperation::ChangeColumnType(..)))
+        ) && self.operations.iter().any(|operation| {
+            matches!(operation, AlterOperation::ChangeColumn(_, change) if change.restates())
+        })
     }
 
     /// Keep what `create_table`, the table's `SHOW CREATE TABLE`, declares
-    /// for each column whose type changes, besides the type. A column renamed
-    /// earlier in the same alteration is looked up by the name the table
-    /// still gives it; one added or dropped earlier has no stored definition.
+    /// for each column the alteration restates. A column renamed earlier in
+    /// the same alteration is looked up by the name the table still gives
+    /// it; one added or dropped earlier has no stored definition.
     pub(crate) fn keep_column_attributes(&mut self, create_table: &str) {
         // By the name a column has at this point of the alteration, the name
         // the table stores it under, or `None` for one it does not store.
@@ -111,13 +285,13 @@ impl AlterTableBuilder {
                     let stored = stored_names.remove(from.as_str()).unwrap_or(Some(from));
                     stored_names.insert(to, stored);
                 }
-                AlterOperation::AddColumn(column) => {
+                AlterOperation::AddColumn(column, _) => {
                     stored_names.insert(&column.name, None);
                 }
                 AlterOperation::DropColumn(name) => {
                     stored_names.insert(name, None);
                 }
-                AlterOperation::ChangeColumnType(name, _) => {
+                AlterOperation::ChangeColumn(name, change) if change.restates() => {
                     if let Some(stored) = stored_names
                         .get(name.as_str())
                         .copied()
@@ -127,6 +301,11 @@ impl AlterTableBuilder {
                         self.kept_attributes.insert(name.clone(), attributes);
                     }
                 }
+                AlterOperation::ChangeColumn(..)
+                | AlterOperation::AddIndex(_)
+                | AlterOperation::DropIndex(_)
+                | AlterOperation::AddForeignKey(_)
+                | AlterOperation::DropForeignKey(_) => {}
             }
         }
     }
@@ -149,7 +328,7 @@ impl AlterTableBuilder {
                         AlterOperation::RenameColumn(from, to) if to == original => {
                             original = from;
                         }
-                        AlterOperation::AddColumn(column) if column.name == original => {
+                        AlterOperation::AddColumn(column, _) if column.name == original => {
                             return None;
                         }
                         _ => {}
@@ -158,20 +337,6 @@ impl AlterTableBuilder {
                 Some(original)
             })
             .collect()
-    }
-
-    /// The name of the unique index a unique `column` added on SQLite comes
-    /// with.
-    fn sqlite_column_index(&self, column: &str) -> String {
-        ddl::index_name(&self.name, &[column], true)
-    }
-
-    fn sqlite_index_reference(&self, name: &str) -> String {
-        let name = quote_ident(self.database_type, name);
-        match &self.sqlite_index_schema {
-            Some(schema) => format!("{}.{name}", quote_ident(self.database_type, schema)),
-            None => name,
-        }
     }
 
     /// Drop these indexes, which [`Schema::alter_table`](super::Schema::alter_table)
@@ -185,279 +350,21 @@ impl AlterTableBuilder {
         self.sqlite_column_indexes = names;
     }
 
-    /// The statements this alteration renders, for the CLI's migration
-    /// generator, which writes them into a migration file. Without the table
-    /// to read, they drop no index over a dropped SQLite column but one this
-    /// alteration adds.
-    #[doc(hidden)]
-    pub fn __statements(&self) -> Result<Vec<String>> {
-        self.build()
-    }
-
-    pub(crate) fn build(&self) -> Result<Vec<String>> {
-        let mut statements = Vec::with_capacity(self.operations.len());
-        let mut indexes = self.sqlite_column_indexes.clone();
-        for operation in &self.operations {
-            // SQLite refuses to drop a column an index covers, such as the
-            // unique index a unique column added on SQLite comes with. Only
-            // this table's: SQLite names indexes per database, so another
-            // table's index can have the name this one's would get.
-            if let AlterOperation::DropColumn(name) = operation
-                && self.database_type == DatabaseType::SQLite
-            {
-                for (_, existing) in indexes.iter().filter(|(column, _)| column == name) {
-                    statements.push(format!(
-                        "DROP INDEX {}",
-                        self.sqlite_index_reference(existing)
-                    ));
-                }
-                indexes.retain(|(column, _)| column != name);
-            }
-            statements.push(self.build_operation(operation)?);
-            if let Some(column) = self.sqlite_unique_addition(operation) {
-                let index = self.sqlite_column_index(&column.name);
-                statements.push(format!(
-                    "CREATE UNIQUE INDEX {} ON {} ({})",
-                    self.sqlite_index_reference(&index),
-                    quote_ident(self.database_type, &self.name),
-                    quote_ident(self.database_type, &column.name),
-                ));
-                indexes.push((column.name.clone(), index));
-            }
-            if let AlterOperation::RenameColumn(from, to) = operation {
-                for (column, _) in &mut indexes {
-                    if column == from {
-                        column.clone_from(to);
-                    }
-                }
-            }
-        }
-        Ok(statements)
-    }
-
-    /// The column `operation` adds when it is a unique one added on SQLite,
-    /// which refuses `ADD COLUMN .. UNIQUE`: the column is added without the
-    /// constraint and a unique index enforces it.
-    fn sqlite_unique_addition<'a>(
-        &self,
-        operation: &'a AlterOperation,
-    ) -> Option<&'a ddl::ColumnDefinition> {
-        match operation {
-            AlterOperation::AddColumn(column)
-                if self.database_type == DatabaseType::SQLite
-                    && column.unique
-                    && !column.primary_key =>
-            {
-                Some(column)
-            }
-            _ => None,
-        }
-    }
-
-    fn build_operation(&self, operation: &AlterOperation) -> Result<String> {
-        let db_type = self.database_type;
-        let table = quote_ident(db_type, &self.name);
-
-        let sql = match operation {
-            AlterOperation::AddColumn(column) => match self.sqlite_unique_addition(operation) {
-                Some(column) => {
-                    let mut plain = column.clone();
-                    plain.unique = false;
-                    ddl::add_column(db_type, &table, &plain)
-                }
-                None => ddl::add_column(db_type, &table, column),
-            },
-            AlterOperation::DropColumn(name) => {
-                format!(
-                    "ALTER TABLE {} DROP COLUMN {}",
-                    table,
-                    quote_ident(db_type, name)
-                )
-            }
-            AlterOperation::RenameColumn(from, to) => {
-                format!(
-                    "ALTER TABLE {} RENAME COLUMN {} TO {}",
-                    table,
-                    quote_ident(db_type, from),
-                    quote_ident(db_type, to)
-                )
-            }
-            AlterOperation::ChangeColumnType(name, column_type) => {
-                let type_sql = column_type.to_sql(db_type);
-                match db_type {
-                    DatabaseType::Postgres => {
-                        format!(
-                            "ALTER TABLE {} ALTER COLUMN {} TYPE {}",
-                            table,
-                            quote_ident(db_type, name),
-                            type_sql
-                        )
-                    }
-                    DatabaseType::MySQL | DatabaseType::MariaDB => {
-                        let mut sql = format!(
-                            "ALTER TABLE {} MODIFY COLUMN {} {}",
-                            table,
-                            quote_ident(db_type, name),
-                            type_sql
-                        );
-                        if let Some(kept) = self.kept_attributes.get(name) {
-                            // A character set or collation stays with a
-                            // column that still holds text, which would
-                            // otherwise take the table's; any other type
-                            // refuses one.
-                            let attributes = [
-                                if holds_text(&type_sql) {
-                                    kept.character.as_str()
-                                } else {
-                                    ""
-                                },
-                                kept.rest.as_str(),
-                            ];
-                            for attribute in attributes.into_iter().filter(|text| !text.is_empty())
-                            {
-                                sql.push(' ');
-                                sql.push_str(attribute);
-                            }
-                        }
-                        sql
-                    }
-                    // Emitting a SQL comment here would let the migration be
-                    // recorded as applied while the column keeps its old type.
-                    DatabaseType::SQLite => {
-                        return Err(Error::backend_not_supported(
-                            format!(
-                                "SQLite cannot change the type of column '{}' on table '{}'. \
-                                 Rebuild the table instead, in a migration whose \
-                                 `foreign_keys_off()` is true: create a new table with the target \
-                                 definition, copy the rows across, drop the old table and rename \
-                                 the new one.",
-                                name, self.name
-                            ),
-                            "SQLite",
-                        ));
-                    }
-                }
-            }
-        };
-
-        Ok(sql)
-    }
-}
-
-/// Whether a MySQL column of type `type_sql` holds text, and so takes a
-/// character set and a collation.
-fn holds_text(type_sql: &str) -> bool {
-    let type_sql = type_sql.trim().to_ascii_uppercase();
-    [
-        "CHAR",
-        "VARCHAR",
-        "NCHAR",
-        "NVARCHAR",
-        "NATIONAL",
-        "TINYTEXT",
-        "TEXT",
-        "MEDIUMTEXT",
-        "LONGTEXT",
-        "ENUM",
-        "SET(",
-        "SET (",
-    ]
-    .iter()
-    .any(|prefix| type_sql.starts_with(prefix))
-}
-
-/// What `create_table`, a MySQL or MariaDB `SHOW CREATE TABLE`, declares for
-/// `column` besides its type: its character set and collation, and after
-/// them `NOT NULL DEFAULT '5'`, `NOT NULL AUTO_INCREMENT`,
-/// `DEFAULT NULL COMMENT '..'`. `None` when the table has no such column.
-fn mysql_column_attributes(create_table: &str, column: &str) -> Option<KeptAttributes> {
-    // The first word of a column's definition that is not part of its type.
-    const ATTRIBUTES: [&str; 17] = [
-        "NOT",
-        "NULL",
-        "DEFAULT",
-        "AUTO_INCREMENT",
-        "ON",
-        "COMMENT",
-        "GENERATED",
-        "AS",
-        "INVISIBLE",
-        "VISIBLE",
-        "CHECK",
-        "COLUMN_FORMAT",
-        "STORAGE",
-        "SRID",
-        "PRIMARY",
-        "UNIQUE",
-        "REFERENCES",
-    ];
-
-    let quoted = quote_ident(DatabaseType::MySQL, column);
-    let definition = create_table.lines().map(str::trim).find_map(|line| {
-        let head = line.get(..quoted.len())?;
-        let rest = line.get(quoted.len()..)?;
-        (head.eq_ignore_ascii_case(&quoted) && rest.starts_with(' ')).then_some(rest)
-    })?;
-    let mut rest = definition.trim().trim_end_matches(',');
-    let mut character: Vec<&str> = Vec::new();
-    // How many of the next words belong to a CHARACTER SET or COLLATE clause.
-    let mut clause_words = 0;
-
-    loop {
-        rest = rest.trim_start();
-        let Some(first) = rest.chars().next() else {
-            return Some(KeptAttributes {
-                character: character.join(" "),
-                rest: String::new(),
-            });
-        };
-        // A quoted literal or a parenthesized group is one word.
-        let end = match first {
-            '\'' | '"' | '`' => rest[1..].find(first).map_or(rest.len(), |end| end + 2),
-            '(' => {
-                let mut depth = 0usize;
-                rest.char_indices()
-                    .find(|&(_, character)| {
-                        match character {
-                            '(' => depth += 1,
-                            ')' => depth -= 1,
-                            _ => {}
-                        }
-                        depth == 0
-                    })
-                    .map_or(rest.len(), |(index, _)| index + 1)
-            }
-            _ => rest
-                .find(|character: char| character.is_whitespace() || character == '(')
-                .unwrap_or(rest.len()),
-        };
-        let word = &rest[..end];
-        if clause_words > 0 {
-            character.push(word);
-            clause_words -= 1;
-        } else if word.eq_ignore_ascii_case("CHARACTER") {
-            character.push(word);
-            clause_words = 2;
-        } else if word.eq_ignore_ascii_case("CHARSET") || word.eq_ignore_ascii_case("COLLATE") {
-            character.push(word);
-            clause_words = 1;
-        } else if ATTRIBUTES
-            .iter()
-            .any(|attribute| word.eq_ignore_ascii_case(attribute))
-        {
-            return Some(KeptAttributes {
-                character: character.join(" "),
-                rest: rest.to_string(),
-            });
-        }
-        rest = &rest[end..];
+    /// The table without its schema, which the names derived from it
+    /// (indexes, foreign keys) use.
+    fn table(&self) -> &str {
+        ddl::table_parts(self.database_type, &self.name).1
     }
 }
 
 #[derive(Debug, Clone)]
 enum AlterOperation {
-    AddColumn(ColumnDefinition),
+    AddColumn(ColumnDefinition, Option<ForeignKey>),
     DropColumn(String),
     RenameColumn(String, String),
-    ChangeColumnType(String, ColumnType),
+    ChangeColumn(String, ColumnChange),
+    AddIndex(IndexDefinition),
+    DropIndex(String),
+    AddForeignKey(ForeignKey),
+    DropForeignKey(String),
 }

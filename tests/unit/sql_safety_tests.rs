@@ -132,3 +132,15 @@ fn dollar_quotes_and_bracketed_quotes_cannot_hide_a_comment() {
         validate_raw_sql_fragment("WHERE raw SQL", fragment).expect(fragment);
     }
 }
+
+/// The scan reads the shared lexer's tokens: a number keeps its exponent, so
+/// a keyword it runs into is still a word of its own.
+#[test]
+fn a_keyword_glued_to_a_number_is_still_read() {
+    let error = validate_subquery_sql("SELECT 1e5union SELECT 2").unwrap_err();
+    assert!(error.contains("'union'"), "{error}");
+    validate_having_sql_fragment("HAVING raw SQL", "SUM(price) > 1.5e10 AND COUNT(*) > 1_000")
+        .expect("numbers are no words");
+    let error = validate_having_sql_fragment("HAVING raw SQL", "COUNT(*) > $1").unwrap_err();
+    assert!(error.contains("unexpected character '$'"), "{error}");
+}

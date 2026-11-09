@@ -43,6 +43,81 @@ async fn trash_scope_requires_soft_delete_before_reads_or_writes() {
     );
 }
 
+#[tideorm::model(table = "binned_rows", soft_delete)]
+struct BinnedRow {
+    #[tideorm(primary_key)]
+    id: i64,
+    name: String,
+    deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// The default scope's `deleted_at IS NULL` is no filter of the caller's: a
+/// filter that folds to TRUE beside it still reaches every live row, so a
+/// delete, soft delete, update or restore with it is refused, as it is on a
+/// model without soft delete. Only the caller's own `only_trashed()` lets
+/// `restore()` take the whole trash; an update of the trash still needs a
+/// filter that can exclude a row.
+#[tokio::test]
+async fn filters_folding_to_true_cannot_mutate_a_soft_delete_table() {
+    let db = memory_database(
+        "CREATE TABLE binned_rows(id INTEGER PRIMARY KEY, name TEXT NOT NULL, deleted_at TEXT); \
+         INSERT INTO binned_rows(id, name) VALUES(1, 'a'), (2, 'b'), (3, 'c')",
+    )
+    .await;
+    let rows = || BinnedRow::query_with(&db);
+    for refused in [
+        rows().where_raw("1 = 1").delete().await,
+        rows().where_raw("1 = 1").soft_delete().await,
+        rows()
+            .or_where_eq("id", 1)
+            .or_where_raw("TRUE")
+            .delete()
+            .await,
+        rows()
+            .where_raw("TRUE")
+            .update_all()
+            .set("name", "x")
+            .execute()
+            .await,
+        rows()
+            .or_where_eq("id", 1)
+            .or_where_raw("1 = 1")
+            .update_all()
+            .set("name", "x")
+            .execute()
+            .await,
+        rows().where_raw("1 = 1").force_delete().await,
+    ] {
+        assert!(refused.is_err(), "{refused:?}");
+    }
+    assert_eq!(rows().count().await.unwrap(), 3);
+    assert_eq!(rows().where_eq("name", "x").count().await.unwrap(), 0);
+
+    assert_eq!(rows().where_in("id", vec![1, 2]).delete().await.unwrap(), 2);
+    assert!(rows().where_raw("1 = 1").restore().await.is_err());
+    assert_eq!(rows().count().await.unwrap(), 1);
+    let trash_update = rows()
+        .only_trashed()
+        .where_raw("1 = 1")
+        .update_all()
+        .set("name", "x")
+        .execute()
+        .await;
+    assert!(trash_update.is_err(), "{trash_update:?}");
+    assert_eq!(
+        rows()
+            .only_trashed()
+            .where_eq("name", "x")
+            .count()
+            .await
+            .unwrap(),
+        0
+    );
+    let restored = rows().only_trashed().where_raw("1 = 1").restore().await;
+    assert_eq!(restored.unwrap(), 2);
+    assert_eq!(rows().count().await.unwrap(), 3);
+}
+
 #[tideorm::model(table = "resume_names")]
 struct NameRow {
     #[tideorm(primary_key)]
@@ -327,19 +402,11 @@ async fn vacuous_filters_neither_license_mutations_nor_empty_queries() {
     );
 
     let rows = AuditRow::query_with(&db)
-        .or_where(|group| group.nested_or(|inner| inner.nested_and(|deepest| deepest)))
+        .where_any(|group| group.nested_or(|inner| inner.nested_and(|deepest| deepest)))
         .get()
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
-
-    let error = AuditRow::query_with(&db)
-        .where_eq("amount", i128::MAX)
-        .get()
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("cannot be bound"), "{error}");
 }
 
 /// Columns named like those of SQLite's `json_each`, whose rows the JSON
@@ -404,4 +471,38 @@ async fn json_subqueries_do_not_capture_outer_column_names() {
             "{column}"
         );
     }
+}
+
+/// SQLite runs the normalized-digit comparison a JSON number takes, so `10.0`
+/// finds a stored `10` and `100000` a stored `1e5`, and neither an array.
+#[tokio::test]
+async fn sqlite_json_numbers_compare_by_value() {
+    #[tideorm::model(table = "json_numbers")]
+    struct JsonNumber {
+        #[tideorm(primary_key)]
+        id: i64,
+        doc: Option<serde_json::Value>,
+    }
+    let db = memory_database(
+        // `TEXT`: a column declared `JSON` has numeric affinity and would
+        // store `'10'` as an integer.
+        "CREATE TABLE json_numbers(id INTEGER PRIMARY KEY, doc TEXT);
+         INSERT INTO json_numbers VALUES (1, '10'), (2, '1e5'), (3, '[10]')",
+    )
+    .await;
+    let ids = |value: serde_json::Value| {
+        let db = db.clone();
+        async move {
+            JsonNumber::query_with(&db)
+                .where_eq("doc", value)
+                .get()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>()
+        }
+    };
+    assert_eq!(ids(serde_json::json!(10.0)).await, [1]);
+    assert_eq!(ids(serde_json::json!(100000)).await, [2]);
 }

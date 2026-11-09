@@ -15,8 +15,7 @@ fn bench_index_generation(c: &mut Criterion) {
     group.bench_function("postgres_single_column", |b| {
         b.iter(|| {
             let index =
-                FullTextIndex::new("idx_articles_title", "articles", vec!["title".to_string()])
-                    .language("english");
+                FullTextIndex::new("idx_articles_title", "articles", ["title"]).language("english");
             index.to_postgres_sql()
         })
     });
@@ -40,9 +39,8 @@ fn bench_index_generation(c: &mut Criterion) {
 
     group.bench_function("postgres_gist_index", |b| {
         b.iter(|| {
-            let index =
-                FullTextIndex::new("idx_documents_body", "documents", vec!["body".to_string()])
-                    .pg_index_type(PgFullTextIndexType::GiST);
+            let index = FullTextIndex::new("idx_documents_body", "documents", ["body"])
+                .pg_index_type(PgFullTextIndexType::GiST);
             index.to_postgres_sql()
         })
     });
@@ -50,8 +48,7 @@ fn bench_index_generation(c: &mut Criterion) {
     // MySQL index generation
     group.bench_function("mysql_single_column", |b| {
         b.iter(|| {
-            let index =
-                FullTextIndex::new("idx_articles_title", "articles", vec!["title".to_string()]);
+            let index = FullTextIndex::new("idx_articles_title", "articles", ["title"]);
             index.to_mysql_sql()
         })
     });
@@ -74,8 +71,7 @@ fn bench_index_generation(c: &mut Criterion) {
     // SQLite FTS5 generation
     group.bench_function("sqlite_fts5_single", |b| {
         b.iter(|| {
-            let index =
-                FullTextIndex::new("idx_articles_title", "articles", vec!["title".to_string()]);
+            let index = FullTextIndex::new("idx_articles_title", "articles", ["title"]);
             index.to_sqlite_sql()
         })
     });
@@ -97,20 +93,17 @@ fn bench_index_generation(c: &mut Criterion) {
 
     // Generic to_sql with different database types
     group.bench_function("to_sql_postgres", |b| {
-        let index =
-            FullTextIndex::new("idx", "table", vec!["col1".to_string(), "col2".to_string()]);
+        let index = FullTextIndex::new("idx", "table", ["col1", "col2"]);
         b.iter(|| index.to_sql(DatabaseType::Postgres))
     });
 
     group.bench_function("to_sql_mysql", |b| {
-        let index =
-            FullTextIndex::new("idx", "table", vec!["col1".to_string(), "col2".to_string()]);
+        let index = FullTextIndex::new("idx", "table", ["col1", "col2"]);
         b.iter(|| index.to_sql(DatabaseType::MySQL))
     });
 
     group.bench_function("to_sql_sqlite", |b| {
-        let index =
-            FullTextIndex::new("idx", "table", vec!["col1".to_string(), "col2".to_string()]);
+        let index = FullTextIndex::new("idx", "table", ["col1", "col2"]);
         b.iter(|| index.to_sql(DatabaseType::SQLite))
     });
 

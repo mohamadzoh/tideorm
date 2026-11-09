@@ -100,24 +100,22 @@ async fn writes_and_commits_preserve_an_unrelated_databases_cache() {
     qb.clone().get().await.unwrap();
     let writer = a.clone();
     let reader = a.clone();
-    a.transaction(move |_| {
-        Box::pin(async move {
-            writer
-                .exec_raw("UPDATE review_users SET name = 'new' WHERE id = 1")
-                .await?;
-            // Another connection can cache the pre-commit row. Commit must evict
-            // it again without evicting B.
-            let before = tokio::spawn(async move {
-                User::query_with(&reader)
-                    .cache(Duration::from_secs(60))
-                    .get()
-                    .await
-            })
-            .await
-            .unwrap()?;
-            assert_eq!(before[0].name, "old");
-            Ok(())
+    a.transaction(async move |_| {
+        writer
+            .exec_raw("UPDATE review_users SET name = 'new' WHERE id = 1")
+            .await?;
+        // Another connection can cache the pre-commit row. Commit must evict
+        // it again without evicting B.
+        let before = tokio::spawn(async move {
+            User::query_with(&reader)
+                .cache(Duration::from_secs(60))
+                .get()
+                .await
         })
+        .await
+        .unwrap()?;
+        assert_eq!(before[0].name, "old");
+        Ok(())
     })
     .await
     .unwrap();
@@ -134,6 +132,27 @@ async fn writes_and_commits_preserve_an_unrelated_databases_cache() {
         1,
         "failed writes stay in their database too"
     );
+}
+
+/// A write run on a transaction's own handle, which TideORM does not see,
+/// still drops the database's cached reads when the transaction commits.
+#[tokio::test]
+async fn a_write_on_the_transactions_own_handle_drops_cached_reads() {
+    use tideorm::orm::ConnectionTrait;
+    let (db, _file) = file_database("raw-handle").await;
+    db.exec_raw(OLD_USER).await.unwrap();
+    let _cache = crate::fixtures::global_cache();
+    let query = User::query_with(&db).cache(Duration::from_secs(60));
+    assert_eq!(query.clone().get().await.unwrap()[0].name, "old");
+    db.transaction(async move |tx| {
+        tx.connection()
+            .execute_unprepared("UPDATE review_users SET name = 'new' WHERE id = 1")
+            .await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(query.get().await.unwrap()[0].name, "new");
 }
 
 #[tokio::test]
@@ -245,6 +264,32 @@ async fn cache_hits_do_not_replace_another_pools_baseline() {
     Database::reset_global();
 }
 
+/// The rows a returning update writes through one pool's handle are
+/// remembered as that pool's, never as the ambient database's.
+#[cfg(feature = "dirty-tracking")]
+#[tokio::test]
+async fn returning_updates_keep_the_rows_baselines_to_their_pool() {
+    let tenant = users_and_posts("tenant", 10).await;
+    let global = users_and_posts("global", 20).await;
+    Database::set_global(global.clone()).unwrap();
+    let user = User::query_with(&global).first_or_fail().await.unwrap();
+    assert_eq!(
+        user.original_value("name").unwrap(),
+        Some(Some(DbValue::from("global")))
+    );
+    let written = User::query_with(&tenant)
+        .where_eq("id", 1)
+        .update_all()
+        .set("name", "renamed")
+        .execute_returning()
+        .await
+        .unwrap();
+    assert_eq!(written[0].name, "renamed");
+    // The pools now differ for the key, which leaves it ambiguous.
+    assert_eq!(user.original_value("name").unwrap(), None);
+    Database::reset_global();
+}
+
 /// A write run on database A from inside B's transaction, itself inside A's,
 /// is A's transaction's to replay when it commits: a read another connection
 /// cached while A was still open is dropped then, not served stale.
@@ -264,22 +309,18 @@ async fn a_write_is_replayed_by_the_transaction_it_ran_in() {
 
     let (writer, reader) = (a.clone(), a.clone());
     let result: tideorm::Result<()> = a
-        .transaction(move |_| {
-            Box::pin(async move {
-                b.transaction(move |_| {
-                    Box::pin(async move {
-                        writer
-                            .exec_raw("UPDATE review_users SET name = 'new' WHERE id = 1")
-                            .await?;
-                        Ok(())
-                    })
-                })
-                .await?;
-                // Another connection still reads the row A has not committed.
-                let seen = tokio::spawn(read(reader)).await.unwrap()?;
-                assert_eq!(seen, "old");
+        .transaction(async move |_| {
+            b.transaction(async move |_| {
+                writer
+                    .exec_raw("UPDATE review_users SET name = 'new' WHERE id = 1")
+                    .await?;
                 Ok(())
             })
+            .await?;
+            // Another connection still reads the row A has not committed.
+            let seen = tokio::spawn(read(reader)).await.unwrap()?;
+            assert_eq!(seen, "old");
+            Ok(())
         })
         .await;
     result.unwrap();
@@ -307,26 +348,24 @@ async fn a_failed_commit_replays_what_the_transaction_invalidated() {
 
     let (writer, reader) = (db.clone(), db.clone());
     let result: tideorm::Result<()> = db
-        .transaction(move |_| {
-            Box::pin(async move {
-                writer
-                    .exec_raw("UPDATE review_users SET name = 'new' WHERE id = 1")
-                    .await?;
-                // Checked when the transaction commits, which then fails.
-                writer
-                    .exec_raw("INSERT INTO review_posts VALUES (1, 'orphan', 99)")
-                    .await?;
-                let cached = tokio::spawn(async move {
-                    User::query_with(&reader)
-                        .cache(Duration::from_secs(60))
-                        .get()
-                        .await
-                })
-                .await
-                .unwrap()?;
-                assert_eq!(cached[0].name, "old");
-                Ok(())
+        .transaction(async move |_| {
+            writer
+                .exec_raw("UPDATE review_users SET name = 'new' WHERE id = 1")
+                .await?;
+            // Checked when the transaction commits, which then fails.
+            writer
+                .exec_raw("INSERT INTO review_posts VALUES (1, 'orphan', 99)")
+                .await?;
+            let cached = tokio::spawn(async move {
+                User::query_with(&reader)
+                    .cache(Duration::from_secs(60))
+                    .get()
+                    .await
             })
+            .await
+            .unwrap()?;
+            assert_eq!(cached[0].name, "old");
+            Ok(())
         })
         .await;
     let entries = cache.stats().entries;
@@ -488,25 +527,23 @@ async fn failed_writes_invalidate_trigger_side_effects() {
         );
     }
     let before = audit().first_or_fail().await.unwrap().updates;
-    db.transaction(|_| {
-        Box::pin(async {
-            assert!(
-                CascadeParent::query()
-                    .where_eq("id", 1)
-                    .delete()
-                    .await
-                    .is_err()
-            );
-            // Stands in for another connection caching what it read after the
-            // write's own invalidation: the commit must evict it again.
-            QueryCache::global().set(
-                "review_failed_write_commit",
-                &1,
-                None,
-                "review_cascade_audit",
-            )?;
-            Ok(())
-        })
+    db.transaction(async |_| {
+        assert!(
+            CascadeParent::query()
+                .where_eq("id", 1)
+                .delete()
+                .await
+                .is_err()
+        );
+        // Stands in for another connection caching what it read after the
+        // write's own invalidation: the commit must evict it again.
+        QueryCache::global().set(
+            "review_failed_write_commit",
+            &1,
+            None,
+            "review_cascade_audit",
+        )?;
+        Ok(())
     })
     .await
     .unwrap();
@@ -534,7 +571,7 @@ async fn failed_pivot_insert_invalidates_trigger_side_effects() {
         "id",
         "review_failed_pivot",
     )
-    .with_parent_pk(json!(1));
+    .with_parent_pk(1, false);
     let _cache = crate::fixtures::global_cache();
     let audit = || CascadeAudit::query().cache(Duration::from_secs(60));
     for action in ["FAIL, 'refused'", "IGNORE"] {
@@ -574,19 +611,17 @@ async fn database_side_writes_invalidate_all_cached_tables_and_replay_on_commit(
     parent.update().await.unwrap();
     assert_eq!(children().first_or_fail().await.unwrap().parent_code, 20);
     assert_eq!(audit().first_or_fail().await.unwrap().updates, 1);
-    db.transaction(|_| {
-        Box::pin(async {
-            CascadeParent::query()
-                .where_eq("id", 1)
-                .update_all()
-                .set("code", 30)
-                .execute()
-                .await?;
-            // Stands in for another connection caching what it read after the
-            // write's own invalidation: the commit must evict it again.
-            QueryCache::global().set("review_before_commit", &1, None, "review_cascade_child")?;
-            Ok(())
-        })
+    db.transaction(async |_| {
+        CascadeParent::query()
+            .where_eq("id", 1)
+            .update_all()
+            .set("code", 30)
+            .execute()
+            .await?;
+        // Stands in for another connection caching what it read after the
+        // write's own invalidation: the commit must evict it again.
+        QueryCache::global().set("review_before_commit", &1, None, "review_cascade_child")?;
+        Ok(())
     })
     .await
     .unwrap();
@@ -594,11 +629,9 @@ async fn database_side_writes_invalidate_all_cached_tables_and_replay_on_commit(
     assert_eq!(children().first_or_fail().await.unwrap().parent_code, 30);
     assert_eq!(audit().first_or_fail().await.unwrap().updates, 2);
     let rolled_back: tideorm::Result<()> = db
-        .transaction(|_| {
-            Box::pin(async {
-                CascadeParent::query().where_eq("id", 1).delete().await?;
-                Err(tideorm::Error::query("rollback"))
-            })
+        .transaction(async |_| {
+            CascadeParent::query().where_eq("id", 1).delete().await?;
+            Err(tideorm::Error::query("rollback"))
         })
         .await;
     assert!(rolled_back.is_err());
@@ -622,7 +655,7 @@ async fn database_side_writes_invalidate_all_cached_tables_and_replay_on_commit(
     .await
     .unwrap();
     assert_eq!(children().get().await.unwrap().len(), 1);
-    db.transaction(|_| Box::pin(async { CascadeParent::query().where_eq("id", 2).delete().await }))
+    db.transaction(async |_| CascadeParent::query().where_eq("id", 2).delete().await)
         .await
         .unwrap();
     assert!(children().get().await.unwrap().is_empty());

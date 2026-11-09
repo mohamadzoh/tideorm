@@ -1,5 +1,711 @@
-error: unsupported TideORM column type 'Status': a model field can be bool, i8-i64, u8-u64, f32, f64, String, Text, Uuid, Decimal, DateTime<Utc>, NaiveDateTime, NaiveDate, NaiveTime, Json (serde_json::Value), Vec<u8>, a PostgreSQL array (Vec<i32>, Vec<i64>, Vec<f64>, Vec<bool>, Vec<String>, Vec<Json>), or an Option of one. Store an enum as a String, and mark a field that is not a column #[tideorm(skip)]
+error[E0277]: `Status` is not a type a column can hold
   --> tests/ui/invalid_field_type.rs:12:13
    |
 12 |     status: Status,
-   |             ^^^^^^
+   |             ^^^^^^ not a column type
+   |
+help: the trait `tideorm::orm::sql_builder::ValueType` is not implemented for `Status`
+  --> tests/ui/invalid_field_type.rs:2:1
+   |
+ 2 | enum Status {
+   | ^^^^^^^^^^^
+   = note: a column's type implements `ValueType`: derive `DeriveValueType` for a newtype or `DeriveActiveEnum` for an enum, or store the value as a `String`
+   = help: the following other types implement trait `tideorm::orm::sql_builder::ValueType`:
+             Cow<'_, str>
+             JsonValue
+             NaiveDate
+             NaiveDateTime
+             NaiveTime
+             Vec<T>
+             Vec<std::option::Option<T>>
+             Vec<u8>
+           and $N others
+note: required by a bound in `tideorm::model::__ColumnType`
+  --> src/model/mod.rs
+   |
+   | pub struct __ColumnType<T: crate::orm::sql_builder::ValueType>(std::marker::PhantomData<T>);
+   |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `__ColumnType`
+
+error[E0277]: the trait bound `tideorm::orm::entity::Value: From<Status>` is not satisfied
+ --> tests/ui/invalid_field_type.rs:8:1
+  |
+8 | #[tideorm::model(table = "orders")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `From<Status>` is not implemented for `tideorm::orm::entity::Value`
+  |
+  = help: `tideorm::orm::entity::Value` implements trait `From<T>`:
+            From<&JsonValue>
+            From<&NaiveDate>
+            From<&NaiveDateTime>
+            From<&NaiveTime>
+            From<&Vec<u8>>
+            From<&[u8]>
+            From<&bool>
+            From<&char>
+            From<&f32>
+            From<&f64>
+            From<&i16>
+            From<&i32>
+            From<&i64>
+            From<&i8>
+            From<&std::string::String>
+            From<&str>
+            From<&tideorm::DateTime<FixedOffset>>
+            From<&tideorm::DateTime<Local>>
+            From<&tideorm::DateTime<Utc>>
+            From<&tideorm::Decimal>
+            From<&tideorm::Uuid>
+            From<&u16>
+            From<&u32>
+            From<&u64>
+            From<&u8>
+            From<Cow<'_, str>>
+            From<JsonValue>
+            From<NaiveDate>
+            From<NaiveDateTime>
+            From<NaiveTime>
+            From<Vec<T>>
+            From<Vec<u8>>
+            From<bool>
+            From<char>
+            From<f32>
+            From<f64>
+            From<i16>
+            From<i32>
+            From<i64>
+            From<i8>
+            From<std::option::Option<T>>
+            From<std::string::String>
+            From<tideorm::DateTime<FixedOffset>>
+            From<tideorm::DateTime<Local>>
+            From<tideorm::DateTime<Utc>>
+            From<tideorm::Decimal>
+            From<tideorm::Uuid>
+            From<tideorm::internal::driver::types::uuid::fmt::Braced>
+            From<tideorm::internal::driver::types::uuid::fmt::Hyphenated>
+            From<tideorm::internal::driver::types::uuid::fmt::Simple>
+            From<tideorm::internal::driver::types::uuid::fmt::Urn>
+            From<tideorm::orm::entity::prelude::ChronoUnixTimestamp>
+            From<tideorm::orm::entity::prelude::ChronoUnixTimestampMillis>
+            From<tideorm::orm::sql_builder::Enum>
+            From<u16>
+            From<u32>
+            From<u64>
+            From<u8>
+  = note: required for `Status` to implement `Into<tideorm::orm::entity::Value>`
+note: required by a bound in `tideorm::orm::entity::ActiveValue`
+ --> $CARGO/tideorm-engine-$VERSION/src/entity/active_value.rs
+  |
+  | pub enum ActiveValue<V>
+  |          ----------- required by a bound in this enum
+  | where
+  |     V: Into<Value>,
+  |        ^^^^^^^^^^^ required by this bound in `ActiveValue`
+  = note: this error originates in the derive macro `tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `Status` is not a type a column can hold
+  --> tests/ui/invalid_field_type.rs:12:13
+   |
+12 |     status: Status,
+   |             ^^^^^^ not a column type
+   |
+help: the trait `tideorm::orm::sql_builder::ValueType` is not implemented for `Status`
+  --> tests/ui/invalid_field_type.rs:2:1
+   |
+ 2 | enum Status {
+   | ^^^^^^^^^^^
+   = note: a column's type implements `ValueType`: derive `DeriveValueType` for a newtype or `DeriveActiveEnum` for an enum, or store the value as a `String`
+   = help: the following other types implement trait `tideorm::orm::sql_builder::ValueType`:
+             Cow<'_, str>
+             JsonValue
+             NaiveDate
+             NaiveDateTime
+             NaiveTime
+             Vec<T>
+             Vec<std::option::Option<T>>
+             Vec<u8>
+           and $N others
+
+error[E0277]: the trait bound `tideorm::orm::entity::Value: From<Status>` is not satisfied
+ --> tests/ui/invalid_field_type.rs:8:1
+  |
+8 | #[tideorm::model(table = "orders")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `From<Status>` is not implemented for `tideorm::orm::entity::Value`
+  |
+  = help: `tideorm::orm::entity::Value` implements trait `From<T>`:
+            From<&JsonValue>
+            From<&NaiveDate>
+            From<&NaiveDateTime>
+            From<&NaiveTime>
+            From<&Vec<u8>>
+            From<&[u8]>
+            From<&bool>
+            From<&char>
+            From<&f32>
+            From<&f64>
+            From<&i16>
+            From<&i32>
+            From<&i64>
+            From<&i8>
+            From<&std::string::String>
+            From<&str>
+            From<&tideorm::DateTime<FixedOffset>>
+            From<&tideorm::DateTime<Local>>
+            From<&tideorm::DateTime<Utc>>
+            From<&tideorm::Decimal>
+            From<&tideorm::Uuid>
+            From<&u16>
+            From<&u32>
+            From<&u64>
+            From<&u8>
+            From<Cow<'_, str>>
+            From<JsonValue>
+            From<NaiveDate>
+            From<NaiveDateTime>
+            From<NaiveTime>
+            From<Vec<T>>
+            From<Vec<u8>>
+            From<bool>
+            From<char>
+            From<f32>
+            From<f64>
+            From<i16>
+            From<i32>
+            From<i64>
+            From<i8>
+            From<std::option::Option<T>>
+            From<std::string::String>
+            From<tideorm::DateTime<FixedOffset>>
+            From<tideorm::DateTime<Local>>
+            From<tideorm::DateTime<Utc>>
+            From<tideorm::Decimal>
+            From<tideorm::Uuid>
+            From<tideorm::internal::driver::types::uuid::fmt::Braced>
+            From<tideorm::internal::driver::types::uuid::fmt::Hyphenated>
+            From<tideorm::internal::driver::types::uuid::fmt::Simple>
+            From<tideorm::internal::driver::types::uuid::fmt::Urn>
+            From<tideorm::orm::entity::prelude::ChronoUnixTimestamp>
+            From<tideorm::orm::entity::prelude::ChronoUnixTimestampMillis>
+            From<tideorm::orm::sql_builder::Enum>
+            From<u16>
+            From<u32>
+            From<u64>
+            From<u8>
+  = note: required for `Status` to implement `Into<tideorm::orm::entity::Value>`
+note: required by a bound in `tideorm::orm::entity::ActiveValue`
+ --> $CARGO/tideorm-engine-$VERSION/src/entity/active_value.rs
+  |
+  | pub enum ActiveValue<V>
+  |          ----------- required by a bound in this enum
+  | where
+  |     V: Into<Value>,
+  |        ^^^^^^^^^^^ required by this bound in `ActiveValue`
+
+error[E0277]: the trait bound `tideorm::orm::entity::Value: From<Status>` is not satisfied
+ --> tests/ui/invalid_field_type.rs:8:1
+  |
+8 | #[tideorm::model(table = "orders")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `From<Status>` is not implemented for `tideorm::orm::entity::Value`
+  |
+  = help: `tideorm::orm::entity::Value` implements trait `From<T>`:
+            From<&JsonValue>
+            From<&NaiveDate>
+            From<&NaiveDateTime>
+            From<&NaiveTime>
+            From<&Vec<u8>>
+            From<&[u8]>
+            From<&bool>
+            From<&char>
+            From<&f32>
+            From<&f64>
+            From<&i16>
+            From<&i32>
+            From<&i64>
+            From<&i8>
+            From<&std::string::String>
+            From<&str>
+            From<&tideorm::DateTime<FixedOffset>>
+            From<&tideorm::DateTime<Local>>
+            From<&tideorm::DateTime<Utc>>
+            From<&tideorm::Decimal>
+            From<&tideorm::Uuid>
+            From<&u16>
+            From<&u32>
+            From<&u64>
+            From<&u8>
+            From<Cow<'_, str>>
+            From<JsonValue>
+            From<NaiveDate>
+            From<NaiveDateTime>
+            From<NaiveTime>
+            From<Vec<T>>
+            From<Vec<u8>>
+            From<bool>
+            From<char>
+            From<f32>
+            From<f64>
+            From<i16>
+            From<i32>
+            From<i64>
+            From<i8>
+            From<std::option::Option<T>>
+            From<std::string::String>
+            From<tideorm::DateTime<FixedOffset>>
+            From<tideorm::DateTime<Local>>
+            From<tideorm::DateTime<Utc>>
+            From<tideorm::Decimal>
+            From<tideorm::Uuid>
+            From<tideorm::internal::driver::types::uuid::fmt::Braced>
+            From<tideorm::internal::driver::types::uuid::fmt::Hyphenated>
+            From<tideorm::internal::driver::types::uuid::fmt::Simple>
+            From<tideorm::internal::driver::types::uuid::fmt::Urn>
+            From<tideorm::orm::entity::prelude::ChronoUnixTimestamp>
+            From<tideorm::orm::entity::prelude::ChronoUnixTimestampMillis>
+            From<tideorm::orm::sql_builder::Enum>
+            From<u16>
+            From<u32>
+            From<u64>
+            From<u8>
+  = note: required for `Status` to implement `Into<tideorm::orm::entity::Value>`
+  = note: required for `tideorm::orm::entity::ActiveValue<Status>` to implement `std::fmt::Debug`
+  = note: 1 redundant requirement hidden
+  = note: required for `&tideorm::orm::entity::ActiveValue<Status>` to implement `std::fmt::Debug`
+  = note: required for the cast from `&&tideorm::orm::entity::ActiveValue<Status>` to `&dyn std::fmt::Debug`
+
+error[E0369]: binary operation `==` cannot be applied to type `tideorm::orm::entity::ActiveValue<Status>`
+ --> tests/ui/invalid_field_type.rs:8:1
+  |
+8 | #[tideorm::model(table = "orders")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+note: `tideorm::orm::entity::Value` does not implement `From<Status>`
+ --> $CARGO/tideorm-sql-builder-$VERSION/src/value.rs
+  |
+  | pub enum Value {
+  | ^^^^^^^^^^^^^^ `tideorm::orm::entity::Value` is defined in another crate
+
+error[E0277]: the trait bound `Status: tideorm::internal::TryGetable` is not satisfied
+  --> tests/ui/invalid_field_type.rs:12:13
+   |
+12 |     status: Status,
+   |             ^^^^^^ unsatisfied trait bound
+   |
+help: the trait `tideorm::orm::TryGetableFromJson` is not implemented for `Status`
+  --> tests/ui/invalid_field_type.rs:2:1
+   |
+ 2 | enum Status {
+   | ^^^^^^^^^^^
+help: the following other types implement trait `tideorm::orm::TryGetableFromJson`
+  --> $CARGO/tideorm-engine-$VERSION/src/executor/query/traits.rs
+   |
+   | / impl<K, V> TryGetableFromJson for HashMap<K, V>
+   | | where
+   | |     K: DeserializeOwned + Eq + Hash,
+   | |     V: DeserializeOwned,
+   | |________________________^ `HashMap<K, V>`
+...
+   | / impl<K, V> TryGetableFromJson for BTreeMap<K, V>
+   | | where
+   | |     K: DeserializeOwned + Ord,
+   | |     V: DeserializeOwned,
+   | |________________________^ `BTreeMap<K, V>`
+   = note: required for `Status` to implement `tideorm::internal::TryGetable`
+note: required by a bound in `tideorm::orm::__read_model_field`
+  --> $CARGO/tideorm-engine-$VERSION/src/executor/query.rs
+   |
+   | pub fn __read_model_field<T: TryGetable>(
+   |                              ^^^^^^^^^^ required by this bound in `__read_model_field`
+
+error[E0277]: the trait bound `tideorm::orm::entity::Value: From<Status>` is not satisfied
+ --> tests/ui/invalid_field_type.rs:8:1
+  |
+8 | #[tideorm::model(table = "orders")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `From<Status>` is not implemented for `tideorm::orm::entity::Value`
+  |
+  = help: `tideorm::orm::entity::Value` implements trait `From<T>`:
+            From<&JsonValue>
+            From<&NaiveDate>
+            From<&NaiveDateTime>
+            From<&NaiveTime>
+            From<&Vec<u8>>
+            From<&[u8]>
+            From<&bool>
+            From<&char>
+            From<&f32>
+            From<&f64>
+            From<&i16>
+            From<&i32>
+            From<&i64>
+            From<&i8>
+            From<&std::string::String>
+            From<&str>
+            From<&tideorm::DateTime<FixedOffset>>
+            From<&tideorm::DateTime<Local>>
+            From<&tideorm::DateTime<Utc>>
+            From<&tideorm::Decimal>
+            From<&tideorm::Uuid>
+            From<&u16>
+            From<&u32>
+            From<&u64>
+            From<&u8>
+            From<Cow<'_, str>>
+            From<JsonValue>
+            From<NaiveDate>
+            From<NaiveDateTime>
+            From<NaiveTime>
+            From<Vec<T>>
+            From<Vec<u8>>
+            From<bool>
+            From<char>
+            From<f32>
+            From<f64>
+            From<i16>
+            From<i32>
+            From<i64>
+            From<i8>
+            From<std::option::Option<T>>
+            From<std::string::String>
+            From<tideorm::DateTime<FixedOffset>>
+            From<tideorm::DateTime<Local>>
+            From<tideorm::DateTime<Utc>>
+            From<tideorm::Decimal>
+            From<tideorm::Uuid>
+            From<tideorm::internal::driver::types::uuid::fmt::Braced>
+            From<tideorm::internal::driver::types::uuid::fmt::Hyphenated>
+            From<tideorm::internal::driver::types::uuid::fmt::Simple>
+            From<tideorm::internal::driver::types::uuid::fmt::Urn>
+            From<tideorm::orm::entity::prelude::ChronoUnixTimestamp>
+            From<tideorm::orm::entity::prelude::ChronoUnixTimestampMillis>
+            From<tideorm::orm::sql_builder::Enum>
+            From<u16>
+            From<u32>
+            From<u64>
+            From<u8>
+  = note: required for `Status` to implement `Into<tideorm::orm::entity::Value>`
+  = note: this error originates in the derive macro `tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `Status` is not a type a column can hold
+ --> tests/ui/invalid_field_type.rs:8:1
+  |
+8 | #[tideorm::model(table = "orders")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not a column type
+  |
+help: the trait `tideorm::orm::sql_builder::ValueType` is not implemented for `Status`
+ --> tests/ui/invalid_field_type.rs:2:1
+  |
+2 | enum Status {
+  | ^^^^^^^^^^^
+  = note: a column's type implements `ValueType`: derive `DeriveValueType` for a newtype or `DeriveActiveEnum` for an enum, or store the value as a `String`
+  = help: the following other types implement trait `tideorm::orm::sql_builder::ValueType`:
+            Cow<'_, str>
+            JsonValue
+            NaiveDate
+            NaiveDateTime
+            NaiveTime
+            Vec<T>
+            Vec<std::option::Option<T>>
+            Vec<u8>
+          and $N others
+  = note: this error originates in the derive macro `tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: the method `into_wrapped_value` exists for enum `tideorm::orm::entity::ActiveValue<Status>`, but its trait bounds were not satisfied
+ --> tests/ui/invalid_field_type.rs:8:1
+  |
+2 | enum Status {
+  | ----------- doesn't satisfy `Status: Into<tideorm::orm::entity::Value>`
+...
+8 | #[tideorm::model(table = "orders")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method cannot be called on `tideorm::orm::entity::ActiveValue<Status>` due to unsatisfied trait bounds
+  |
+ ::: $CARGO/tideorm-sql-builder-$VERSION/src/value.rs
+  |
+  | pub enum Value {
+  | -------------- doesn't satisfy `tideorm::orm::entity::Value: From<Status>`
+  |
+  = note: the following trait bounds were not satisfied:
+          `tideorm::orm::entity::Value: From<Status>`
+          which is required by `Status: Into<tideorm::orm::entity::Value>`
+  = note: this error originates in the derive macro `tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: the method `clone` exists for enum `tideorm::orm::entity::ActiveValue<Status>`, but its trait bounds were not satisfied
+ --> tests/ui/invalid_field_type.rs:8:1
+  |
+2 | enum Status {
+  | ----------- doesn't satisfy `Status: Into<tideorm::orm::entity::Value>`
+...
+8 | #[tideorm::model(table = "orders")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method cannot be called on `tideorm::orm::entity::ActiveValue<Status>` due to unsatisfied trait bounds
+  |
+ ::: $CARGO/tideorm-engine-$VERSION/src/entity/active_value.rs
+  |
+  | pub enum ActiveValue<V>
+  | ----------------------- doesn't satisfy `tideorm::orm::entity::ActiveValue<Status>: Clone`
+  |
+  = note: the following trait bounds were not satisfied:
+          `Status: Into<tideorm::orm::entity::Value>`
+          which is required by `tideorm::orm::entity::ActiveValue<Status>: Clone`
+note: the trait `Into` must be implemented
+ --> $RUST/core/src/convert/mod.rs
+  = note: this error originates in the derive macro `tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: the method `set_if_not_equals` exists for enum `tideorm::orm::entity::ActiveValue<Status>`, but its trait bounds were not satisfied
+ --> tests/ui/invalid_field_type.rs:8:1
+  |
+2 | enum Status {
+  | ----------- doesn't satisfy `Status: Into<tideorm::orm::entity::Value>`
+...
+8 | #[tideorm::model(table = "orders")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method cannot be called on `tideorm::orm::entity::ActiveValue<Status>` due to unsatisfied trait bounds
+  |
+ ::: $CARGO/tideorm-sql-builder-$VERSION/src/value.rs
+  |
+  | pub enum Value {
+  | -------------- doesn't satisfy `tideorm::orm::entity::Value: From<Status>`
+  |
+  = note: the following trait bounds were not satisfied:
+          `tideorm::orm::entity::Value: From<Status>`
+          which is required by `Status: Into<tideorm::orm::entity::Value>`
+  = note: this error originates in the derive macro `tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `tideorm::orm::entity::Value: From<Status>` is not satisfied
+ --> tests/ui/invalid_field_type.rs:8:1
+  |
+8 | #[tideorm::model(table = "orders")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `From<Status>` is not implemented for `tideorm::orm::entity::Value`
+  |
+  = help: `tideorm::orm::entity::Value` implements trait `From<T>`:
+            From<&JsonValue>
+            From<&NaiveDate>
+            From<&NaiveDateTime>
+            From<&NaiveTime>
+            From<&Vec<u8>>
+            From<&[u8]>
+            From<&bool>
+            From<&char>
+            From<&f32>
+            From<&f64>
+            From<&i16>
+            From<&i32>
+            From<&i64>
+            From<&i8>
+            From<&std::string::String>
+            From<&str>
+            From<&tideorm::DateTime<FixedOffset>>
+            From<&tideorm::DateTime<Local>>
+            From<&tideorm::DateTime<Utc>>
+            From<&tideorm::Decimal>
+            From<&tideorm::Uuid>
+            From<&u16>
+            From<&u32>
+            From<&u64>
+            From<&u8>
+            From<Cow<'_, str>>
+            From<JsonValue>
+            From<NaiveDate>
+            From<NaiveDateTime>
+            From<NaiveTime>
+            From<Vec<T>>
+            From<Vec<u8>>
+            From<bool>
+            From<char>
+            From<f32>
+            From<f64>
+            From<i16>
+            From<i32>
+            From<i64>
+            From<i8>
+            From<std::option::Option<T>>
+            From<std::string::String>
+            From<tideorm::DateTime<FixedOffset>>
+            From<tideorm::DateTime<Local>>
+            From<tideorm::DateTime<Utc>>
+            From<tideorm::Decimal>
+            From<tideorm::Uuid>
+            From<tideorm::internal::driver::types::uuid::fmt::Braced>
+            From<tideorm::internal::driver::types::uuid::fmt::Hyphenated>
+            From<tideorm::internal::driver::types::uuid::fmt::Simple>
+            From<tideorm::internal::driver::types::uuid::fmt::Urn>
+            From<tideorm::orm::entity::prelude::ChronoUnixTimestamp>
+            From<tideorm::orm::entity::prelude::ChronoUnixTimestampMillis>
+            From<tideorm::orm::sql_builder::Enum>
+            From<u16>
+            From<u32>
+            From<u64>
+            From<u8>
+  = note: required for `Status` to implement `Into<tideorm::orm::entity::Value>`
+note: required by a bound in `tideorm::orm::entity::ActiveValue::Set`
+ --> $CARGO/tideorm-engine-$VERSION/src/entity/active_value.rs
+  |
+  |     V: Into<Value>,
+  |        ^^^^^^^^^^^ required by this bound in `tideorm::orm::entity::ActiveValue::Set`
+...
+  |     Set(V),
+  |     --- required by a bound in this tuple variant
+  = note: this error originates in the derive macro `tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `tideorm::orm::entity::Value: From<Status>` is not satisfied
+ --> tests/ui/invalid_field_type.rs:8:1
+  |
+8 | #[tideorm::model(table = "orders")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `From<Status>` is not implemented for `tideorm::orm::entity::Value`
+  |
+  = help: `tideorm::orm::entity::Value` implements trait `From<T>`:
+            From<&JsonValue>
+            From<&NaiveDate>
+            From<&NaiveDateTime>
+            From<&NaiveTime>
+            From<&Vec<u8>>
+            From<&[u8]>
+            From<&bool>
+            From<&char>
+            From<&f32>
+            From<&f64>
+            From<&i16>
+            From<&i32>
+            From<&i64>
+            From<&i8>
+            From<&std::string::String>
+            From<&str>
+            From<&tideorm::DateTime<FixedOffset>>
+            From<&tideorm::DateTime<Local>>
+            From<&tideorm::DateTime<Utc>>
+            From<&tideorm::Decimal>
+            From<&tideorm::Uuid>
+            From<&u16>
+            From<&u32>
+            From<&u64>
+            From<&u8>
+            From<Cow<'_, str>>
+            From<JsonValue>
+            From<NaiveDate>
+            From<NaiveDateTime>
+            From<NaiveTime>
+            From<Vec<T>>
+            From<Vec<u8>>
+            From<bool>
+            From<char>
+            From<f32>
+            From<f64>
+            From<i16>
+            From<i32>
+            From<i64>
+            From<i8>
+            From<std::option::Option<T>>
+            From<std::string::String>
+            From<tideorm::DateTime<FixedOffset>>
+            From<tideorm::DateTime<Local>>
+            From<tideorm::DateTime<Utc>>
+            From<tideorm::Decimal>
+            From<tideorm::Uuid>
+            From<tideorm::internal::driver::types::uuid::fmt::Braced>
+            From<tideorm::internal::driver::types::uuid::fmt::Hyphenated>
+            From<tideorm::internal::driver::types::uuid::fmt::Simple>
+            From<tideorm::internal::driver::types::uuid::fmt::Urn>
+            From<tideorm::orm::entity::prelude::ChronoUnixTimestamp>
+            From<tideorm::orm::entity::prelude::ChronoUnixTimestampMillis>
+            From<tideorm::orm::sql_builder::Enum>
+            From<u16>
+            From<u32>
+            From<u64>
+            From<u8>
+  = note: required for `Status` to implement `Into<tideorm::orm::entity::Value>`
+note: required by a bound in `tideorm::orm::entity::ActiveValue::NotSet`
+ --> $CARGO/tideorm-engine-$VERSION/src/entity/active_value.rs
+  |
+  |     V: Into<Value>,
+  |        ^^^^^^^^^^^ required by this bound in `tideorm::orm::entity::ActiveValue::NotSet`
+...
+  |     NotSet,
+  |     ------ required by a bound in this unit variant
+  = note: this error originates in the derive macro `tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: the method `is_not_set` exists for enum `tideorm::orm::entity::ActiveValue<Status>`, but its trait bounds were not satisfied
+ --> tests/ui/invalid_field_type.rs:8:1
+  |
+2 | enum Status {
+  | ----------- doesn't satisfy `Status: Into<tideorm::orm::entity::Value>`
+...
+8 | #[tideorm::model(table = "orders")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method cannot be called on `tideorm::orm::entity::ActiveValue<Status>` due to unsatisfied trait bounds
+  |
+ ::: $CARGO/tideorm-sql-builder-$VERSION/src/value.rs
+  |
+  | pub enum Value {
+  | -------------- doesn't satisfy `tideorm::orm::entity::Value: From<Status>`
+  |
+  = note: the following trait bounds were not satisfied:
+          `tideorm::orm::entity::Value: From<Status>`
+          which is required by `Status: Into<tideorm::orm::entity::Value>`
+  = note: this error originates in the derive macro `tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: the method `reset` exists for enum `tideorm::orm::entity::ActiveValue<Status>`, but its trait bounds were not satisfied
+ --> tests/ui/invalid_field_type.rs:8:1
+  |
+2 | enum Status {
+  | ----------- doesn't satisfy `Status: Into<tideorm::orm::entity::Value>`
+...
+8 | #[tideorm::model(table = "orders")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method cannot be called on `tideorm::orm::entity::ActiveValue<Status>` due to unsatisfied trait bounds
+  |
+ ::: $CARGO/tideorm-sql-builder-$VERSION/src/value.rs
+  |
+  | pub enum Value {
+  | -------------- doesn't satisfy `tideorm::orm::entity::Value: From<Status>`
+  |
+  = note: the following trait bounds were not satisfied:
+          `tideorm::orm::entity::Value: From<Status>`
+          which is required by `Status: Into<tideorm::orm::entity::Value>`
+  = note: this error originates in the derive macro `tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: the method `default_value` exists for reference `&tideorm::orm::entity::ActiveValue<Status>`, but its trait bounds were not satisfied
+ --> tests/ui/invalid_field_type.rs:8:1
+  |
+2 | enum Status {
+  | ----------- doesn't satisfy `Status: Into<tideorm::orm::entity::Value>`, `Status: tideorm::orm::sql_builder::Nullable` or `Status: tideorm::orm::sql_builder::ValueType`
+...
+8 | #[tideorm::model(table = "orders")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method cannot be called on `&tideorm::orm::entity::ActiveValue<Status>` due to unsatisfied trait bounds
+  |
+ ::: $CARGO/tideorm-engine-$VERSION/src/entity/active_value.rs
+  |
+  | pub enum ActiveValue<V>
+  | ----------------------- doesn't satisfy `_: DefaultActiveValue`
+  |
+  = note: the following trait bounds were not satisfied:
+          `Status: Into<tideorm::orm::entity::Value>`
+          which is required by `tideorm::orm::entity::ActiveValue<Status>: tideorm::orm::value::DefaultActiveValue`
+          `Status: tideorm::orm::sql_builder::ValueType`
+          which is required by `tideorm::orm::entity::ActiveValue<Status>: tideorm::orm::value::DefaultActiveValue`
+          `Status: tideorm::orm::sql_builder::Nullable`
+          which is required by `tideorm::orm::entity::ActiveValue<Status>: tideorm::orm::value::DefaultActiveValue`
+          `Status: Into<tideorm::orm::entity::Value>`
+          which is required by `&tideorm::orm::entity::ActiveValue<Status>: tideorm::orm::value::DefaultActiveValueNotSet`
+note: the traits `Into`, `tideorm::orm::sql_builder::Nullable`,  and `tideorm::orm::sql_builder::ValueType` must be implemented
+ --> $RUST/core/src/convert/mod.rs
+  |
+ ::: $CARGO/tideorm-sql-builder-$VERSION/src/value/conversions.rs
+  |
+  | pub trait ValueType: Sized {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+  | pub trait Nullable {
+  | ^^^^^^^^^^^^^^^^^^
+  = note: this error originates in the derive macro `tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: the method `unwrap` exists for enum `tideorm::orm::entity::ActiveValue<Status>`, but its trait bounds were not satisfied
+ --> tests/ui/invalid_field_type.rs:8:1
+  |
+2 | enum Status {
+  | ----------- doesn't satisfy `Status: Into<tideorm::orm::entity::Value>`
+...
+8 | #[tideorm::model(table = "orders")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method cannot be called on `tideorm::orm::entity::ActiveValue<Status>` due to unsatisfied trait bounds
+  |
+ ::: $CARGO/tideorm-sql-builder-$VERSION/src/value.rs
+  |
+  | pub enum Value {
+  | -------------- doesn't satisfy `tideorm::orm::entity::Value: From<Status>`
+  |
+  = note: the following trait bounds were not satisfied:
+          `tideorm::orm::entity::Value: From<Status>`
+          which is required by `Status: Into<tideorm::orm::entity::Value>`
+  = note: this error originates in the derive macro `tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)

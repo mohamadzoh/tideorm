@@ -204,17 +204,15 @@ async fn seeding_inside_a_transaction_uses_that_transaction() {
     Database::set_global(db.clone()).expect("setting global database should succeed");
 
     let (first, second) = db
-        .transaction(|_| {
-            Box::pin(async move {
-                let seeder = Seeder::new().add(TestSeed {
-                    name: "once",
-                    priority: 0,
-                    dependencies: Vec::new(),
-                });
-                let first = seeder.run().await?;
-                let second = seeder.run().await?;
-                Ok((first, second))
-            })
+        .transaction(async move |_| {
+            let seeder = Seeder::new().add(TestSeed {
+                name: "once",
+                priority: 0,
+                dependencies: Vec::new(),
+            });
+            let first = seeder.run().await?;
+            let second = seeder.run().await?;
+            Ok((first, second))
         })
         .await
         .expect("seeding inside a transaction should succeed");

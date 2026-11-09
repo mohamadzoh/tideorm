@@ -65,12 +65,9 @@ pub trait SoftDelete: Model {
     /// callbacks run, so a `before_delete` that refuses stops it, and a record
     /// already deleted keeps its stamp, which a retention purge reads.
     ///
-    /// The stamp is `Utc::now()` and never the database's `CURRENT_TIMESTAMP`.
-    /// `deleted_at` is a `DateTime<Utc>`, so a session-local database clock —
-    /// which is what `CURRENT_TIMESTAMP` returns on MySQL/MariaDB — would store
-    /// an offset instant that is later read back as if it were UTC. The
-    /// query-level `QueryBuilder::soft_delete` renders the same UTC instant for
-    /// exactly this reason; keep the two in agreement.
+    /// The stamp is `Utc::now()`, bound, and never the database's
+    /// `CURRENT_TIMESTAMP`, which MySQL and MariaDB read in the session time
+    /// zone.
     async fn soft_delete(mut self) -> Result<Self> {
         // `delete()` removes the row of a model without the flag, so a hand
         // written implementation on one only sets the stamp.

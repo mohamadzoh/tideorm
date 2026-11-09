@@ -16,7 +16,7 @@ async fn sqlite_eager_find_preserves_existing_filters() {
 
     let filtered_out = CiUser::query()
         .where_eq("active", false)
-        .with_many(&[])
+        .with_many(Vec::<&str>::new())
         .find(created.id)
         .await
         .expect("eager find with filter should succeed");
@@ -27,7 +27,7 @@ async fn sqlite_eager_find_preserves_existing_filters() {
 
     let matched = CiUser::query()
         .where_eq("active", true)
-        .with_many(&[])
+        .with_many(Vec::<&str>::new())
         .find(created.id)
         .await
         .expect("eager find with matching filter should succeed");
@@ -163,8 +163,9 @@ async fn sqlite_direct_crud_helpers_respect_soft_delete_scope() {
     let page = CiSoftDeleteUser::paginate(1, 10)
         .await
         .expect("failed to paginate soft-delete users");
-    assert_eq!(page.len(), 1);
-    assert_eq!(page[0].name, "Middle");
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.total, 1, "the count leaves trashed rows out too");
+    assert_eq!(page.items[0].name, "Middle");
 
     let with_trashed = CiSoftDeleteUser::query()
         .with_trashed()

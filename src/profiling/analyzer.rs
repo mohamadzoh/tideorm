@@ -56,7 +56,7 @@ impl QueryAnalyzer {
             ));
         }
 
-        if has_sequence(&tokens, &["ORDER", "BY"]) && !has_sequence(&tokens, &["LIMIT"]) {
+        if orders_without_limit(sql) {
             suggestions.push(QuerySuggestion::new(
                 SuggestionLevel::Info,
                 "ORDER BY without LIMIT",
@@ -83,17 +83,15 @@ impl QueryAnalyzer {
             ));
         }
 
-        if tokens.windows(3).any(|p| {
-            p[0].kind == crate::internal::sql_lexer::Kind::Word
-                && p[0].text.to_ascii_uppercase().ends_with("ID")
-                && p[1].text == "="
-                && p[2].kind == crate::internal::sql_lexer::Kind::Literal
-        }) {
+        if tokens
+            .windows(3)
+            .any(|p| is_id_column(&p[0]) && p[1].text == "=" && is_quoted_number(&p[2]))
+        {
             suggestions.push(QuerySuggestion::new(
                 SuggestionLevel::Info,
                 "Possible type mismatch",
-                "Comparing numeric ID with string may cause implicit conversion.",
-                "Ensure parameter types match column types.",
+                "An ID column is compared with a number written as a string, which may cause implicit conversion.",
+                "Bind the ID as a number.",
             ));
         }
 
@@ -148,6 +146,38 @@ impl QueryAnalyzer {
 
 pub(super) fn selects_star(tokens: &[Token<'_>]) -> bool {
     has_sequence(tokens, &["SELECT", "*"])
+}
+
+/// Whether the statement's own `ORDER BY` has no `LIMIT` beside it; one in a
+/// subquery or a window says nothing about the outer rows.
+fn orders_without_limit(sql: &str) -> bool {
+    let words: Vec<&str> = crate::internal::sql_lexer::top_words(sql).collect();
+    let orders = words
+        .windows(2)
+        .any(|pair| pair[0].eq_ignore_ascii_case("order") && pair[1].eq_ignore_ascii_case("by"));
+    orders && !words.iter().any(|word| word.eq_ignore_ascii_case("limit"))
+}
+
+/// A column named `id` or `<name>_id`.
+fn is_id_column(token: &Token<'_>) -> bool {
+    if !matches!(token.kind, Kind::Word | Kind::Identifier) {
+        return false;
+    }
+    let name = token
+        .text
+        .trim_matches(|c| matches!(c, '"' | '`' | '[' | ']'))
+        .to_ascii_lowercase();
+    name == "id" || name.ends_with("_id")
+}
+
+/// A string literal holding only digits, such as `'42'`.
+fn is_quoted_number(token: &Token<'_>) -> bool {
+    token.kind == Kind::Literal
+        && token
+            .text
+            .strip_prefix('\'')
+            .and_then(|text| text.strip_suffix('\''))
+            .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
 }
 
 fn has_sequence(tokens: &[Token<'_>], words: &[&str]) -> bool {

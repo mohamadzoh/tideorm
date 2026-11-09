@@ -1,7 +1,4 @@
-#![allow(missing_docs)]
-
 use super::QueryBuilder;
-use crate::internal::Value;
 use crate::model::Model;
 
 // Executable examples emitted beside every generated predicate.
@@ -38,7 +35,9 @@ macro_rules! condition_example {
     (@args Lte) => { "User::ID, 1" };
     (@args Like) => { "User::NAME, \"A%\"" };
     (@args NotLike) => { "User::NAME, \"A%\"" };
-    (@args LikeEscaped) => { "User::NAME, \"A%\"" };
+    (@args Contains) => { "User::NAME, \"A%\"" };
+    (@args StartsWith) => { "User::NAME, \"A%\"" };
+    (@args EndsWith) => { "User::NAME, \"A%\"" };
     (@args In) => { "User::ID, [1, 2]" };
     (@args NotIn) => { "User::ID, [1, 2]" };
     (@args IsNull) => { "User::NAME" };
@@ -93,6 +92,9 @@ macro_rules! condition_methods {
             [where_not, or_where_not, and_where_not] TypedValue
                 "Match rows where `column` differs from `value`; like SQL `<>`, a NULL column never matches."
                 => NotEq;
+            [where_ne, or_where_ne, and_where_ne] TypedValue
+                "Match rows where `column` differs from `value`, as `where_not` does, under the name `where_column_ne` and `ColumnEq::ne` use."
+                => NotEq;
             [where_gt, or_where_gt, and_where_gt] TypedValue
                 "Match rows where `column` is greater than `value`."
                 => Gt;
@@ -130,15 +132,15 @@ macro_rules! condition_methods {
             [where_contains, or_where_contains, and_where_contains]
                 "Match rows where `column` contains `value` literally; its `%` and `_` are escaped, so it is safe for user input."
                 (value: &str)
-                => LikeEscaped, $crate::query::ConditionValue::contains(value);
+                => Contains, $crate::query::ConditionValue::text(value);
             [where_starts_with, or_where_starts_with, and_where_starts_with]
                 "Match rows where `column` starts with `value` literally; its `%` and `_` are escaped."
                 (value: &str)
-                => LikeEscaped, $crate::query::ConditionValue::starts_with(value);
+                => StartsWith, $crate::query::ConditionValue::text(value);
             [where_ends_with, or_where_ends_with, and_where_ends_with]
                 "Match rows where `column` ends with `value` literally; its `%` and `_` are escaped."
                 (value: &str)
-                => LikeEscaped, $crate::query::ConditionValue::ends_with(value);
+                => EndsWith, $crate::query::ConditionValue::text(value);
             [where_null, or_where_null, and_where_null]
                 "Match rows where `column` is NULL."
                 ()
@@ -192,11 +194,11 @@ macro_rules! condition_methods {
             [where_json_contains, or_where_json_contains, and_where_json_contains]
                 "Match rows whose JSON `column` contains `value`: every key and element of `value` is in it, as PostgreSQL's `@>` reads it, on every backend."
                 (value: impl serde::Serialize)
-                => JsonContains, $crate::query::ConditionValue::single(value);
+                => JsonContains, $crate::query::ConditionValue::document(value);
             [where_json_contained_by, or_where_json_contained_by, and_where_json_contained_by]
                 "Match rows whose JSON `column` is contained by `value`, as PostgreSQL's `<@` reads it."
                 (value: impl serde::Serialize)
-                => JsonContainedBy, $crate::query::ConditionValue::single(value);
+                => JsonContainedBy, $crate::query::ConditionValue::document(value);
             [where_json_key_exists, or_where_json_key_exists, and_where_json_key_exists]
                 "Match rows whose JSON `column` has the top-level `key`, one holding JSON `null` included; a NULL column matches neither this nor `where_json_key_not_exists`."
                 (key: &str)
@@ -213,20 +215,50 @@ macro_rules! condition_methods {
                 "Match rows whose JSON `column` has no member at `path`, read as for `where_json_path_exists`; a NULL column matches neither."
                 (path: &str)
                 => JsonPathNotExists, $crate::query::ConditionValue::json_path(path);
-            [where_array_contains, or_where_array_contains, and_where_array_contains] <V: serde::Serialize>
-                "Match rows whose array `column` holds every one of `values` (`@>`), any list of any serializable value."
+            [where_array_contains, or_where_array_contains, and_where_array_contains] <V: Into<$crate::DbValue>>
+                "Match rows whose array `column` holds every one of `values` (`@>`), any list of values."
                 (values: impl IntoIterator<Item = V>)
                 => ArrayContains, $crate::query::ConditionValue::list(values);
-            [where_array_contained_by, or_where_array_contained_by, and_where_array_contained_by] <V: serde::Serialize>
+            [where_array_contained_by, or_where_array_contained_by, and_where_array_contained_by] <V: Into<$crate::DbValue>>
                 "Match rows whose array `column` holds nothing but `values` (`<@`); a NULL in the list allows NULL elements."
                 (values: impl IntoIterator<Item = V>)
                 => ArrayContainedBy, $crate::query::ConditionValue::list(values);
-            [where_array_overlaps, or_where_array_overlaps, and_where_array_overlaps] <V: serde::Serialize>
+            [where_array_overlaps, or_where_array_overlaps, and_where_array_overlaps] <V: Into<$crate::DbValue>>
                 "Match rows whose array `column` holds at least one of `values` (`&&`)."
                 (values: impl IntoIterator<Item = V>)
                 => ArrayOverlaps, $crate::query::ConditionValue::list(values);
         );
+        $crate::query::condition_methods!(@col $family, $receiver, $push, $doc);
         $($crate::query::condition_methods!(@raw $raw $family => $receiver, $push, $doc);)?
+    };
+
+    (@col where, $receiver:ident, $push:ident, $doc:literal) => {
+        $crate::query::condition_methods!(@col_method where_col, $receiver, $push, $doc);
+    };
+    (@col or_where, $receiver:ident, $push:ident, $doc:literal) => {
+        $crate::query::condition_methods!(@col_method or_where_col, $receiver, $push, $doc);
+    };
+    (@col and_where, $receiver:ident, $push:ident, $doc:literal) => {
+        $crate::query::condition_methods!(@col_method and_where_col, $receiver, $push, $doc);
+    };
+
+    (@col_method $name:ident, $receiver:ident, $push:ident, $doc:literal) => {
+        /// Match rows by a condition built from a typed column:
+        /// `User::ID.gt(1)`, `User::NAME.contains("an")`, `User::EMAIL.is_null()`.
+        ///
+        #[doc = $doc]
+        #[doc = $crate::query::condition_example!(@example $receiver, $name, "User::ID.gt(1)")]
+        pub fn $name(self, condition: $crate::columns::ColumnCondition) -> Self {
+            let $crate::query::WhereCondition { column, operator, value } = condition;
+            self.$push($crate::query::WhereCondition {
+                column: $crate::columns::unqualified_own_column(
+                    column,
+                    <Self as $crate::columns::ConditionOwner>::own_table(),
+                ),
+                operator,
+                value,
+            })
+        }
     };
 
     (@ops where, $receiver:ident, $push:ident, $doc:literal; $(
@@ -278,11 +310,11 @@ macro_rules! condition_methods {
         #[doc = ""]
         #[doc = $doc]
         /// Typed columns accept their Rust type (see [`ColumnValue`]); string
-        /// names accept any serializable value.
+        /// names accept any value, bound as its own type, or a
+        /// `serde_json::Value`, read as the column's.
         ///
         /// [`ColumnValue`]: crate::columns::ColumnValue
         #[doc = $crate::query::condition_example!($receiver, $name, $operator)]
-        #[must_use]
         pub fn $name<C, V>(self, column: C, value: V) -> Self
         where
             C: $crate::columns::ColumnValue<V>,
@@ -305,7 +337,6 @@ macro_rules! condition_methods {
         #[doc = ""]
         #[doc = $doc]
         #[doc = $crate::query::condition_example!($receiver, $name, $operator)]
-        #[must_use]
         pub fn $name<C, V>(self, column: C, values: impl IntoIterator<Item = V>) -> Self
         where
             C: $crate::columns::ColumnValue<V>,
@@ -316,7 +347,7 @@ macro_rules! condition_methods {
                     <Self as $crate::columns::ConditionOwner>::own_table(),
                 ),
                 operator: $crate::query::Operator::$operator,
-                value: $crate::query::ConditionValue::members(values.into_iter().map(C::convert_value)),
+                value: $crate::query::ConditionValue::list(values.into_iter().map(C::convert_value)),
             })
         }
     };
@@ -327,7 +358,6 @@ macro_rules! condition_methods {
         #[doc = ""]
         #[doc = $doc]
         #[doc = $crate::query::condition_example!($receiver, $name, $operator)]
-        #[must_use]
         pub fn $name<C, L, H>(self, column: C, min: L, max: H) -> Self
         where
             C: $crate::columns::ColumnValue<L> + $crate::columns::ColumnValue<H>,
@@ -352,7 +382,6 @@ macro_rules! condition_methods {
         #[doc = ""]
         #[doc = $doc]
         #[doc = $crate::query::condition_example!($receiver, $name, $operator, $($arg),*)]
-        #[must_use]
         pub fn $name $(<$generic: $bound>)? (
             self,
             column: impl $crate::columns::IntoColumnName,
@@ -389,13 +418,17 @@ macro_rules! condition_methods {
         /// The fragment is **trusted SQL**, checked like the `*_raw` form's;
         /// the values are bound, never written into it, so they may come from
         /// a request. Write `?` on every backend. A `?` inside a quoted literal
-        /// is text, and a count of placeholders other than `params.len()`
-        /// fails the query.
+        /// is text, and a count of placeholders other than the number of
+        /// values fails the query. `params` is any list of values: a `Vec`,
+        /// an array or an iterator.
         ///
         #[doc = $doc]
         #[doc = $crate::query::condition_example!($receiver, $name, RawWith)]
-        #[must_use]
-        pub fn $name(self, raw_sql: &str, params: Vec<$crate::internal::DbValue>) -> Self {
+        pub fn $name(
+            self,
+            raw_sql: &str,
+            params: impl IntoIterator<Item = $crate::internal::DbValue>,
+        ) -> Self {
             self.$push($crate::query::WhereCondition {
                 column: String::new(),
                 operator: $crate::query::Operator::Raw,
@@ -416,7 +449,6 @@ macro_rules! condition_methods {
         ///
         #[doc = $doc]
         #[doc = $crate::query::condition_example!($receiver, $name, Raw)]
-        #[must_use]
         pub fn $name(self, raw_sql: &str) -> Self {
             self.$push($crate::query::WhereCondition {
                 column: String::new(),
@@ -442,7 +474,6 @@ macro_rules! conditional_methods {
                 "# struct User { #[tideorm(primary_key)] id: i64, active: bool }\n",
                 "let _query = ", $start, ".when(true, |q| { let value = true; ", $apply, " });\n```"
             )]
-            #[must_use]
             pub fn when(self, condition: bool, f: impl FnOnce(Self) -> Self) -> Self {
                 if condition { f(self) } else { self }
             }
@@ -455,7 +486,6 @@ macro_rules! conditional_methods {
                 "# struct User { #[tideorm(primary_key)] id: i64, active: bool }\n",
                 "let _query = ", $start, ".when_some(Some(true), |q, value| ", $apply, ");\n```"
             )]
-            #[must_use]
             pub fn when_some<T>(self, option: Option<T>, f: impl FnOnce(Self, T) -> Self) -> Self {
                 match option {
                     Some(value) => f(self, value),
@@ -472,15 +502,23 @@ conditional_methods!(impl[M: Model] OrBranchBuilder<M>; "User::query().begin_or(
 conditional_methods!(impl[M: Model] crate::model::BatchUpdateBuilder<M>; "User::update_all()", "q.where_eq(User::ACTIVE, value)");
 conditional_methods!(
     impl[M: Model] crate::relations::EagerQueryBuilder<M>;
-    "User::query().with_many(&[])",
+    "User::query().with_many(Vec::<&str>::new())",
     "q.query(|query| query.where_eq(User::ACTIVE, value))"
 );
 
+mod condition_value;
 mod finite;
+mod operator;
 mod or_branch_builder;
 mod or_group;
+mod order;
 
-pub(crate) use finite::{checked_assignment_value, checked_filter_value};
+pub use condition_value::ConditionValue;
+pub(crate) use condition_value::{
+    comparable_value, condition_is_vacuous, is_json_null, is_sql_null,
+};
+pub use operator::{LogicalOp, Operator};
+pub use order::{Order, SortOrder};
 
 pub use or_branch_builder::OrBranchBuilder;
 pub use or_group::OrGroup;
@@ -508,321 +546,15 @@ impl<M: Model> QueryBuilder<M> {
     }
 }
 
-/// Sort order for queries
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Order {
-    /// Ascending order (A-Z, 1-9)
-    Asc,
-    /// Descending order (Z-A, 9-1)
-    Desc,
-}
-
-/// [`Order`] under a second name, for a crate whose own `Order` type (an
-/// `Order` model, say) shadows the prelude's: `SortOrder::Desc`.
-pub type SortOrder = Order;
-
-impl Order {
-    /// The SQL keyword for this direction: `ASC` or `DESC`.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Order::Asc => "ASC",
-            Order::Desc => "DESC",
-        }
-    }
-}
-
-/// Comparison operators for where clauses
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Operator {
-    Eq,
-    NotEq,
-    Gt,
-    Gte,
-    Lt,
-    Lte,
-    Like,
-    LikeEscaped,
-    NotLike,
-    In,
-    NotIn,
-    IsNull,
-    IsNotNull,
-    Between,
-    NotBetween,
-    JsonContains,
-    JsonContainedBy,
-    JsonKeyExists,
-    JsonKeyNotExists,
-    JsonPathExists,
-    JsonPathNotExists,
-    ArrayContains,
-    ArrayContainedBy,
-    ArrayOverlaps,
-    Raw,
-}
-
 /// A single where condition
 #[derive(Debug, Clone)]
+#[must_use = "a condition filters nothing until a query takes it"]
 pub struct WhereCondition {
+    /// The column, as written into the SQL (qualified when it names another
+    /// table); empty for a raw condition.
     pub column: String,
+    /// The comparison.
     pub operator: Operator,
+    /// The operand.
     pub value: ConditionValue,
-}
-
-/// A filter or assignment value as the JSON the builders carry.
-///
-/// Anything `Serialize` is accepted, so `Uuid`, `chrono` and `Decimal` values
-/// pass as they are; the SQL renderers bind them back as their column's type.
-///
-/// # Panics
-///
-/// When `value`'s `Serialize` implementation fails, which no type a column can
-/// hold does — the same contract as `serde_json::json!`.
-pub(crate) fn filter_value(value: impl serde::Serialize) -> serde_json::Value {
-    serde_json::to_value(value).expect("a filter value must serialize to JSON")
-}
-
-/// Value for a where condition
-#[derive(Debug, Clone, PartialEq)]
-pub enum ConditionValue {
-    Single(serde_json::Value),
-    List(Vec<serde_json::Value>),
-    /// The members of a `where_in`/`where_not_in` that hold a JSON `null`
-    /// document (`Value::Null`, `Some(Value::Null)`) as well as their other
-    /// values: a JSON column compares every value as a document, the `null`
-    /// one included, and `sql_null` says whether a `None`, SQL NULL, was among
-    /// them too. Any other column reads a `null` as SQL NULL, as in a
-    /// [`List`](Self::List).
-    DocumentList {
-        values: Vec<serde_json::Value>,
-        sql_null: bool,
-    },
-    Range(serde_json::Value, serde_json::Value),
-    None,
-    RawExpr(String),
-    /// A builder-generated SQL fragment that carries its own bound parameters.
-    ///
-    /// Unlike [`ConditionValue::RawExpr`], which is emitted verbatim through
-    /// `Expr::cust`, this variant keeps the operand's values out of the SQL text
-    /// entirely. It exists for the operands the builder generates itself —
-    /// `where_in_subquery`, `where_exists`, the `has_related` family — where the
-    /// only alternative is hand-escaping user data into an inline literal.
-    RawExprWithValues {
-        /// The executable fragment.
-        ///
-        /// It must already use the *target backend's own* placeholder marker
-        /// (`$1..$n` on PostgreSQL, `?` on MySQL/MariaDB/SQLite), because
-        /// `Expr::cust_with_values` only renumbers tokens matching that marker
-        /// into the surrounding statement; a mismatched marker binds nothing.
-        sql: String,
-        /// The parameters bound to `sql`, in placeholder order.
-        values: Vec<Value>,
-    },
-    /// A caller's raw fragment written with a `?` per value, outside quoted
-    /// literals, on every backend; the `?`s become the rendering backend's own
-    /// markers when the statement is built, so the fragment follows the query
-    /// to whichever backend runs it.
-    RawTemplate {
-        /// The fragment.
-        sql: String,
-        /// The values, in placeholder order.
-        values: Vec<Value>,
-    },
-    /// Another column of the same row, which the condition's column is
-    /// compared with (`where_column_gt("updated_at", "created_at")`).
-    Column(String),
-    /// A value no SQL comparison can take, such as a NaN float, with the
-    /// reason the query fails with when it runs.
-    Invalid(String),
-}
-
-/// The value as JSON — a list as an array, a range as `low..high` — or the
-/// SQL or column it carries.
-impl std::fmt::Display for ConditionValue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Single(value) => write!(f, "{}", value),
-            Self::List(values) => write!(f, "{}", serde_json::Value::Array(values.clone())),
-            Self::DocumentList { values, sql_null } => {
-                write!(f, "{}", serde_json::Value::Array(values.clone()))?;
-                if *sql_null {
-                    f.write_str(" or NULL")?;
-                }
-                Ok(())
-            }
-            Self::Range(low, high) => write!(f, "{}..{}", low, high),
-            Self::None => f.write_str("NULL"),
-            Self::RawExpr(sql)
-            | Self::RawExprWithValues { sql, .. }
-            | Self::RawTemplate { sql, .. } => f.write_str(sql),
-            Self::Column(column) => f.write_str(column),
-            Self::Invalid(reason) => write!(f, "<invalid: {}>", reason),
-        }
-    }
-}
-
-impl ConditionValue {
-    /// One filter value; [`Invalid`](Self::Invalid) for one SQL cannot compare.
-    ///
-    /// A top-level `None` is SQL NULL, [`None`](Self::None). Any other null,
-    /// such as `serde_json::Value::Null` or `Some(Value::Null)`, stays a value,
-    /// which a JSON column compares as the JSON `null` document.
-    pub(crate) fn single(value: impl serde::Serialize) -> Self {
-        match checked_assignment_value(value) {
-            Ok((_, true)) => Self::None,
-            Ok((json, false)) => Self::Single(json),
-            Err(reason) => Self::Invalid(reason),
-        }
-    }
-
-    /// A list of filter values, refused as a whole when one cannot be compared.
-    pub(crate) fn list<V: serde::Serialize>(values: impl IntoIterator<Item = V>) -> Self {
-        values
-            .into_iter()
-            .map(checked_filter_value)
-            .collect::<Result<Vec<_>, _>>()
-            .map_or_else(Self::Invalid, Self::List)
-    }
-
-    /// The members of a `where_in`/`where_not_in`. A `None` is SQL NULL, and
-    /// any other null a value, which a JSON column compares as the JSON `null`
-    /// document; a list holding one is a
-    /// [`DocumentList`](Self::DocumentList).
-    pub(crate) fn members<V: serde::Serialize>(values: impl IntoIterator<Item = V>) -> Self {
-        let checked = match values
-            .into_iter()
-            .map(checked_assignment_value)
-            .collect::<Result<Vec<_>, _>>()
-        {
-            Ok(checked) => checked,
-            Err(reason) => return Self::Invalid(reason),
-        };
-        if !checked
-            .iter()
-            .any(|(value, sql_null)| value.is_null() && !sql_null)
-        {
-            return Self::List(checked.into_iter().map(|(value, _)| value).collect());
-        }
-        let sql_null = checked.iter().any(|(_, sql_null)| *sql_null);
-        Self::DocumentList {
-            values: checked
-                .into_iter()
-                .filter(|(_, sql_null)| !sql_null)
-                .map(|(value, _)| value)
-                .collect(),
-            sql_null,
-        }
-    }
-
-    /// The bounds of a range.
-    pub(crate) fn range(low: impl serde::Serialize, high: impl serde::Serialize) -> Self {
-        match (checked_filter_value(low), checked_filter_value(high)) {
-            (Ok(low), Ok(high)) => Self::Range(low, high),
-            (Err(reason), _) | (_, Err(reason)) => Self::Invalid(reason),
-        }
-    }
-
-    /// One text value: a `LIKE` pattern, a JSON key or path.
-    pub(crate) fn text(text: impl Into<String>) -> Self {
-        Self::Single(serde_json::Value::String(text.into()))
-    }
-
-    /// A JSON path for an existence test: `$` and its steps, or plain steps
-    /// read from the root (`a.b[0]` is `$.a.b[0]`). Anything else is kept as
-    /// written, for PostgreSQL to read as a JSONPath.
-    pub(crate) fn json_path(path: &str) -> Self {
-        let rooted = match path.chars().next() {
-            Some('$') | None => None,
-            Some('[') => Some(format!("${path}")),
-            Some(_) => Some(format!("$.{path}")),
-        };
-        match rooted.filter(|rooted| crate::query::db_sql::parse_json_path(rooted).is_some()) {
-            Some(rooted) => Self::text(rooted),
-            None => Self::text(path),
-        }
-    }
-
-    /// The `LIKE` pattern matching text that contains `value` literally.
-    pub(crate) fn contains(value: &str) -> Self {
-        Self::text(format!("%{}%", crate::columns::escape_like_literal(value)))
-    }
-
-    /// The `LIKE` pattern matching text that starts with `value` literally.
-    pub(crate) fn starts_with(value: &str) -> Self {
-        Self::text(format!("{}%", crate::columns::escape_like_literal(value)))
-    }
-
-    /// The `LIKE` pattern matching text that ends with `value` literally.
-    pub(crate) fn ends_with(value: &str) -> Self {
-        Self::text(format!("%{}", crate::columns::escape_like_literal(value)))
-    }
-}
-
-/// Logical operator for combining conditions
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum LogicalOp {
-    And,
-    Or,
-}
-
-impl LogicalOp {
-    pub fn as_sql(&self) -> &'static str {
-        match self {
-            LogicalOp::And => "AND",
-            LogicalOp::Or => "OR",
-        }
-    }
-}
-
-/// True when a declared condition cannot exclude any row.
-///
-/// These are the operand shapes that render constant-true: an empty candidate
-/// set for a *negative* membership test, and an empty "contains all of these"
-/// array test. A caller reaches them by accident — a filter list that came back
-/// empty from a form or an upstream query — and the resulting predicate silently
-/// widens a targeted mutation into a whole-table one. A negative list holding
-/// only NULLs counts too: it renders `col IS NOT NULL`, which keeps every row of
-/// a `NOT NULL` column, as does `where_not(col, None)`, which renders the same test.
-///
-/// Their positive duals (`IN ()`, `&& ()`) render constant-*false*
-/// and are deliberately absent: a mutation that matches nothing is safe.
-///
-/// The check is structural on purpose. Inspecting the rendered SQL cannot
-/// replace it: sea-query emits an empty `NOT IN` as the bound pair `? = ?`
-/// rather than the literal `1 = 1`, and a soft-delete model appends its own
-/// `deleted_at IS NULL` conjunct to whatever the caller declared — so neither
-/// shape survives a comparison against a fixed set of constant-true spellings.
-///
-/// `is_json` tells the columns holding JSON, where a JSON `null` is the `null`
-/// document rather than SQL NULL, so a test against it keeps some rows.
-pub(crate) fn condition_is_vacuous(
-    condition: &WhereCondition,
-    is_json: impl Fn(&str) -> bool,
-) -> bool {
-    match (&condition.operator, &condition.value) {
-        (Operator::NotIn, ConditionValue::List(values)) => {
-            values.iter().all(serde_json::Value::is_null)
-        }
-        (Operator::NotIn, ConditionValue::DocumentList { values, .. }) => {
-            values.iter().all(serde_json::Value::is_null) && !is_json(&condition.column)
-        }
-        // `where_not(col, None)` renders the same `col IS NOT NULL`.
-        (Operator::NotEq, ConditionValue::None) => true,
-        (Operator::NotEq, ConditionValue::Single(serde_json::Value::Null)) => {
-            !is_json(&condition.column)
-        }
-        (Operator::ArrayContains, ConditionValue::List(values)) => values.is_empty(),
-        // A pattern of `%` alone matches every value: an empty `contains`,
-        // `starts_with` or `ends_with`, or `where_like(col, "%")`.
-        (
-            Operator::Like | Operator::LikeEscaped,
-            ConditionValue::Single(serde_json::Value::String(pattern)),
-        ) => !pattern.is_empty() && pattern.chars().all(|character| character == '%'),
-        // Every object document contains `{}`, and every array `[]`.
-        (Operator::JsonContains, ConditionValue::Single(document)) => {
-            document.as_object().is_some_and(serde_json::Map::is_empty)
-                || document.as_array().is_some_and(Vec::is_empty)
-        }
-        _ => false,
-    }
 }

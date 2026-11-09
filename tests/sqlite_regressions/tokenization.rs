@@ -145,3 +145,62 @@ fn a_payload_that_is_no_key_stays_out_of_the_error() {
     assert!(!message.contains("s3cret"), "{message}");
     assert!(message.contains("Voucher"), "{message}");
 }
+
+/// `find_by_token` and `try_decode_token` read a token from a request: a
+/// garbled, foreign or orphaned one is `None`, and only a missing key is an
+/// error.
+#[tokio::test]
+async fn find_by_token_reads_a_bad_token_as_none() {
+    configure_key();
+    global_memory_database(
+        "CREATE TABLE token_vouchers(id INTEGER PRIMARY KEY); INSERT INTO token_vouchers VALUES(3)",
+    )
+    .await;
+
+    let token = Voucher::tokenize_id(3).unwrap();
+    assert_eq!(Voucher::try_decode_token(&token).unwrap(), Some(3));
+    let found = Voucher::find_by_token(&token).await.unwrap();
+    assert_eq!(found.map(|voucher| voucher.id), Some(3));
+
+    let orphaned = Voucher::tokenize_id(4).unwrap();
+    assert_eq!(Voucher::try_decode_token(&orphaned).unwrap(), Some(4));
+    assert!(Voucher::find_by_token(&orphaned).await.unwrap().is_none());
+    assert!(matches!(
+        Voucher::from_token(&orphaned).await,
+        Err(Error::NotFound { .. })
+    ));
+
+    let foreign = shop::User::tokenize_id(3).unwrap();
+    for bad in [foreign.as_str(), "v2.!!", ""] {
+        assert_eq!(Voucher::try_decode_token(bad).unwrap(), None, "{bad:?}");
+        assert!(
+            Voucher::find_by_token(bad).await.unwrap().is_none(),
+            "{bad:?}"
+        );
+    }
+
+    TokenConfig::reset();
+    let decoded = Voucher::try_decode_token(&token);
+    let found = Voucher::find_by_token(&token).await;
+    configure_key();
+    assert!(matches!(decoded, Err(Error::Tokenization { .. })));
+    assert!(matches!(found, Err(Error::Tokenization { .. })));
+}
+
+/// Global codecs may capture what they need, such as a prefix read at
+/// startup.
+#[test]
+fn global_codecs_may_capture_their_settings() {
+    let tenant = String::from("tenant-9");
+    let prefix = format!("{tenant}.");
+    TokenConfig::set_encoder(move |id, _model| Ok(format!("{tenant}.{id}")));
+    TokenConfig::set_decoder(move |token, _model| {
+        Ok(token.strip_prefix(&prefix).map(str::to_owned))
+    });
+    let token = Voucher::tokenize_id(8);
+    let decoded = Voucher::decode_token("tenant-9.8");
+    TokenConfig::reset();
+    configure_key();
+    assert_eq!(token.unwrap(), "tenant-9.8");
+    assert_eq!(decoded.unwrap(), 8);
+}

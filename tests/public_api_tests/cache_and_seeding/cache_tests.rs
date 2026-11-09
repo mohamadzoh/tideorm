@@ -1,17 +1,15 @@
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use tideorm::cache::{
-    CacheConfig, CacheKeyBuilder, CacheStrategy, PreparedStatementCache, QueryCache,
-};
+use tideorm::cache::{CacheConfig, CacheKeyBuilder, CacheStrategy, QueryCache};
 
 fn enabled_cache(max_entries: usize, strategy: CacheStrategy) -> QueryCache {
-    QueryCache::with_config(CacheConfig {
-        enabled: true,
-        max_entries,
-        strategy,
-        ..CacheConfig::default()
-    })
+    QueryCache::with_config(
+        CacheConfig::default()
+            .enabled(true)
+            .max_entries(max_entries)
+            .strategy(strategy),
+    )
 }
 
 #[test]
@@ -32,12 +30,12 @@ fn test_query_cache_enabled_disabled() {
 
 #[test]
 fn test_query_cache_entry_expires_after_default_ttl() {
-    let cache = QueryCache::with_config(CacheConfig {
-        enabled: true,
-        max_entries: 100,
-        default_ttl: Duration::from_millis(50),
-        ..CacheConfig::default()
-    });
+    let cache = QueryCache::with_config(
+        CacheConfig::default()
+            .enabled(true)
+            .max_entries(100)
+            .default_ttl(Duration::from_millis(50)),
+    );
 
     cache
         .set::<String>("k", &"value".to_string(), None, "test")
@@ -117,71 +115,11 @@ fn test_query_cache_concurrent_writers_respect_max_entries() {
 
 #[test]
 fn test_query_cache_generate_key_applies_prefix() {
-    let prefixed = QueryCache::with_config(CacheConfig {
-        enabled: true,
-        key_prefix: Some("v7".into()),
-        ..CacheConfig::default()
-    });
+    let prefixed = QueryCache::with_config(CacheConfig::default().enabled(true).key_prefix("v7"));
     assert_eq!(prefixed.generate_key("users", 12345), "v7:users:12345");
 
     let unprefixed = QueryCache::new();
     assert_eq!(unprefixed.generate_key("posts", 999), "posts:999");
-}
-
-#[test]
-fn test_prepared_statement_cache_stats() {
-    let cache = PreparedStatementCache::new();
-    cache.enable();
-
-    let sql = "SELECT * FROM users";
-
-    cache.get_or_prepare(sql);
-    cache.get_or_prepare(sql);
-    cache.get_or_prepare(sql);
-    cache.get_or_prepare("SELECT * FROM posts");
-
-    let stats = cache.stats();
-    assert_eq!(stats.cached_count, 2);
-    assert_eq!(stats.hits, 2);
-    assert_eq!(stats.misses, 2);
-    assert!((stats.hit_ratio() - 0.5).abs() < 0.01);
-}
-
-#[test]
-fn test_prepared_statement_record_execution() {
-    let cache = PreparedStatementCache::new();
-    cache.enable();
-
-    let sql = "SELECT * FROM users WHERE id = $1";
-    cache.get_or_prepare(sql);
-
-    cache.record_execution(sql, 100);
-    cache.record_execution(sql, 200);
-    cache.record_execution(sql, 300);
-
-    let stats = cache.stats();
-    assert_eq!(stats.total_executions, 3);
-
-    let statements = cache.cached_statements_info();
-    assert!(!statements.is_empty());
-    let stmt = &statements[0];
-    assert_eq!(stmt.execution_count, 3);
-    assert_eq!(stmt.avg_execution_time_us, 200);
-}
-
-#[test]
-fn test_prepared_statement_enabled_disabled() {
-    let cache = PreparedStatementCache::new();
-
-    cache.disable();
-    let (_, cached) = cache.get_or_prepare("SELECT 1");
-    assert!(!cached);
-    assert_eq!(cache.len(), 0);
-
-    cache.enable();
-    cache.get_or_prepare("SELECT 1");
-    let (_, cached) = cache.get_or_prepare("SELECT 1");
-    assert!(cached);
 }
 
 #[test]

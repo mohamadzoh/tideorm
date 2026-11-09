@@ -8,7 +8,7 @@ fn test_query_stats() {
         total_queries: 100,
         slow_queries: 5,
         total_time_ns: 500_000_000,
-        slow_threshold_ms: 100,
+        slow_threshold: Duration::from_millis(100),
     };
 
     assert_eq!(stats.total_time(), Duration::from_millis(500));
@@ -23,9 +23,9 @@ fn test_logger_records_duration_and_failure_from_a_finished_timer() {
     QueryLogger::disable();
 
     QueryLogger::global()
-        .set_level(LogLevel::Error)
-        .set_slow_query_threshold_ms(1)
-        .set_history_limit(10)
+        .level(LogLevel::Error)
+        .slow_query_threshold(std::time::Duration::from_millis(1))
+        .history_limit(10)
         .enable();
 
     let timer = QueryTimer::start("SELECT * FROM users").with_table("users");
@@ -51,8 +51,8 @@ fn test_logger_records_duration_and_failure_from_a_finished_timer() {
     QueryLogger::clear_history();
     QueryLogger::reset_stats();
     QueryLogger::global()
-        .set_slow_query_threshold_ms(100)
-        .set_history_limit(100)
+        .slow_query_threshold(std::time::Duration::from_millis(100))
+        .history_limit(100)
         .disable();
 }
 
@@ -60,11 +60,11 @@ fn test_logger_records_duration_and_failure_from_a_finished_timer() {
 fn test_builder_disable_still_applies_its_settings() {
     QueryLogger::clear_history();
     QueryLogger::global()
-        .set_level(LogLevel::Debug)
-        .set_history_limit(1)
+        .level(LogLevel::Debug)
+        .history_limit(1)
         .enable();
 
-    QueryLogger::global().set_history_limit(3).disable();
+    QueryLogger::global().history_limit(3).disable();
     assert!(!QueryLogger::is_enabled());
 
     QueryLogger::enable();
@@ -79,13 +79,13 @@ fn test_builder_disable_still_applies_its_settings() {
 
     QueryLogger::clear_history();
     QueryLogger::reset_stats();
-    QueryLogger::global().set_history_limit(100).disable();
+    QueryLogger::global().history_limit(100).disable();
 }
 
 #[test]
 fn test_stats_keep_sub_millisecond_query_time() {
     QueryLogger::reset_stats();
-    QueryLogger::global().set_level(LogLevel::Error).enable();
+    QueryLogger::global().level(LogLevel::Error).enable();
 
     QueryLogger::log(QueryLogEntry::new("SELECT 1").with_duration(Duration::from_micros(400)));
     QueryLogger::log(QueryLogEntry::new("SELECT 2").with_duration(Duration::from_micros(600)));
@@ -106,8 +106,8 @@ fn test_query_history_limit_drops_oldest_entries() {
         QueryLogger::clear_history();
         QueryLogger::reset_stats();
         QueryLogger::global()
-            .set_level(LogLevel::Debug)
-            .set_history_limit(limit)
+            .level(LogLevel::Debug)
+            .history_limit(limit)
             .enable();
 
         for sql in ["SELECT 1", "SELECT 2", "SELECT 3"] {
@@ -123,27 +123,15 @@ fn test_query_history_limit_drops_oldest_entries() {
 
     QueryLogger::clear_history();
     QueryLogger::reset_stats();
-    QueryLogger::global().set_history_limit(100).disable();
-}
-
-#[test]
-fn test_query_debug_display_labels_preview_as_non_executable() {
-    let debug_info = QueryDebugInfo::new("users")
-        .with_sql("-- DEBUG PREVIEW (not executable, values are approximate)\nSELECT * FROM \"users\" WHERE \"id\" = 1");
-
-    let rendered = format!("{}", debug_info);
-
-    assert!(rendered.contains("SQL Preview (non-executable):"));
-    assert!(rendered.contains("-- DEBUG PREVIEW (not executable, values are approximate)"));
-    assert!(!rendered.contains("\nSQL: -- DEBUG PREVIEW"));
+    QueryLogger::global().history_limit(100).disable();
 }
 
 #[test]
 fn test_query_logger_timing_flag_is_applied() {
-    QueryLogger::global().enable_timing(false).enable();
+    QueryLogger::global().timing(false).enable();
     assert!(!super::logger::QueryLogger::timing_enabled());
 
-    QueryLogger::global().enable_timing(true).enable();
+    QueryLogger::global().timing(true).enable();
     assert!(super::logger::QueryLogger::timing_enabled());
 
     QueryLogger::disable();
@@ -151,7 +139,8 @@ fn test_query_logger_timing_flag_is_applied() {
 
 #[test]
 fn test_slow_query_format_omits_fake_zero_ms_when_timing_is_hidden() {
-    let formatted = super::format::format_slow(&QueryLogEntry::new("SELECT 1"), 100);
+    let formatted =
+        super::format::format_slow(&QueryLogEntry::new("SELECT 1"), Duration::from_millis(100));
 
     assert!(formatted.contains("exceeded 100ms threshold"));
     assert!(!formatted.contains("0ms > 100ms threshold"));
@@ -176,4 +165,60 @@ fn an_enabled_logger_records_at_level_off() {
     QueryLogger::disable();
     QueryLogger::clear_history();
     QueryLogger::reset_stats();
+}
+
+#[test]
+fn a_sink_takes_what_the_level_prints_until_the_logger_is_reset() {
+    use std::sync::{Arc, Mutex};
+    QueryLogger::reset();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    QueryLogger::set_sink(move |entry, text| {
+        sink.lock()
+            .unwrap()
+            .push((entry.sql.clone(), text.to_string()));
+    });
+    QueryLogger::global().level(LogLevel::Error).enable();
+    QueryLogger::log(QueryLogEntry::new("SELECT 1"));
+    QueryLogger::log(QueryLogEntry::new("SELECT 2").with_error("boom"));
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].0, "SELECT 2");
+        assert!(seen[0].1.contains("failed: boom"), "{seen:?}");
+    }
+    assert_eq!(QueryLogger::history().len(), 2);
+
+    QueryLogger::reset();
+    assert!(QueryLogger::history().is_empty());
+    assert_eq!(QueryLogger::stats().total_queries, 0);
+    QueryLogger::global().level(LogLevel::Error).enable();
+    QueryLogger::log(QueryLogEntry::new("SELECT 3").with_error("on stderr"));
+    assert_eq!(seen.lock().unwrap().len(), 1, "the sink was cleared");
+    QueryLogger::reset();
+}
+
+#[test]
+fn apply_changes_settings_but_not_whether_logging_runs() {
+    QueryLogger::reset();
+    QueryLogger::disable();
+    QueryLogger::global()
+        .slow_query_threshold(Duration::from_micros(500))
+        .apply();
+    assert!(!QueryLogger::is_enabled());
+    assert_eq!(
+        QueryLogger::slow_query_threshold(),
+        Duration::from_micros(500)
+    );
+
+    // A threshold below a millisecond is kept, not rounded to zero.
+    QueryLogger::enable();
+    for micros in [700, 300] {
+        QueryLogger::log(
+            QueryLogEntry::new("SELECT 1").with_duration(Duration::from_micros(micros)),
+        );
+    }
+    assert_eq!(QueryLogger::stats().slow_queries, 1);
+    assert_eq!(QueryLogger::slow_queries().len(), 1);
+    QueryLogger::reset();
 }

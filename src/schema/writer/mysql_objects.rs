@@ -1,6 +1,9 @@
 //! MySQL/MariaDB schema objects retain server-authored definitions and the
 //! SQL modes under which stored programs were parsed.
+use std::fmt::Write as _;
+
 use super::*;
+use crate::config::DatabaseType;
 
 fn literal(value: &str) -> String {
     format!("'{}'", value.replace('\\', "\\\\").replace('\'', "''"))
@@ -20,8 +23,8 @@ pub(super) async fn introspect(conn: &OrmConnection) -> Result<Catalog> {
     let mut catalog = Catalog::default();
     let database_rows = query(
         conn,
-        Backend::MySql,
-        "SELECT DATABASE() AS name, CAST(@@lower_case_table_names AS SIGNED) AS fold_names, default_collation_name AS database_collation
+        DatabaseType::MySQL,
+        "SELECT DATABASE() AS name, @@lower_case_table_names AS fold_names, default_collation_name AS database_collation
          FROM information_schema.schemata
          WHERE schema_name=DATABASE()",
         Vec::new(),
@@ -56,7 +59,7 @@ pub(super) async fn introspect(conn: &OrmConnection) -> Result<Catalog> {
     catalog.prelude.push(database_collation.clone());
     let rows = query(
         conn,
-        Backend::MySql,
+        DatabaseType::MySQL,
         "SELECT table_name AS name,table_type AS kind
          FROM information_schema.tables
          WHERE table_schema=DATABASE()
@@ -101,7 +104,7 @@ pub(super) async fn introspect(conn: &OrmConnection) -> Result<Catalog> {
     for name in &views {
         let columns = query(
             conn,
-            Backend::MySql,
+            DatabaseType::MySQL,
             "SELECT column_name AS name, column_type AS data_type, collation_name AS collation
              FROM information_schema.columns
              WHERE table_schema=DATABASE() AND table_name=?
@@ -117,10 +120,11 @@ pub(super) async fn introspect(conn: &OrmConnection) -> Result<Catalog> {
                 get::<String>(&column, "data_type")?
             );
             if let Some(collation) = get::<Option<String>>(&column, "collation")? {
-                definition.push_str(&format!(
+                let _ = write!(
+                    definition,
                     " COLLATE {}",
                     quote_ident(DatabaseType::MySQL, &collation)
-                ));
+                );
             }
             definitions.push(definition);
         }
@@ -134,7 +138,7 @@ pub(super) async fn introspect(conn: &OrmConnection) -> Result<Catalog> {
     // DEFINER, SQL SECURITY, characteristics, parameters and compound bodies.
     for row in query(
         conn,
-        Backend::MySql,
+        DatabaseType::MySQL,
         "SELECT routine_name AS name,routine_type AS kind
          FROM information_schema.routines
          WHERE routine_schema=DATABASE()
@@ -181,7 +185,7 @@ pub(super) async fn introspect(conn: &OrmConnection) -> Result<Catalog> {
     }
     for row in query(
         conn,
-        Backend::MySql,
+        DatabaseType::MySQL,
         "SELECT trigger_name AS name
          FROM information_schema.triggers
          WHERE trigger_schema=DATABASE()
@@ -203,7 +207,7 @@ pub(super) async fn introspect(conn: &OrmConnection) -> Result<Catalog> {
     }
     for row in query(
         conn,
-        Backend::MySql,
+        DatabaseType::MySQL,
         "SELECT event_name AS name
          FROM information_schema.events
          WHERE event_schema=DATABASE()
@@ -297,7 +301,7 @@ async fn show_create(
 ) -> Result<QueryResult> {
     query(
         conn,
-        Backend::MySql,
+        DatabaseType::MySQL,
         &format!(
             "SHOW CREATE {kind} {}",
             quote_ident(DatabaseType::MySQL, name)

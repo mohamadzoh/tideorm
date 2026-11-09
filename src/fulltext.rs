@@ -15,17 +15,17 @@ use std::marker::PhantomData;
 
 use crate::config::DatabaseType;
 use crate::error::{Error, Result};
-use crate::internal::sql_builder::SqlBuilder;
+use crate::internal::Value;
 use crate::internal::sql_safety::{
     column_list, double_quoted, escape_fts5_query_literal_terms as escape_fts5_query,
-    escape_sql_literal_for_db, format_identifier_reference, fts5_boolean_query, fts5_near_query,
-    fts5_phrase_query, fts5_prefix_query, has_searchable_char, is_safe_identifier_segment,
-    quote_ident, sanitize_mysql_fulltext_query, sanitize_postgres_boolean_tsquery,
+    fts5_boolean_query, fts5_near_query, fts5_phrase_query, fts5_prefix_query, has_searchable_char,
+    is_safe_identifier_segment, quote_ident, quote_qualified, sanitize_mysql_fulltext_query,
+    sanitize_postgres_boolean_tsquery,
     sanitize_postgres_proximity_tsquery_literals as sanitize_postgres_proximity_tsquery,
     sanitize_postgres_tsquery_literals as sanitize_postgres_tsquery, search_words,
 };
-use crate::internal::{Value, push_param};
 use crate::model::Model;
+use crate::orm::sql_builder::BoundSql;
 
 mod core;
 mod index_helpers;
@@ -43,13 +43,9 @@ pub use search_builder::*;
 /// configuration is cast when the statement runs, which the planner cannot
 /// match to the index, so every search read the whole table.
 fn pg_language(language: Option<&str>) -> String {
-    format!(
-        "'{}'",
-        crate::internal::sql_safety::escape_sql_literal_for_db(
-            DatabaseType::Postgres,
-            language.unwrap_or("english"),
-        )
-    )
+    DatabaseType::Postgres
+        .dialect()
+        .string_literal(language.unwrap_or("english"))
 }
 
 /// `to_tsvector(<language>, <columns>)` as the index [`FullTextIndex`] builds
@@ -66,15 +62,16 @@ fn pg_tsvector(language: Option<&str>, columns: &[String]) -> String {
 /// Render the PostgreSQL text a `tsvector` is built from: every column, with
 /// `NULL` read as empty, joined by spaces.
 fn pg_search_document(columns: &[String]) -> String {
-    let mut params = Vec::new();
-    let mut builder = SqlBuilder::new(DatabaseType::Postgres, &mut params);
-    for (index, column) in columns.iter().enumerate() {
-        if index > 0 {
-            builder = builder.raw(" || ' ' || ");
-        }
-        builder = builder.raw("COALESCE(").ident(column).raw(", '')");
-    }
-    builder.into_sql()
+    columns
+        .iter()
+        .map(|column| {
+            format!(
+                "COALESCE({}, '')",
+                quote_ident(DatabaseType::Postgres, column)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" || ' ' || ")
 }
 
 #[cfg(test)]

@@ -1,7 +1,5 @@
 #![allow(missing_docs)]
 
-use std::future::Future;
-
 use crate::error::{Error, Result};
 
 use super::Model;
@@ -9,8 +7,6 @@ use super::Model;
 pub(crate) async fn insert_all<M>(models: Vec<M>) -> Result<Vec<M>>
 where
     M: Model,
-    <<M as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
-        crate::internal::IntoActiveModel<<M as crate::internal::InternalModel>::ActiveModel>,
 {
     if models.is_empty() {
         return Ok(Vec::new());
@@ -18,21 +14,19 @@ where
 
     for (index, model) in models.iter().enumerate() {
         if let Err(errors) = model.validate() {
-            return Err(match Error::from(errors) {
-                Error::Validation { field, message } => Error::validation(
+            let mut located = crate::validation::ValidationErrors::new();
+            for (field, message) in errors.errors() {
+                located.add(
                     field,
                     format!("{message} (the batch's model at index {index})"),
-                ),
-                other => other,
-            });
+                );
+            }
+            return Err(located.into());
         }
     }
 
     crate::internal::QueryExecutor::insert_many::<M>(models).await
 }
-
-type EntityModel<M> =
-    <<M as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model;
 
 /// The connection a write of `active` runs on, once every value it writes is
 /// one the driver can read back.
@@ -41,7 +35,6 @@ pub(super) fn writable_connection<M: Model>(
 ) -> Result<crate::database::ConnectionRef> {
     let connection = crate::database::__current_connection()?;
     let executor = connection.executor();
-    crate::internal::ensure_fields_storable::<M, _>(&executor)?;
     crate::internal::ensure_active_values_storable::<M>(active, &executor)?;
     Ok(connection)
 }
@@ -50,11 +43,11 @@ pub(super) fn writable_connection<M: Model>(
 /// write that supplied an auto-increment key moves the key's sequence past it.
 pub(super) async fn stored_row<M: Model>(
     connection: &crate::database::ConnectionRef,
-    executor: &crate::internal::Executor<'_>,
-    row: Result<EntityModel<M>>,
+    executor: &crate::orm::DatabaseExecutor<'_>,
+    row: Result<M>,
     explicit_key: bool,
 ) -> Result<M> {
-    let model = super::__loading_through(connection, || M::try_from_entity_model(row?))?;
+    let model = row?.finish_load(connection);
     if explicit_key {
         crate::internal::advance_key_sequence::<M>(executor, [model.primary_key()]).await?;
     }
@@ -67,7 +60,6 @@ pub(super) async fn stored_row<M: Model>(
 pub async fn __insert_row<M>(active: M::ActiveModel) -> Result<M>
 where
     M: Model,
-    EntityModel<M>: crate::internal::IntoActiveModel<M::ActiveModel>,
 {
     use crate::internal::ActiveModelTrait;
 
@@ -75,7 +67,7 @@ where
     let executor = connection.executor();
     let explicit_key = crate::internal::holds_auto_increment_key::<M>(&active);
     let row = connection
-        .invalidating(crate::internal::run_profiled(
+        .invalidating(crate::internal::run_statement(
             active.insert(&executor),
             || {
                 crate::internal::model_error_context::<M>(format!(
@@ -94,14 +86,13 @@ where
 pub async fn __update_row<M>(active: M::ActiveModel, primary_key: &M::PrimaryKey) -> Result<M>
 where
     M: Model,
-    EntityModel<M>: crate::internal::IntoActiveModel<M::ActiveModel>,
 {
     use crate::internal::ActiveModelTrait;
 
     let connection = writable_connection::<M>(&active)?;
     let executor = connection.executor();
     let row = connection
-        .invalidating(crate::internal::run_profiled(
+        .invalidating(crate::internal::run_statement(
             active.update(&executor),
             || {
                 crate::internal::primary_key_error_context::<M>(
@@ -111,24 +102,23 @@ where
             },
         ))
         .await;
-    let model = super::__loading_through(&connection, || M::try_from_entity_model(row?))?;
-    Ok(model)
+    stored_row::<M>(&connection, &executor, row, false).await
 }
 
 /// Remove `model`'s row for good and report how many rows went, with no
 /// callback: `__force_delete()` runs its own around it.
 #[doc(hidden)]
 pub async fn __delete_row<M: Model>(model: &M) -> Result<u64> {
-    use crate::internal::{EntityTrait, InternalModel, QueryFilter};
+    use crate::internal::{EntityTrait, QueryFilter};
 
     let primary_key = model.primary_key();
     let connection = crate::database::__current_connection()?;
-    // The key condition binds a `u64` past `i64::MAX` as a decimal, where the
-    // model's own value would panic the driver.
     let executor = connection.executor();
+    // The key condition binds a `u64` past `i64::MAX` as a decimal, which the
+    // model's own value could not be bound as.
     let result = connection
-        .invalidating(crate::internal::run_profiled(
-            <M as InternalModel>::Entity::delete_many()
+        .invalidating(crate::internal::run_statement(
+            M::Entity::delete_many()
                 .filter(M::primary_key_condition(&primary_key))
                 .exec(&executor),
             || {
@@ -147,11 +137,7 @@ pub async fn __delete_row<M: Model>(model: &M) -> Result<u64> {
 
 pub(crate) async fn transaction<F, T>(f: F) -> Result<T>
 where
-    F: for<'c> FnOnce(
-            &'c crate::database::Transaction,
-        ) -> std::pin::Pin<Box<dyn Future<Output = Result<T>> + Send + 'c>>
-        + Send,
-    T: Send,
+    F: AsyncFnOnce(&crate::database::Transaction) -> Result<T>,
 {
     crate::database::__current_db()?.transaction(f).await
 }

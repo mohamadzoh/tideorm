@@ -8,7 +8,7 @@ use crate::model::Model;
 use crate::query::QueryBuilder;
 
 #[cfg(feature = "entity-manager")]
-use crate::entity_manager::{EntityManager, TideEntityManagerMeta, model_entity_manager_key};
+use crate::entity_manager::{EntityManager, model_entity_manager_key};
 
 #[cfg(feature = "entity-manager")]
 use super::state::RelationState;
@@ -29,10 +29,15 @@ pub(crate) fn ensure_relation_configured(
 }
 
 pub(crate) fn require_scalar_relation_key<'a>(
-    value: &'a serde_json::Value,
+    value: &'a Value,
     context: &str,
-) -> Result<&'a serde_json::Value> {
-    if value.is_array() || value.is_object() {
+) -> Result<&'a Value> {
+    let composite = match value {
+        Value::Array(..) => true,
+        Value::Json(Some(json)) => json.is_array() || json.is_object(),
+        _ => false,
+    };
+    if composite {
         return Err(Error::query(format!(
             "{} only supports scalar relation keys; composite primary keys require an explicit single-column relation key or a custom query",
             context
@@ -40,6 +45,12 @@ pub(crate) fn require_scalar_relation_key<'a>(
     }
 
     Ok(value)
+}
+
+/// Whether a relation key is NULL, which relates to no row: SQL NULL, or a
+/// JSON `null` handed over as a key.
+pub(crate) fn is_null_key(key: &Value) -> bool {
+    crate::query::is_sql_null(key) || crate::query::is_json_null(key)
 }
 
 /// `query` narrowed to the rows whose `column` holds `key`.
@@ -50,22 +61,19 @@ pub(crate) fn require_scalar_relation_key<'a>(
 pub(crate) fn where_key<M: Model>(
     query: QueryBuilder<M>,
     column: impl Into<String>,
-    key: &serde_json::Value,
+    key: &Value,
 ) -> QueryBuilder<M> {
     let column = column.into();
-    if key.is_null() {
-        query.where_in(column, Vec::<serde_json::Value>::new())
+    if is_null_key(key) {
+        query.where_in(column, Vec::<Value>::new())
     } else {
         query.where_eq(column, key.clone())
     }
 }
 
 /// `key`, which a write links rows by; a NULL one links none.
-pub(crate) fn linkable_key<'a>(
-    key: &'a serde_json::Value,
-    context: &str,
-) -> Result<&'a serde_json::Value> {
-    if key.is_null() {
+pub(crate) fn linkable_key<'a>(key: &'a Value, context: &str) -> Result<&'a Value> {
+    if is_null_key(key) {
         return Err(Error::query(format!(
             "{context}: the relation key is NULL, so no row can be linked to it"
         )));
@@ -78,32 +86,14 @@ pub(crate) fn linkable_key<'a>(
 /// `what` names the key in the error for a wrapper that never received one — a
 /// bare `Default`, or a model deserialized without being refreshed.
 pub(crate) fn required_key<'a>(
-    key: &'a Option<serde_json::Value>,
+    key: &'a Option<Value>,
     what: &str,
     context: &str,
-) -> Result<&'a serde_json::Value> {
+) -> Result<&'a Value> {
     let key = key
         .as_ref()
         .ok_or_else(|| Error::query(format!("{what} not set for relation")))?;
     require_scalar_relation_key(key, context)
-}
-
-/// Whether `key`, the owner key a relation wrapper was built with, names no
-/// stored row yet: absent, or the placeholder a new model holds (`null`, `0`,
-/// `""`, the nil UUID). The rows cached in such a wrapper are the caller's,
-/// so they are kept when saving the owner rebuilds the wrapper under its
-/// stored key: an entity manager then saves them as its children.
-pub(crate) fn owner_is_unsaved(key: &Option<serde_json::Value>) -> bool {
-    match key {
-        None | Some(serde_json::Value::Null) => true,
-        Some(serde_json::Value::Number(number)) => {
-            number.as_i64() == Some(0) || number.as_u64() == Some(0)
-        }
-        Some(serde_json::Value::String(text)) => {
-            text.is_empty() || uuid::Uuid::parse_str(text).is_ok_and(|uuid| uuid.is_nil())
-        }
-        Some(_) => false,
-    }
 }
 
 /// Where a relation's statements run.
@@ -111,7 +101,7 @@ pub(crate) fn owner_is_unsaved(key: &Option<serde_json::Value>) -> bool {
 /// By default that is the scope's connection: the enclosing transaction, else
 /// the global database. Loaded relations retain their owner's database;
 /// under `entity-manager` they can also belong to a manager's identity map.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct QuerySource {
     /// The manager that loaded the relation. It owns the cached instances, so
     /// `load` serves them rather than re-querying.
@@ -119,16 +109,6 @@ pub(crate) struct QuerySource {
     pub(crate) entity_manager: Option<Arc<EntityManager>>,
     /// The database the owning model was loaded from.
     pub(crate) database: Option<Database>,
-}
-
-impl Default for QuerySource {
-    fn default() -> Self {
-        Self {
-            #[cfg(feature = "entity-manager")]
-            entity_manager: None,
-            database: crate::database::loading_database(),
-        }
-    }
 }
 
 impl QuerySource {
@@ -201,18 +181,18 @@ impl QuerySource {
 pub(crate) async fn load_one_in_entity_manager<'s, E>(
     state: &'s mut RelationState<Box<E>>,
     entity_manager: &Arc<EntityManager>,
-    lookup: Result<(&str, serde_json::Value, QueryBuilder<E>)>,
+    lookup: Result<(&str, Value, QueryBuilder<E>)>,
     owned: bool,
 ) -> Result<Option<&'s E>>
 where
-    E: Model + TideEntityManagerMeta,
+    E: Model,
 {
     if !state.is_loaded() {
         let (column, key, query) = lookup?;
-        let found = if key.is_null() {
+        let found = if is_null_key(&key) {
             None
         } else {
-            match entity_manager.find_by_field::<E>(column, &key)? {
+            match entity_manager.find_by_field::<E>(column, &key) {
                 Some(tracked) => Some(tracked),
                 None => query.first().await?,
             }
@@ -220,8 +200,7 @@ where
         state.set_cached(found.map(Box::new));
     }
 
-    let keys =
-        register_loaded(entity_manager, state.cached_mut().map(|model| &mut **model)).await?;
+    let keys = register_loaded(entity_manager, state.cached_mut().map(|model| &mut **model))?;
     if owned {
         state.loaded_keys = Some(keys);
     }
@@ -240,14 +219,14 @@ pub(crate) async fn load_many_in_entity_manager<'s, E>(
     query: Result<QueryBuilder<E>>,
 ) -> Result<&'s Vec<E>>
 where
-    E: Model + TideEntityManagerMeta,
+    E: Model,
 {
     let models = match state.take() {
         Some(models) => models,
         None => query?.get().await?,
     };
     let models = state.insert(models);
-    let keys = register_loaded(entity_manager, models.iter_mut()).await?;
+    let keys = register_loaded(entity_manager, models.iter_mut())?;
     state.loaded_keys = Some(keys);
     Ok(state.cached().expect("the rows were just cached"))
 }
@@ -272,16 +251,16 @@ pub(crate) fn identity_keys<E: Model>(models: Option<&Vec<E>>) -> Result<Vec<Str
 /// overwrite it, so the relation, `find` and the managed baselines share one
 /// instance per row.
 #[cfg(feature = "entity-manager")]
-pub(crate) async fn register_loaded<'m, E>(
+pub(crate) fn register_loaded<'m, E>(
     entity_manager: &EntityManager,
     models: impl IntoIterator<Item = &'m mut E>,
 ) -> Result<Vec<String>>
 where
-    E: Model + TideEntityManagerMeta,
+    E: Model,
 {
     let mut keys = Vec::new();
     for model in models {
-        *model = entity_manager.register(model.clone()).await;
+        *model = entity_manager.register(model.clone());
         if let Some(key) = model_entity_manager_key(&*model)? {
             keys.push(key);
         }
@@ -336,7 +315,7 @@ pub(crate) fn soft_delete_clause<E: Model>(
 pub(crate) fn build_self_ref_tree_sql<E: Model>(
     foreign_key: &str,
     local_key: &str,
-    parent_pk: &serde_json::Value,
+    parent_pk: &Value,
     max_depth: usize,
     db_type: crate::config::DatabaseType,
 ) -> Result<(String, Vec<Value>)> {
@@ -402,7 +381,7 @@ pub(crate) fn build_self_ref_tree_sql<E: Model>(
     let parent_placeholder = crate::internal::push_param(
         db_type,
         &mut params,
-        crate::internal::json_to_column_value(
+        crate::internal::column_value(
             parent_pk,
             crate::internal::column_type_of::<E>(foreign_key).as_ref(),
         ),

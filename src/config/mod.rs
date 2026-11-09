@@ -9,14 +9,13 @@
 
 mod builder;
 mod database;
+mod pool;
 mod settings;
 mod state;
 
 pub use builder::TideConfig;
 pub use database::DatabaseType;
-pub(crate) use database::rewrite_driver_url;
 pub use settings::{Config, PoolConfig};
-pub(crate) use state::note_detected_mariadb;
 
 #[cfg(feature = "attachments")]
 pub use settings::FileUrlGenerator;

@@ -3,10 +3,8 @@
 //! SQLite changes enforcement only outside a transaction, and a migration runs
 //! in one, where `PRAGMA foreign_keys = OFF` does nothing: a rebuild's
 //! `DROP TABLE` would delete the rows pointing at the table. A migration
-//! asking for it runs on a connection of its own opened with enforcement off.
+//! asking for it runs on a session of its own with enforcement turned off.
 
-#[cfg(feature = "sqlite")]
-use super::migrator::sqlx_error;
 #[cfg(feature = "sqlite")]
 use crate::database::Database;
 #[cfg(feature = "sqlite")]
@@ -22,34 +20,32 @@ pub(super) async fn run_with_foreign_keys_off(
 ) -> Result<()> {
     let migrating = sqlite_foreign_keys_off(db).await?;
     let result = migrating
-        .transaction(move |_| {
-            Box::pin(async move {
-                // The check after the migration cannot tell the rows it
-                // leaves from rows that already pointed nowhere.
-                if let Some(violations) = foreign_key_violations().await? {
-                    return Err(Error::query(format!(
-                        "the database already has {violations}; fix them before running a \
+        .transaction(async move |_| {
+            // The check after the migration cannot tell the rows it
+            // leaves from rows that already pointed nowhere.
+            if let Some(violations) = foreign_key_violations().await? {
+                return Err(Error::query(format!(
+                    "the database already has {violations}; fix them before running a \
                          migration with foreign keys off"
-                    )));
-                }
-                work.await?;
-                match foreign_key_violations().await? {
-                    Some(violations) => Err(Error::query(format!(
-                        "the migration ran with foreign keys off and leaves {violations}; it \
+                )));
+            }
+            work.await?;
+            match foreign_key_violations().await? {
+                Some(violations) => Err(Error::query(format!(
+                    "the migration ran with foreign keys off and leaves {violations}; it \
                          was rolled back"
-                    ))),
-                    None => Ok(()),
-                }
-            })
+                ))),
+                None => Ok(()),
+            }
         })
         .await;
-    let _ = migrating.__internal_connection()?.close_by_ref().await;
+    let _ = migrating.close().await;
     result
 }
 
-/// A handle on `db`'s SQLite database through a connection of its own with
-/// foreign key enforcement off, under `db`'s identity, so a statement through
-/// `db` joins a transaction opened on it.
+/// A session on `db`'s SQLite database with foreign key enforcement off,
+/// under `db`'s identity, so a statement through `db` joins a transaction
+/// opened on it.
 #[cfg(feature = "sqlite")]
 async fn sqlite_foreign_keys_off(db: &Database) -> Result<Database> {
     if matches!(
@@ -61,29 +57,13 @@ async fn sqlite_foreign_keys_off(db: &Database) -> Result<Database> {
              foreign key enforcement only outside one",
         ));
     }
-    let pool = db.current_inner()?;
-    let sqlite = pool.connection().get_sqlite_connection_pool();
-    let options = (*sqlite.connect_options()).clone().foreign_keys(false);
-    let connection = crate::internal::sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(options)
+    let migrating = db.pin_session_sharing_identity().await?;
+    if let Err(error) = migrating
+        .__execute_with_params("PRAGMA foreign_keys = OFF", Vec::new())
         .await
-        .map_err(|error| crate::internal::translate_connection_error(sqlx_error(error)))?;
-    let migrating = Database::sharing_identity_of(&pool, connection.into());
-
-    // An in-memory database with a private cache is one per connection, so
-    // the new one would be empty, where the ledger already is in `db`'s.
-    let objects = |db: Database| async move {
-        db.__raw_json_with_params("SELECT count(*) AS n FROM sqlite_master", Vec::new())
-            .await
-            .map(|rows| rows.first().and_then(|row| row["n"].as_i64()))
-    };
-    if objects(db.clone()).await? != objects(migrating.clone()).await? {
-        let _ = migrating.__internal_connection()?.close_by_ref().await;
-        return Err(Error::query(
-            "a migration with foreign keys off needs a connection of its own to the database, \
-             which an in-memory SQLite database with a private cache cannot give",
-        ));
+    {
+        let _ = migrating.close().await;
+        return Err(error);
     }
     Ok(migrating)
 }
@@ -111,7 +91,7 @@ async fn foreign_key_violations() -> Result<Option<String>> {
 /// both pragma assignment syntaxes, quoted names, schema qualifiers and comments.
 /// Inspect every statement before execution so a script cannot partially run
 /// before its ineffective request to disable enforcement is rejected.
-pub fn disables_foreign_keys(sql: &str) -> bool {
+pub(super) fn disables_foreign_keys(sql: &str) -> bool {
     use crate::internal::sql_lexer::sqlite_significant;
 
     let tokens: Vec<_> = sqlite_significant(sql).collect();

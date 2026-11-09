@@ -1,30 +1,26 @@
 mod select;
 
 use super::*;
+use crate::orm::sql_builder::SelectStatement;
 
 impl<M: Model> QueryBuilder<M> {
     /// `SELECT <projection>` over the query's table, joins and filters alone,
     /// for a count or an aggregate that no other clause shapes.
-    pub(in crate::query) fn build_plain_select_sql(
+    pub(in crate::query) fn plain_select(
         &self,
         db_type: DatabaseType,
-        projection: &str,
-    ) -> (String, Vec<Value>) {
-        let (where_sql, params) = self.build_where_clause_with_condition_for_db(db_type);
-        let mut sql = format!("SELECT {projection} ");
-        self.append_from_and_join_sql(&mut sql, db_type);
-        if !where_sql.is_empty() {
-            sql.push_str("WHERE ");
-            sql.push_str(&where_sql);
-        }
-        sql.truncate(sql.trim_end().len());
-        (sql, params)
+        projection: impl Into<String>,
+    ) -> Result<SelectStatement> {
+        let mut select = SelectStatement::new();
+        select.expr(Expr::cust(projection.into()));
+        self.add_tables_and_filter(&mut select, db_type)?;
+        Ok(select)
     }
 
     pub(crate) fn build_count_sql_with_params_for_db(
         &self,
         db_type: DatabaseType,
-    ) -> (String, Vec<Value>) {
+    ) -> Result<(String, Vec<Value>)> {
         let mut count_query = self.clone();
         count_query.clauses.order_by.clear();
         count_query.clauses.limit_value = None;
@@ -45,29 +41,28 @@ impl<M: Model> QueryBuilder<M> {
             && count_query.clauses.raw_select_expressions.is_empty()
             && !count_query.clauses.lock_for_update
         {
-            return count_query.build_plain_select_sql(db_type, "COUNT(*) AS count");
+            return db_sql::built(
+                db_type,
+                &count_query.plain_select(db_type, "COUNT(*) AS count")?,
+            );
         }
 
-        let (inner_sql, params) = count_query.build_select_sql_with_params_for_db(db_type);
-        (
-            db_sql::select_from_derived(
-                db_type,
-                "COUNT(*) AS count",
-                &inner_sql,
-                "tideorm_count_subquery",
-            ),
-            params,
-        )
+        let select = db_sql::select_from_derived(
+            "COUNT(*) AS count",
+            count_query.select_statement(db_type)?,
+            "tideorm_count_subquery",
+        );
+        db_sql::built(db_type, &select)
     }
 
-    pub(super) fn build_count_sql_with_params(&self) -> (String, Vec<Value>) {
-        self.build_count_sql_with_params_for_db(self.db_type_for_sql())
+    pub(super) fn build_count_sql_with_params(&self) -> Result<(String, Vec<Value>)> {
+        self.build_count_sql_with_params_for_db(self.db_type_for_sql()?)
     }
 
     pub(crate) fn build_exists_sql_with_params_for_db(
         &self,
         db_type: DatabaseType,
-    ) -> (String, Vec<Value>) {
+    ) -> Result<(String, Vec<Value>)> {
         let mut exists_query = self.clone();
         exists_query.clauses.order_by.clear();
         exists_query.clauses.limit_value = None;
@@ -88,30 +83,24 @@ impl<M: Model> QueryBuilder<M> {
             }
 
             if exists_query.clauses.ctes.is_empty() && !exists_query.clauses.lock_for_update {
-                let (inner_sql, params) =
-                    exists_query.build_base_select_sql_with_params_for_db(db_type);
-                return (
-                    format!(
-                        "SELECT EXISTS({} LIMIT 1) AS {}",
-                        inner_sql,
-                        db_sql::quote_ident(db_type, "exists_result")
-                    ),
-                    params,
-                );
+                let mut inner = exists_query.select_statement(db_type)?;
+                inner.limit(1);
+                let mut select = SelectStatement::new();
+                select.expr_as(Expr::exists(inner), "exists_result");
+                return db_sql::built(db_type, &select);
             }
         }
 
-        let (inner_sql, params) = exists_query.build_select_sql_with_params_for_db(db_type);
-        (
-            format!(
-                "{} LIMIT 1",
-                db_sql::select_from_derived(db_type, "1", &inner_sql, "tideorm_exists_subquery")
-            ),
-            params,
-        )
+        let mut select = db_sql::select_from_derived(
+            "1",
+            exists_query.select_statement(db_type)?,
+            "tideorm_exists_subquery",
+        );
+        select.limit(1);
+        db_sql::built(db_type, &select)
     }
 
-    pub(super) fn build_exists_sql_with_params(&self) -> (String, Vec<Value>) {
-        self.build_exists_sql_with_params_for_db(self.db_type_for_sql())
+    pub(super) fn build_exists_sql_with_params(&self) -> Result<(String, Vec<Value>)> {
+        self.build_exists_sql_with_params_for_db(self.db_type_for_sql()?)
     }
 }

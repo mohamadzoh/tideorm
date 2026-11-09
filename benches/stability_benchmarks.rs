@@ -1,13 +1,11 @@
 //! Non-database TideORM stability benchmarks.
 //!
 //! These benches cover stable internal workloads that are useful to keep clean:
-//! query debugging, OR-clause construction, schema generation, and Rust-to-SQL
-//! type mapping.
+//! query debugging, OR-clause construction, and schema generation.
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 use tideorm::prelude::*;
-use tideorm::schema::rust_type_to_column_type;
 
 #[derive(Model, PartialEq)]
 #[tideorm(table = "audit_events")]
@@ -52,7 +50,7 @@ fn build_complex_debug_info() -> QueryDebugInfo {
         .where_eq("status", "open")
         .where_gte("attempts", 2)
         .where_lte("attempts", 8)
-        .or_where(|query| {
+        .where_any(|query| {
             query
                 .where_eq("actor_id", 10)
                 .where_eq("actor_id", 11)
@@ -190,8 +188,8 @@ fn bench_or_query_construction(c: &mut Criterion) {
         b.iter(|| {
             Member::query()
                 .where_eq("active", true)
-                .or_where(|q| q.where_eq("status", "active").where_eq("status", "pending"))
-                .or_where(|q| q.where_in("department", vec!["Engineering", "Marketing"]))
+                .where_any(|q| q.where_eq("status", "active").where_eq("status", "pending"))
+                .where_any(|q| q.where_in("department", vec!["Engineering", "Marketing"]))
         })
     });
     group.bench_function("or_where_eq_shorthand", |b| {
@@ -265,43 +263,6 @@ fn bench_schema_generation(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_rust_type_mapping(c: &mut Criterion) {
-    let rust_types = [
-        "i64",
-        "String",
-        "chrono::DateTime<chrono::Utc>",
-        "Option<Vec<String>>",
-        "serde_json::Value",
-    ];
-    let mut group = c.benchmark_group("rust_type_to_column_type");
-
-    for db_type in [
-        DatabaseType::Postgres,
-        DatabaseType::MySQL,
-        DatabaseType::SQLite,
-    ] {
-        group.bench_with_input(
-            BenchmarkId::new("map_five_types", format!("{db_type:?}")),
-            &db_type,
-            |b, db_type| {
-                b.iter(|| {
-                    black_box(
-                        rust_types
-                            .iter()
-                            .map(|rust_type| {
-                                rust_type_to_column_type(black_box(rust_type))
-                                    .map(|column_type| column_type.to_sql(*db_type))
-                            })
-                            .collect::<Vec<_>>(),
-                    )
-                })
-            },
-        );
-    }
-
-    group.finish();
-}
-
 criterion_group!(
     benches,
     bench_query_debug_snapshot,
@@ -309,7 +270,6 @@ criterion_group!(
     bench_or_group_construction,
     bench_or_query_construction,
     bench_schema_generation,
-    bench_rust_type_mapping,
 );
 
 criterion_main!(benches);

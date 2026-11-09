@@ -1,10 +1,9 @@
-#![allow(missing_docs)]
-
 use std::any::Any;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::columns::IntoColumnName;
 use crate::error::{Error, Result};
 
 use super::Model;
@@ -129,6 +128,24 @@ impl SavedRelation {
             )),
         }
     }
+
+    /// The model a `with_one` saved, borrowed; `None` when this result came
+    /// from `with_many` or holds another model type.
+    pub fn as_one<R: Model>(&self) -> Option<&R> {
+        match &self.0 {
+            SavedRelationInner::One(saved) => saved.downcast_ref(),
+            SavedRelationInner::Many(_) => None,
+        }
+    }
+
+    /// The models a `with_many` saved, borrowed; `None` when this result came
+    /// from `with_one` or holds another model type.
+    pub fn as_many<R: Model>(&self) -> Option<&[R]> {
+        match &self.0 {
+            SavedRelationInner::Many(saved) => saved.downcast_ref::<Vec<R>>().map(Vec::as_slice),
+            SavedRelationInner::One(_) => None,
+        }
+    }
 }
 
 /// The saved value as `T`, cloned only when a clone of the result shares it.
@@ -230,14 +247,12 @@ async fn save_parent_then<M: Model, R: Model>(
 ) -> Result<(M, Vec<R>)> {
     let foreign_key = resolve_foreign_key_field::<R>(foreign_key)?;
 
-    super::crud::transaction(move |_| {
-        Box::pin(async move {
-            let parent = parent.save().await?;
-            let pk_value = require_scalar_primary_key::<M>(&parent.primary_key(), context)?;
-            let children = save_related(children, foreign_key, &pk_value).await?;
+    super::crud::transaction(async move |_| {
+        let parent = parent.save().await?;
+        let pk_value = require_scalar_primary_key::<M>(&parent.primary_key(), context)?;
+        let children = save_related(children, foreign_key, &pk_value).await?;
 
-            Ok((parent, children))
-        })
+        Ok((parent, children))
     })
     .await
 }
@@ -247,61 +262,88 @@ async fn save_parent_then<M: Model, R: Model>(
 /// Each method writes the parent and its children as one unit of work: they
 /// run in a single transaction — a SAVEPOINT when the caller already opened
 /// one — so a failing child also rolls back the parent's write.
+///
+/// A foreign key is the child's column or field name, or its typed column
+/// (`Post::USER_ID`); children come in any list, a `Vec` or an array.
 #[async_trait]
 pub trait NestedSave: Model {
-    async fn save_with_one<R: Model>(self, related: R, foreign_key: &str) -> Result<(Self, R)> {
-        let (parent, mut related) =
-            save_parent_then(self, vec![related], foreign_key, "save_with_one").await?;
+    /// Save this model, then `related` with its `foreign_key` set to this
+    /// model's key: inserted when new, updated when stored.
+    async fn save_with_one<R: Model>(
+        self,
+        related: R,
+        foreign_key: impl IntoColumnName + Send,
+    ) -> Result<(Self, R)> {
+        let (parent, mut related) = save_parent_then(
+            self,
+            vec![related],
+            foreign_key.column_name(),
+            "save_with_one",
+        )
+        .await?;
         let related = related.pop().expect("save_related saves every child");
         Ok((parent, related))
     }
 
+    /// Save this model, then each of `related` with its `foreign_key` set to
+    /// this model's key, returning the children as they were stored.
     async fn save_with_many<R: Model>(
         self,
-        related: Vec<R>,
-        foreign_key: &str,
+        related: impl IntoIterator<Item = R> + Send,
+        foreign_key: impl IntoColumnName + Send,
     ) -> Result<(Self, Vec<R>)> {
-        save_parent_then(self, related, foreign_key, "save_with_many").await
+        let related: Vec<R> = related.into_iter().collect();
+        save_parent_then(self, related, foreign_key.column_name(), "save_with_many").await
     }
 
+    /// Update this model and `related`, both already stored; no key is set.
     async fn update_with_one<R: Model>(self, related: R) -> Result<(Self, R)> {
-        super::crud::transaction(move |_| {
-            Box::pin(async move {
-                let parent = self.update().await?;
-                let related = related.update().await?;
+        super::crud::transaction(async move |_| {
+            let parent = self.update().await?;
+            let related = related.update().await?;
 
-                Ok((parent, related))
-            })
+            Ok((parent, related))
         })
         .await
     }
 
-    async fn update_with_many<R: Model>(self, related: Vec<R>) -> Result<(Self, Vec<R>)> {
-        super::crud::transaction(move |_| {
-            Box::pin(async move {
-                let parent = self.update().await?;
-                let mut updated = Vec::with_capacity(related.len());
-                for item in related {
-                    updated.push(item.update().await?);
-                }
+    /// Update this model and each of `related`, all already stored; no key
+    /// is set.
+    async fn update_with_many<R: Model>(
+        self,
+        related: impl IntoIterator<Item = R> + Send,
+    ) -> Result<(Self, Vec<R>)> {
+        let related: Vec<R> = related.into_iter().collect();
+        super::crud::transaction(async move |_| {
+            let parent = self.update().await?;
+            let mut updated = Vec::with_capacity(related.len());
+            for item in related {
+                updated.push(item.update().await?);
+            }
 
-                Ok((parent, updated))
-            })
+            Ok((parent, updated))
         })
         .await
+    }
+
+    /// Delete `related`, then this model, and return the total row count.
+    async fn delete_with_one<R: Model>(self, related: R) -> Result<u64> {
+        self.delete_with_many([related]).await
     }
 
     /// Delete the children, then the parent, and return the total row count.
-    async fn delete_with_many<R: Model>(self, related: Vec<R>) -> Result<u64> {
-        super::crud::transaction(move |_| {
-            Box::pin(async move {
-                let mut deleted = 0;
-                for item in related {
-                    deleted += item.delete().await?;
-                }
+    async fn delete_with_many<R: Model>(
+        self,
+        related: impl IntoIterator<Item = R> + Send,
+    ) -> Result<u64> {
+        let related: Vec<R> = related.into_iter().collect();
+        super::crud::transaction(async move |_| {
+            let mut deleted = 0;
+            for item in related {
+                deleted += item.delete().await?;
+            }
 
-                Ok(deleted + self.delete().await?)
-            })
+            Ok(deleted + self.delete().await?)
         })
         .await
     }
@@ -311,35 +353,42 @@ impl<M: Model> NestedSave for M {}
 
 /// Builder for nested/cascade saves.
 ///
-/// `with_one` relations are saved, and returned, before `with_many` ones
-/// whatever order they were added in.
+/// Relations are saved, and returned, in the order they were added.
+#[must_use = "a nested save writes nothing until `save` is awaited"]
 pub struct NestedSaveBuilder<M: Model> {
     parent: M,
-    one_relations: Vec<Box<dyn RelationSaveOp>>,
-    many_relations: Vec<Box<dyn RelationSaveOp>>,
+    relations: Vec<Box<dyn RelationSaveOp>>,
 }
 
 impl<M: Model> NestedSaveBuilder<M> {
+    /// Start a nested save of `parent`.
     pub fn new(parent: M) -> Self {
         Self {
             parent,
-            one_relations: Vec::new(),
-            many_relations: Vec::new(),
+            relations: Vec::new(),
         }
     }
 
-    pub fn with_one<R: Model>(mut self, related: R, foreign_key: &str) -> Self {
-        self.one_relations.push(Box::new(OneRelationSaveFn {
+    /// Save `related` after the parent, its `foreign_key` set to the
+    /// parent's key; [`SavedRelation::into_one`] reads it back.
+    pub fn with_one<R: Model>(mut self, related: R, foreign_key: impl IntoColumnName) -> Self {
+        self.relations.push(Box::new(OneRelationSaveFn {
             related,
-            foreign_key: foreign_key.to_string(),
+            foreign_key: foreign_key.column_name().to_string(),
         }));
         self
     }
 
-    pub fn with_many<R: Model>(mut self, related: Vec<R>, foreign_key: &str) -> Self {
-        self.many_relations.push(Box::new(ManyRelationSaveFn {
-            related,
-            foreign_key: foreign_key.to_string(),
+    /// Save each of `related` after the parent, its `foreign_key` set to the
+    /// parent's key; [`SavedRelation::into_many`] reads them back.
+    pub fn with_many<R: Model>(
+        mut self,
+        related: impl IntoIterator<Item = R>,
+        foreign_key: impl IntoColumnName,
+    ) -> Self {
+        self.relations.push(Box::new(ManyRelationSaveFn {
+            related: related.into_iter().collect(),
+            foreign_key: foreign_key.column_name().to_string(),
         }));
         self
     }
@@ -347,31 +396,24 @@ impl<M: Model> NestedSaveBuilder<M> {
     /// Save the parent and every relation in one transaction, as
     /// [`NestedSave`] does.
     pub async fn save(self) -> Result<(M, Vec<SavedRelation>)> {
-        let Self {
-            parent,
-            one_relations,
-            many_relations,
-        } = self;
+        let Self { parent, relations } = self;
 
-        super::crud::transaction(move |_| {
-            Box::pin(async move {
-                let parent = parent.save().await?;
-                let pk_value =
-                    require_scalar_primary_key::<M>(&parent.primary_key(), "nested save builder")?;
+        super::crud::transaction(async move |_| {
+            let parent = parent.save().await?;
+            let pk_value =
+                require_scalar_primary_key::<M>(&parent.primary_key(), "nested save builder")?;
 
-                let mut saved_relations =
-                    Vec::with_capacity(one_relations.len() + many_relations.len());
-                for relation in one_relations.into_iter().chain(many_relations) {
-                    saved_relations.push(relation.run(pk_value.clone()).await?);
-                }
+            let mut saved_relations = Vec::with_capacity(relations.len());
+            for relation in relations {
+                saved_relations.push(relation.run(pk_value.clone()).await?);
+            }
 
-                Ok((parent, saved_relations))
-            })
+            Ok((parent, saved_relations))
         })
         .await
     }
 }
 
-#[cfg(all(test, feature = "sqlite"))]
+#[cfg(all(test, feature = "sqlite", feature = "runtime-tokio"))]
 #[path = "../../tests/unit/model_nested_tests.rs"]
 mod tests;

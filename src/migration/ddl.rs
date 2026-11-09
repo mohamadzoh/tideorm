@@ -4,10 +4,13 @@
 //! so a column declared the same way comes out as the same SQL whichever of the
 //! three created the table.
 
+use std::fmt::Write as _;
+
 use crate::config::DatabaseType;
-use crate::internal::sql_safety::{column_list, quote_ident};
+use crate::internal::sql_safety::{column_list, quote_ident, quote_qualified};
 
 use super::ColumnType;
+use super::types::{can_auto_increment, column_type_sql};
 
 /// One column of a `CREATE TABLE` or an `ALTER TABLE ... ADD COLUMN`.
 #[derive(Debug, Clone)]
@@ -54,7 +57,7 @@ impl ColumnDefinition {
         // SQLite needs no clause: an INTEGER primary key is already the rowid.
         if self.auto_increment
             && matches!(db_type, DatabaseType::MySQL | DatabaseType::MariaDB)
-            && self.column_type.can_auto_increment()
+            && can_auto_increment(&self.column_type)
         {
             sql.push_str(" AUTO_INCREMENT");
         }
@@ -66,7 +69,7 @@ impl ColumnDefinition {
         }
 
         if let Some(default) = &self.default {
-            sql.push_str(&format!(" DEFAULT {}", self.default_sql(db_type, default)));
+            let _ = write!(sql, " DEFAULT {}", self.default_sql(db_type, default));
         }
 
         if self.unique && !self.primary_key {
@@ -74,11 +77,11 @@ impl ColumnDefinition {
         }
 
         if let Some(check) = &self.check {
-            sql.push_str(&format!(" CHECK ({})", check));
+            let _ = write!(sql, " CHECK ({})", check);
         }
 
         if let Some(extra) = &self.extra {
-            sql.push_str(&format!(" {}", extra));
+            let _ = write!(sql, " {}", extra);
         }
 
         sql
@@ -105,26 +108,9 @@ impl ColumnDefinition {
         }
         let accepted_as_is = default.eq_ignore_ascii_case("NULL")
             || (default.starts_with('(') && default.ends_with(')'));
-        match self.column_type {
-            ColumnType::DateTime | ColumnType::Timestamp | ColumnType::TimestampTz
-                if is_current_timestamp(default) =>
-            {
-                "CURRENT_TIMESTAMP(6)".to_string()
-            }
-            ColumnType::Text
-            | ColumnType::Json
-            | ColumnType::Jsonb
-            | ColumnType::Binary
-            | ColumnType::IntegerArray
-            | ColumnType::BigIntegerArray
-            | ColumnType::TextArray
-            | ColumnType::BooleanArray
-            | ColumnType::DoubleArray
-            | ColumnType::JsonArray
-                if !accepted_as_is =>
-            {
-                format!("({default})")
-            }
+        match column_type_sql(&self.column_type, db_type).as_str() {
+            "DATETIME(6)" if is_current_timestamp(default) => "CURRENT_TIMESTAMP(6)".to_string(),
+            "LONGTEXT" | "LONGBLOB" | "JSON" if !accepted_as_is => format!("({default})"),
             _ => default.to_string(),
         }
     }
@@ -132,7 +118,7 @@ impl ColumnDefinition {
     /// The column type, swapped on PostgreSQL for the serial pseudo-type of
     /// the same width when the column auto-increments.
     fn type_sql(&self, db_type: DatabaseType) -> String {
-        let sql = self.column_type.to_sql(db_type);
+        let sql = column_type_sql(&self.column_type, db_type);
 
         if self.auto_increment
             && db_type == DatabaseType::Postgres
@@ -206,9 +192,9 @@ pub(crate) fn sqlite_can_add_with_default(default: &str) -> bool {
 
 /// Map a PostgreSQL integer type to the serial pseudo-type of the same width.
 ///
-/// The width is preserved rather than widened to `BIGSERIAL`: an `int4` key
-/// behind an `i32` or `u32` field has to stay `int4`, or the driver cannot
-/// decode it. Types with no serial form are left alone.
+/// The width is preserved rather than widened to `BIGSERIAL`: the column keeps
+/// the type the migration declared.
+/// Types with no serial form are left alone.
 fn postgres_serial_type(sql_type: &str) -> Option<&'static str> {
     match sql_type.trim().to_uppercase().as_str() {
         "SMALLINT" | "INT2" => Some("SMALLSERIAL"),
@@ -268,8 +254,7 @@ pub(crate) fn create_table(
 ///
 /// `IF NOT EXISTS` is dropped on MySQL, which rejects it outright - aborting a
 /// `create_table_if_not_exists` migration after its table was created. MariaDB
-/// accepts it, so the two are told apart here even though `internal::Backend`
-/// collapses them into one variant.
+/// accepts it.
 pub(crate) fn create_index(
     db_type: DatabaseType,
     name: &str,
@@ -305,21 +290,14 @@ pub(crate) fn drop_index(
     name: &str,
     if_exists: bool,
 ) -> String {
-    let qualified = |object: &str| match schema {
-        Some(schema) => format!(
-            "{}.{}",
-            quote_ident(db_type, schema),
-            quote_ident(db_type, object)
-        ),
-        None => quote_ident(db_type, object),
-    };
+    let qualified = |object: &str| quote_qualified(db_type, schema, object);
     match db_type {
         DatabaseType::MySQL | DatabaseType::MariaDB => format!(
             "DROP INDEX {} ON {}",
             quote_ident(db_type, name),
             qualified(table)
         ),
-        _ => format!(
+        DatabaseType::Postgres | DatabaseType::SQLite => format!(
             "DROP INDEX {}{}",
             if if_exists { "IF EXISTS " } else { "" },
             qualified(name)
@@ -336,42 +314,44 @@ pub(crate) fn add_column(db_type: DatabaseType, table: &str, column: &ColumnDefi
     )
 }
 
-/// Render the statement that renames table `from` to `to`.
-///
-/// MySQL and MariaDB spell it `RENAME TABLE`; PostgreSQL and SQLite take
-/// `ALTER TABLE ... RENAME TO`.
-pub(crate) fn rename_table(db_type: DatabaseType, from: &str, to: &str) -> String {
-    let (from, to) = (quote_ident(db_type, from), quote_ident(db_type, to));
-    match db_type {
-        DatabaseType::MySQL | DatabaseType::MariaDB => format!("RENAME TABLE {from} TO {to}"),
-        DatabaseType::Postgres | DatabaseType::SQLite => {
-            format!("ALTER TABLE {from} RENAME TO {to}")
-        }
+/// A migration's table `name` as its schema and table: `app.users` is the
+/// table `users` in PostgreSQL's schema, or MySQL's and MariaDB's database,
+/// `app`. SQLite keeps the tables in its main database, as schema sync does,
+/// so there the schema part is dropped.
+pub(crate) fn table_parts(db_type: DatabaseType, name: &str) -> (Option<&str>, &str) {
+    match name.split_once('.') {
+        Some((schema, table)) if db_type != DatabaseType::SQLite => (Some(schema), table),
+        Some((_, table)) => (None, table),
+        None => (None, name),
     }
 }
 
-/// Whether `table` has an index named `index` in the MySQL or MariaDB
-/// database `schema`, or the connection's own without one: MySQL has no
-/// `CREATE INDEX IF NOT EXISTS`, so a create checks first.
-pub(crate) async fn mysql_index_exists<C: crate::internal::ConnectionTrait>(
-    conn: &C,
-    schema: Option<&str>,
-    table: &str,
-    index: &str,
-) -> crate::error::Result<bool> {
-    let statement = crate::internal::build_statement_with_values(
-        crate::internal::Backend::MySql,
-        "SELECT COUNT(*) > 0 FROM information_schema.statistics \
-         WHERE table_schema = COALESCE(?, DATABASE()) AND table_name = ? AND index_name = ?",
-        vec![schema.into(), table.into(), index.into()],
-    );
-    let row = conn.query_one_raw(statement).await.map_err(|error| {
-        crate::internal::translate_error(error)
-            .with_context(crate::error::ErrorContext::new().table(table))
-    })?;
+/// A migration's table `name` quoted for a statement, schema-qualified when
+/// [`table_parts`] finds a schema.
+pub(crate) fn quote_table(db_type: DatabaseType, name: &str) -> String {
+    let (schema, table) = table_parts(db_type, name);
+    quote_qualified(db_type, schema, table)
+}
 
-    match row {
-        Some(row) => crate::sync::decode_table_exists(&row, table),
-        None => Ok(false),
+/// Render the statement that renames table `from` to `to`.
+///
+/// MySQL and MariaDB spell it `RENAME TABLE`, where an unqualified `to`
+/// stays in `from`'s database; PostgreSQL and SQLite take `ALTER TABLE ...
+/// RENAME TO`, whose new name is never qualified: the table keeps its schema.
+pub(crate) fn rename_table(db_type: DatabaseType, from: &str, to: &str) -> String {
+    let (from_schema, _) = table_parts(db_type, from);
+    let (to_schema, to_table) = table_parts(db_type, to);
+    let from = quote_table(db_type, from);
+    match db_type {
+        DatabaseType::MySQL | DatabaseType::MariaDB => format!(
+            "RENAME TABLE {from} TO {}",
+            quote_qualified(db_type, to_schema.or(from_schema), to_table)
+        ),
+        DatabaseType::Postgres | DatabaseType::SQLite => {
+            format!(
+                "ALTER TABLE {from} RENAME TO {}",
+                quote_ident(db_type, to_table)
+            )
+        }
     }
 }

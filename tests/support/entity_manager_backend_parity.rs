@@ -1259,8 +1259,15 @@ async fn entity_manager_flush_persists_relation_only_changes_without_root_update
             "After Relation Flush".to_string();
     });
 
+    // Only the profile is written: one UPDATE, which reads its row back with a
+    // second statement where an UPDATE cannot return it (MySQL, MariaDB).
     let ((), queries) = count_queries(entity_manager.flush()).await?;
-    assert_eq!(queries, 1);
+    let expected = if db.backend().supports_returning() {
+        1
+    } else {
+        2
+    };
+    assert_eq!(queries, expected);
 
     let refreshed_user = EntityManagerAggregateUser::find_with(saved_user.id, db.as_ref())
         .await?
@@ -1491,11 +1498,9 @@ async fn entity_manager_flush_is_undone_by_an_enclosing_rollback() -> tideorm::R
 
     let flushing = entity_manager.clone();
     let outcome: tideorm::Result<()> = db
-        .transaction(move |_| {
-            Box::pin(async move {
-                flushing.flush().await?;
-                Err(Error::query("the enclosing work failed"))
-            })
+        .transaction(async move |_| {
+            flushing.flush().await?;
+            Err(Error::query("the enclosing work failed"))
         })
         .await;
     assert!(outcome.is_err());
@@ -1505,7 +1510,7 @@ async fn entity_manager_flush_is_undone_by_an_enclosing_rollback() -> tideorm::R
 
     // Committed, the same flush keeps what it wrote.
     let flushing = entity_manager.clone();
-    db.transaction(move |_| Box::pin(async move { flushing.flush().await }))
+    db.transaction(async move |_| flushing.flush().await)
         .await?;
     assert_eq!(managed.state(), EntityState::Managed);
     let id = managed.get().id;

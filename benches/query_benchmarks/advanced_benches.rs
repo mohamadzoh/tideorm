@@ -267,7 +267,7 @@ pub(super) fn bench_combined_features(c: &mut Criterion) {
                         BenchProduct::query()
                             .select(vec!["category"])
                             .group_by("category")
-                            .having("COUNT(*) > 100"),
+                            .having_raw("COUNT(*) > 100"),
                     )
                     .order_by("price", Order::Desc)
                     .limit(100)

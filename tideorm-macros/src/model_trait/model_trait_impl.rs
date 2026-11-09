@@ -130,6 +130,11 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 #key_uuid_keys
                 ::tideorm::model::__upsert::<Self>(model, builder, &[#(#managed_created_at_columns),*]).await
             }
+
+            fn __has_callbacks(&self) -> bool {
+                use ::tideorm::callbacks::HasCallbacksDispatch;
+                self.has_callbacks()
+            }
         }
     }
 }

@@ -1,7 +1,8 @@
 use darling::{FromDeriveInput, FromField, ast::Data};
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{format_ident, quote};
+use quote::{ToTokens, format_ident, quote, quote_spanned};
 use syn::ext::IdentExt;
+use syn::spanned::Spanned;
 use syn::{GenericArgument, Ident, PathArguments, PathSegment, Type};
 
 use crate::case::{to_pascal_case, to_snake_case};
@@ -21,8 +22,8 @@ pub(crate) fn unraw_ident(ident: &Ident) -> String {
     ident.unraw().to_string()
 }
 
-/// Builds the PascalCase enum variant identifier (`Column`, `PrimaryKey`,
-/// `Relation`) for a model field.
+/// Builds the PascalCase enum variant identifier (`Column`, `PrimaryKey`) for
+/// a model field.
 ///
 /// Handles raw identifiers, so a `r#type` field yields the `Type` variant
 /// instead of panicking on the invalid identifier `R#type`.
@@ -81,8 +82,8 @@ impl RelationKind {
 
     /// The `#[tideorm(..)]` key that may name this kind explicitly.
     ///
-    /// Only the kinds SeaORM models as an entity relation have one; the others
-    /// are declared by their wrapper type alone.
+    /// Only the key-based kinds have one; the polymorphic and self-referencing
+    /// kinds are declared by their wrapper type alone.
     pub(crate) fn attribute(self) -> Option<&'static str> {
         match self {
             Self::HasOne => Some("has_one"),
@@ -93,9 +94,9 @@ impl RelationKind {
         }
     }
 
-    /// Whether the relation maps onto a SeaORM `Relation` variant and `Related`
-    /// impl. The polymorphic and self-referencing kinds cannot: their joins need
-    /// a type discriminator or point back at the same entity.
+    /// Whether the derive checks the relation's key columns at compile time
+    /// (`entity_gen/relations.rs::build_relation_checks`); the polymorphic and
+    /// self-referencing kinds are not checked.
     pub(crate) fn is_entity_relation(self) -> bool {
         self.attribute().is_some()
     }
@@ -228,18 +229,6 @@ impl ModelField {
         option_inner_type(&self.ty).unwrap_or(&self.ty)
     }
 
-    /// The field's integer type when a backend's driver cannot store it and read
-    /// it back: `i8`, `u8` and `u16` on PostgreSQL, `u64` there and on SQLite.
-    pub(crate) fn driver_limited_integer(&self) -> Option<&'static str> {
-        match terminal_ident(self.validation_base_type()).as_deref() {
-            Some("i8") => Some("i8"),
-            Some("u8") => Some("u8"),
-            Some("u16") => Some("u16"),
-            Some("u64") => Some("u64"),
-            _ => None,
-        }
-    }
-
     /// Whether the last segment of the field's type, `Option` removed, is one
     /// of `names`.
     fn base_type_is(&self, names: &[&str]) -> bool {
@@ -250,23 +239,12 @@ impl ModelField {
         self.base_type_is(&["String", "str", "Text"])
     }
 
-    /// Whether an encrypted column can hold the field: `String` or `Text`,
-    /// optionally inside an `Option`.
-    pub(crate) fn supports_encryption(&self) -> bool {
-        self.base_type_is(&["String", "Text"])
-    }
-
     /// Whether the field is a Rust integer, the only kind of key a database
     /// counter can fill.
     pub(crate) fn is_integer(&self) -> bool {
         self.base_type_is(&[
             "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize",
         ])
-    }
-
-    /// Whether the field is an `f32` or `f64`, optionally inside an `Option`.
-    pub(crate) fn is_float(&self) -> bool {
-        self.base_type_is(&["f32", "f64"])
     }
 
     /// Integers, floats, decimals, and text, which the numeric rules read as
@@ -277,70 +255,30 @@ impl ModelField {
             || self.supports_string_validations()
     }
 
-    /// The field's column definition, or an error on its type when TideORM
-    /// cannot store that type.
-    pub(crate) fn column_type_expr(&self) -> syn::Result<TokenStream2> {
-        let inner_ty = option_inner_type(&self.ty);
-        let base_ty = inner_ty.unwrap_or(&self.ty);
-
-        let column_type = if is_utc_datetime_type(base_ty) {
-            quote!(::tideorm::orm::ColumnType::TimestampWithTimeZone)
+    /// The type the field's column holds: an encrypted field's is text, the
+    /// payload sealing the field's JSON, whatever the field's own type.
+    pub(crate) fn stored_type(&self, encrypted: bool) -> TokenStream2 {
+        if encrypted {
+            quote!(::std::string::String)
         } else {
-            let base_type = type_string(base_ty);
-            let array = |element: TokenStream2| {
-                quote!(::tideorm::orm::ColumnType::Array(
-                    ::tideorm::orm::sea_query::RcOrArc::new(::tideorm::orm::ColumnType::#element)
-                ))
-            };
-            match canonical_schema_type(&base_type).as_str() {
-                "i8" | "i16" | "u8" | "u16" => quote!(::tideorm::orm::ColumnType::SmallInteger),
-                "i32" | "u32" => quote!(::tideorm::orm::ColumnType::Integer),
-                "i64" | "u64" => quote!(::tideorm::orm::ColumnType::BigInteger),
-                "f32" => quote!(::tideorm::orm::ColumnType::Float),
-                "f64" => quote!(::tideorm::orm::ColumnType::Double),
-                "bool" => quote!(::tideorm::orm::ColumnType::Boolean),
-                "String" | "&str" | "str" | "Text" => quote!(::tideorm::orm::ColumnType::Text),
-                "Uuid" => quote!(::tideorm::orm::ColumnType::Uuid),
-                "DateTime" | "NaiveDateTime" => quote!(::tideorm::orm::ColumnType::DateTime),
-                "NaiveDate" => quote!(::tideorm::orm::ColumnType::Date),
-                "NaiveTime" => quote!(::tideorm::orm::ColumnType::Time),
-                "Decimal" => quote!(::tideorm::orm::ColumnType::Decimal(None)),
-                "Json" | "JsonValue" | "Value" | "serde_json::Value" | "Jsonb" => {
-                    quote!(::tideorm::orm::ColumnType::Json)
-                }
-                "Vec<u8>" => quote!(::tideorm::orm::ColumnType::Blob),
-                "Vec<i32>" | "IntArray" => array(quote!(Integer)),
-                "Vec<i64>" | "BigIntArray" => array(quote!(BigInteger)),
-                "Vec<String>" | "TextArray" => array(quote!(Text)),
-                "Vec<bool>" | "BoolArray" => array(quote!(Boolean)),
-                "Vec<f64>" | "FloatArray" => array(quote!(Double)),
-                "Vec<Value>"
-                | "Vec<serde_json::Value>"
-                | "Vec<Json>"
-                | "Vec<JsonValue>"
-                | "JsonArray" => array(quote!(Json)),
-                _ => {
-                    return Err(syn::Error::new_spanned(
-                        &self.ty,
-                        format!(
-                            "unsupported TideORM column type '{base_type}': a model field can be \
-                             bool, i8-i64, u8-u64, f32, f64, String, Text, Uuid, Decimal, \
-                             DateTime<Utc>, NaiveDateTime, NaiveDate, NaiveTime, \
-                             Json (serde_json::Value), Vec<u8>, a PostgreSQL array \
-                             (Vec<i32>, Vec<i64>, Vec<f64>, Vec<bool>, Vec<String>, Vec<Json>), \
-                             or an Option of one. Store an enum as a String, and mark a field \
-                             that is not a column #[tideorm(skip)]"
-                        ),
-                    ));
-                }
-            }
+            self.ty.to_token_stream()
+        }
+    }
+
+    /// The field's column definition: its [stored type](Self::stored_type)'s
+    /// `ValueType::column_type()`, the one Rust-to-column mapping, nullable for
+    /// an `Option` or a `nullable` field. A type with no `ValueType` fails to
+    /// compile here, at the field.
+    pub(crate) fn column_type_expr(&self, encrypted: bool) -> TokenStream2 {
+        let ty = self.stored_type(encrypted);
+        let def = quote_spanned! {self.ty.span()=>
+            <#ty as ::tideorm::orm::sql_builder::ValueType>::column_type().def()
         };
-
-        Ok(if inner_ty.is_some() || self.nullable {
-            quote!(#column_type.def().nullable())
+        if is_optional_type(&self.ty) || self.nullable {
+            quote!(#def.nullable())
         } else {
-            quote!(#column_type.def())
-        })
+            def
+        }
     }
 }
 
@@ -414,7 +352,6 @@ pub(crate) fn find_derived_db_field<'a>(
 }
 
 /// Strip module paths recursively, including paths inside generic arguments.
-/// Runtime schema mapping has matching normalization fixtures.
 fn canonical_schema_type(ty: &str) -> String {
     if let Some(open) = ty.find('<')
         && ty.ends_with('>')
@@ -536,6 +473,7 @@ fn relation_wrapper(ty: &Type) -> Option<(RelationKind, &PathSegment)> {
 #[darling(attributes(tideorm), supports(struct_named), forward_attrs(serde))]
 pub(crate) struct ModelInput {
     pub(crate) ident: Ident,
+    pub(crate) vis: syn::Visibility,
     /// Read only to refuse them: a model maps one table to one struct.
     pub(crate) generics: syn::Generics,
     /// The struct's `#[serde(..)]` attributes.

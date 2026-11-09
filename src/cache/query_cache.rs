@@ -16,7 +16,7 @@ pub use config::{CacheConfig, CacheStrategy};
 #[cfg(any(feature = "entity-manager", feature = "dirty-tracking"))]
 pub(crate) use pending::undo_on_rollback;
 pub(crate) use pending::{
-    Abort, PendingInvalidations, Record, install as install_pending_invalidations,
+    PendingInvalidations, Record, install as install_pending_invalidations,
     replace as replace_pending_invalidations,
 };
 pub use store::CacheStats;
@@ -189,9 +189,16 @@ impl QueryCache {
         key: &str,
         value: &T,
         ttl: Option<Duration>,
-        tables: &[String],
+        tables: impl IntoIterator<Item = impl AsRef<str>>,
     ) -> Result<()> {
-        self.store(key, value, ttl, tables.iter().map(String::as_str), None)
+        let tables: Vec<_> = tables.into_iter().collect();
+        self.store(
+            key,
+            value,
+            ttl,
+            tables.iter().map(|table| table.as_ref()),
+            None,
+        )
     }
 
     /// Where a read that may fill the cache starts: pass it to

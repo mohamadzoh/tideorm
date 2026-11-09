@@ -11,7 +11,7 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
         .map(|field| field.ident())
         .collect();
 
-    // A model without relations keeps the traits' defaults.
+    // A model without relations keeps the trait's defaults.
     let relation_copy_impl = (!relation_idents.is_empty()).then(|| {
         quote! {
             fn tide_relations_from(&mut self, source: &Self) {
@@ -24,15 +24,6 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
             }
         }
     });
-    let unload_relations_impl = (!relation_idents.is_empty()).then(|| {
-        quote! {
-            fn tide_unload_relations(&mut self) {
-                #(self.#relation_idents = ::std::default::Default::default();)*
-                self.__wire_relations(::std::option::Option::None);
-            }
-        }
-    });
-
     let merge_impl = quote! {
         impl ::tideorm::entity_manager::TideEntityManagerMergePersisted for #struct_name {
             fn tide_merge_persisted(&mut self, persisted: Self) {
@@ -42,12 +33,6 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
             #relation_copy_impl
         }
     };
-
-    // Every relation of a model a manager loaded queries its database, the
-    // polymorphic and self-referencing ones too.
-    let relation_database_attach_blocks = relation_idents
-        .iter()
-        .map(|ident| quote!(self.#ident.attach_query_database(database);));
 
     let relation_sync_blocks: Vec<TokenStream2> = ctx
         .relation_fields
@@ -65,112 +50,7 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
         }
     });
 
-    // Flush ordering is decided per table, so the only thing the entity manager
-    // needs from a relation is which side of a foreign key each end sits on: a
-    // `belongs_to` names a table this model points at, `has_one`/`has_many` name
-    // tables pointing back at it. `has_many_through` contributes nothing — the
-    // pivot row is written by relation sync once both sides are saved — and
-    // polymorphic or self-referencing relations have no distinct target table to
-    // order against.
-    let mut parent_tables: Vec<TokenStream2> = Vec::new();
-    let mut child_tables: Vec<TokenStream2> = Vec::new();
-    // Rows of one table are ordered by the foreign keys that join them: each
-    // relation's `(related table, foreign key, referenced column)`; the
-    // runtime keeps the ones whose related table is this model's own.
-    let mut row_references: Vec<TokenStream2> = Vec::new();
-    for field in &ctx.relation_fields {
-        let Some(related_ty) = field.related_types().into_iter().next() else {
-            continue;
-        };
-        let table_name = quote!(<#related_ty as ::tideorm::model::ModelMeta>::table_name());
-        let foreign_key = field.foreign_key.as_deref();
-        let local_key = || {
-            ctx.relation_local_field(field)
-                .expect("relation local keys resolve when the context is built")
-                .column_name()
-        };
-
-        match field.relation_kind() {
-            Some(RelationKind::BelongsTo) => {
-                let owner_key = field.owner_key.as_deref().unwrap_or("id");
-                if let Some(foreign_key) = foreign_key {
-                    row_references.push(quote!((#table_name, #foreign_key, #owner_key)));
-                }
-                parent_tables.push(table_name);
-            }
-            Some(RelationKind::HasOne | RelationKind::HasMany) => {
-                if let Some(foreign_key) = foreign_key {
-                    let local_key = local_key();
-                    row_references.push(quote!((#table_name, #foreign_key, #local_key)));
-                }
-                child_tables.push(table_name);
-            }
-            Some(RelationKind::SelfRef | RelationKind::SelfRefMany) => {
-                let foreign_key = foreign_key.unwrap_or("parent_id");
-                let local_key = local_key();
-                row_references.push(quote!((
-                    <Self as ::tideorm::model::ModelMeta>::table_name(),
-                    #foreign_key,
-                    #local_key
-                )));
-            }
-            _ => {}
-        }
-    }
-    let row_references_impl = (!row_references.is_empty()).then(|| {
-        quote! {
-            fn tide_row_references() -> Vec<(&'static str, &'static str, &'static str)>
-            where
-                Self: Sized,
-            {
-                vec![#(#row_references),*]
-            }
-        }
-    });
-
-    let entity_manager_impl = quote! {
-        impl ::tideorm::entity_manager::TideEntityManagerMeta for #struct_name {
-            fn tide_table_name() -> &'static str
-            where
-                Self: Sized,
-            {
-                <Self as ::tideorm::model::ModelMeta>::table_name()
-            }
-
-            fn tide_pk_key(&self) -> String {
-                ::tideorm::entity_manager::__identity_key(self)
-            }
-
-            fn tide_pk_is_new(&self) -> bool {
-                <Self as ::tideorm::model::Model>::is_new(self)
-            }
-
-            fn tide_parent_tables() -> Vec<&'static str>
-            where
-                Self: Sized,
-            {
-                vec![#(#parent_tables),*]
-            }
-
-            fn tide_child_tables() -> Vec<&'static str>
-            where
-                Self: Sized,
-            {
-                vec![#(#child_tables),*]
-            }
-
-            #row_references_impl
-
-            fn tide_attach_entity_manager_database(
-                &mut self,
-                database: &::tideorm::database::Database,
-            ) {
-                #(#relation_database_attach_blocks)*
-            }
-
-            #unload_relations_impl
-        }
-
+    let sync_impl = quote! {
         impl ::tideorm::entity_manager::TideEntityManagerSync for #struct_name {
             async fn tide_sync_entity_manager_relations<'a>(
                 &'a mut self,
@@ -181,7 +61,6 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
                 Ok(())
             }
         }
-
     };
 
     // Gated by TideORM's own `entity-manager` feature, not a `cfg` the
@@ -189,7 +68,7 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
     quote! {
         ::tideorm::__if_entity_manager! {
             #merge_impl
-            #entity_manager_impl
+            #sync_impl
         }
     }
 }
@@ -203,7 +82,7 @@ fn build_relation_sync_block(ctx: &BuildContext, field: &ModelField) -> Option<T
         let local_key_ident = ctx
             .relation_local_ident(field)
             .expect("relation local keys resolve when the context is built");
-        quote!(::tideorm::serde_json::to_value(self.#local_key_ident.clone())?)
+        quote!(::tideorm::DbValue::from(::std::clone::Clone::clone(&self.#local_key_ident)))
     };
 
     Some(match field.relation_kind()? {

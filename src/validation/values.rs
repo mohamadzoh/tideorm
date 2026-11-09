@@ -104,11 +104,11 @@ impl<T: ValidatableValue> ValidatableValue for Option<T> {
     }
 
     fn as_f64_value(&self) -> Option<f64> {
-        self.as_ref().and_then(|value| value.as_f64_value())
+        self.as_ref().and_then(ValidatableValue::as_f64_value)
     }
 
     fn as_i128_value(&self) -> Option<i128> {
-        self.as_ref().and_then(|value| value.as_i128_value())
+        self.as_ref().and_then(ValidatableValue::as_i128_value)
     }
 
     fn numeric_bound(&self, bound: f64) -> f64 {

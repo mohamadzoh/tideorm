@@ -2,12 +2,6 @@ use tideorm::config::DatabaseType;
 use tideorm::schema::{ColumnSchema, SchemaGenerator, TableSchemaBuilder};
 
 #[test]
-fn test_column_schema_is_nullable_by_default() {
-    let col = ColumnSchema::new("name", "TEXT");
-    assert!(col.nullable);
-}
-
-#[test]
 fn test_schema_generator_emits_every_added_table() {
     let mut generator = SchemaGenerator::new(DatabaseType::Postgres);
 
@@ -19,10 +13,13 @@ fn test_schema_generator_emits_every_added_table() {
     }
 
     let sql = generator.generate();
-    for i in 0..5 {
-        assert!(
-            sql.contains(&format!("table_{i}")),
-            "missing table_{i}: {sql}"
-        );
-    }
+    let tables: String = (0..5)
+        .map(|i| {
+            format!(
+                "CREATE TABLE IF NOT EXISTS \"table_{i}\" (\n    \"id\" BIGINT,\n    PRIMARY KEY (\"id\")\n);\n\n"
+            )
+        })
+        .collect();
+    let (_, statements) = sql.split_once(" UTC\n\n").expect("the header ends");
+    assert_eq!(statements, tables);
 }

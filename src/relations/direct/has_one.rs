@@ -22,7 +22,7 @@ use super::*;
 /// deserializing produces a wrapper that knows that payload and nothing else, so
 /// `load()` on it fails with "Parent primary key not set for relation". A model
 /// rebuilt from JSON only works again after
-/// [`refresh_runtime_relations_from`](crate::internal::InternalModel::refresh_runtime_relations_from)
+/// [`__rebuild_relations`](crate::internal::InternalModel::__rebuild_relations)
 /// re-derives the wrappers from the fresh column values, which is what
 /// TideORM's own JSON round-trips do. Any new path that reconstructs a model
 /// from JSON must call it too, or its relations are silently dead.
@@ -58,7 +58,7 @@ impl<E: Model> HasOne<E> {
         ensure_relation_configured("HasOne", &[self.foreign_key, self.local_key])
     }
 
-    fn parent_key(&self, context: &str) -> Result<&serde_json::Value> {
+    fn parent_key(&self, context: &str) -> Result<&Value> {
         self.ensure_configured()?;
         required_key(&self.state.key, "Parent primary key", context)
     }
@@ -73,26 +73,15 @@ impl<E: Model> HasOne<E> {
     ///
     /// Both names must be non-empty; every loading method rejects a wrapper
     /// built by [`Default`] (which leaves them `""`) with "HasOne relation is
-    /// not configured". Pair with [`with_parent_pk`](Self::with_parent_pk) to
+    /// not configured". Pair with `with_parent_pk` to
     /// make it loadable — normally the derive does both for you.
+    #[must_use]
     pub fn new(foreign_key: &'static str, local_key: &'static str) -> Self {
         Self {
             foreign_key,
             local_key,
             ..Self::default()
         }
-    }
-
-    /// Supply the owning model's [`local_key`](Self::local_key) value, which is
-    /// what the relation is looked up by.
-    ///
-    /// Must be a scalar: composite primary keys are rejected at load time
-    /// because a single-column `WHERE` cannot express them. Without this the
-    /// wrapper is inert — every load method errors with "Parent primary key not
-    /// set for relation".
-    pub fn with_parent_pk(mut self, pk: serde_json::Value) -> Self {
-        self.state.key = Some(pk);
-        self
     }
 
     key_pair_plumbing!();
@@ -146,43 +135,10 @@ impl<E: Model> HasOne<E> {
         self.query("HasOne::exists")?.exists().await
     }
 
-    /// Mutable access to the cached related model, if one is cached.
-    ///
-    /// Edits are local to the cache: nothing is written back, and
-    /// [`load`](Self::load) will not see them. Persist by calling `save()` on
-    /// the related model itself.
-    pub fn as_mut(&mut self) -> Option<&mut E> {
-        self.state.cached_mut().map(|model| &mut **model)
-    }
-
-    /// Whether the cache has been populated — by an eager load, by
-    /// [`clear`](Self::clear), or by deserializing a non-`null` payload.
-    ///
-    /// Note the asymmetry with [`get_cached`](Self::get_cached): after `clear()`
-    /// this is `true` while `get_cached()` is `None`, because "known to have no
-    /// related row" is a loaded state. Deserializing a `null` payload is the
-    /// opposite case and leaves this `false`.
-    pub fn is_loaded(&self) -> bool {
-        self.state.is_loaded()
-    }
-
-    /// Drop the cached row and mark the relation as *loaded and empty*.
-    ///
-    /// This is not "forget what we loaded" — [`is_loaded`](Self::is_loaded)
-    /// stays `true` afterwards, and with no reachable connection
-    /// [`load`](Self::load) will report `Ok(None)` from the cache rather than
-    /// querying. Use it to record a deliberate detach, not to invalidate.
-    pub fn clear(&mut self) {
-        self.state.set_cached(None);
-    }
-
-    /// The eagerly-loaded row, if one is cached. Never queries and never awaits.
-    ///
-    /// Returns `None` both when nothing was ever loaded and when the relation is
-    /// known to be empty; [`is_loaded`](Self::is_loaded) distinguishes them.
-    pub fn get_cached(&self) -> Option<&E> {
-        self.state.cached().map(|model| &**model)
-    }
+    crate::relations::state::one_row_cache!(
+        E,
+        "Under an entity manager, the owner's next save deletes a child the relation no longer holds."
+    );
 }
 
 impl<E: Model> Default for HasOne<E> {
@@ -209,7 +165,7 @@ relation_serde!(HasOne<E>);
 #[cfg(feature = "entity-manager")]
 impl<E> crate::entity_manager::EntityManagerLoad for HasOne<E>
 where
-    E: Model + TideEntityManagerMeta,
+    E: Model,
 {
     type Output<'a>
         = Option<&'a E>

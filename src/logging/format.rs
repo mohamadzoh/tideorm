@@ -1,3 +1,6 @@
+use std::fmt::Write as _;
+use std::time::Duration;
+
 use super::entry::QueryLogEntry;
 
 /// One line naming the operation, table, duration, row count and any failure.
@@ -5,21 +8,21 @@ pub(super) fn format_summary(entry: &QueryLogEntry) -> String {
     let mut output = format!("[TideORM][{}]", entry.operation);
 
     if let Some(ref table) = entry.table {
-        output.push_str(&format!(" {}", table));
+        let _ = write!(output, " {}", table);
     }
 
     if let Some(duration) = entry.duration {
-        output.push_str(&format!(" ({}ms)", duration.as_millis()));
+        let _ = write!(output, " ({}ms)", duration.as_millis());
     }
 
     if let Some(rows) = entry.rows {
-        output.push_str(&format!(" [{} rows]", rows));
+        let _ = write!(output, " [{} rows]", rows);
     }
 
     if !entry.success {
         output.push_str(" FAILED");
         if let Some(ref err) = entry.error {
-            output.push_str(&format!(": {}", err));
+            let _ = write!(output, ": {}", err);
         }
     }
 
@@ -35,17 +38,17 @@ pub(super) fn format_debug(entry: &QueryLogEntry) -> String {
     format!("[TideORM][{}]{} {}", entry.operation, timing, entry.sql)
 }
 
-pub(super) fn format_slow(entry: &QueryLogEntry, threshold: u64) -> String {
+pub(super) fn format_slow(entry: &QueryLogEntry, threshold: Duration) -> String {
     match entry.duration {
         Some(duration) => format!(
-            "[TideORM][SLOW QUERY] {} ({}ms > {}ms threshold)\n  SQL: {}",
+            "[TideORM][SLOW QUERY] {} ({}ms > {:?} threshold)\n  SQL: {}",
             entry.operation,
             duration.as_millis(),
             threshold,
             entry.sql
         ),
         None => format!(
-            "[TideORM][SLOW QUERY] {} (exceeded {}ms threshold)\n  SQL: {}",
+            "[TideORM][SLOW QUERY] {} (exceeded {:?} threshold)\n  SQL: {}",
             entry.operation, threshold, entry.sql
         ),
     }

@@ -4,6 +4,8 @@ use crate::model::Model;
 
 mod aggregations_unions;
 pub use aggregations_unions::{Aggregate, AggregateCondition, HavingCondition};
+mod having;
+pub(crate) use having::HavingClause;
 mod ctes_and_scopes;
 mod ordering_pagination;
 pub(crate) use ordering_pagination::page_offset;

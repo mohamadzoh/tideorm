@@ -31,6 +31,10 @@ pub use nested::{NestedSave, NestedSaveBuilder, SavedRelation};
 #[doc(hidden)]
 pub use upsert::__upsert;
 
+/// A type a model field's column can hold; the derive names one per field.
+#[doc(hidden)]
+pub struct __ColumnType<T: crate::orm::sql_builder::ValueType>(std::marker::PhantomData<T>);
+
 #[doc(hidden)]
 #[cfg(feature = "encrypted-fields")]
 pub const fn __assert_encrypted_fields_feature_enabled() {}
@@ -45,77 +49,78 @@ fn encryption_unavailable() -> crate::Error {
     )
 }
 
+/// An encrypted field's column value for a write: the payload sealing its
+/// JSON, or NULL for a `null` document.
 #[doc(hidden)]
-pub fn __encrypt_model_field<T>(
-    value: T,
-    table_name: &str,
+pub fn __encrypt_model_field<M: ModelMeta, T: serde::Serialize>(
+    value: &T,
     field_name: &str,
     column_name: &str,
-) -> crate::error::Result<T>
-where
-    T: serde::Serialize + serde::de::DeserializeOwned,
-{
+) -> crate::Result<Option<String>> {
     #[cfg(feature = "encrypted-fields")]
     {
-        encryption::encrypt_model_field(value, table_name, field_name, column_name)
+        encryption::encrypt_model_field(value, M::table_name(), field_name, column_name)
     }
 
     #[cfg(not(feature = "encrypted-fields"))]
     {
-        let _ = (value, table_name, field_name, column_name);
+        let _ = (value, field_name, column_name);
         Err(encryption_unavailable())
     }
 }
 
+/// An encrypted field decrypted from its column's text as the row decodes, so
+/// a decoded model never holds ciphertext. NULL reads as a nullable column's
+/// does; a failure is the `DbErr::Decode` of the column, carrying the
+/// TideORM error, whose class `translate_error` keeps.
 #[doc(hidden)]
-pub fn __decrypt_model_field<T>(
-    value: T,
-    table_name: &str,
+pub fn __decrypt_model_field<M: ModelMeta, T: serde::de::DeserializeOwned>(
+    stored: Option<String>,
     field_name: &str,
     column_name: &str,
-) -> crate::error::Result<T>
-where
-    T: serde::Serialize + serde::de::DeserializeOwned,
-{
+) -> std::result::Result<T, crate::orm::DbErr> {
     #[cfg(feature = "encrypted-fields")]
-    {
-        encryption::decrypt_model_field(value, table_name, field_name, column_name)
-    }
-
+    let value = encryption::decrypt_model_field(stored, M::table_name(), field_name, column_name);
     #[cfg(not(feature = "encrypted-fields"))]
-    {
-        let _ = (value, table_name, field_name, column_name);
+    let value: crate::Result<Option<T>> = {
+        let _ = (stored, field_name);
         Err(encryption_unavailable())
+    };
+    match value {
+        Ok(Some(value)) => Ok(value),
+        Ok(None) => Err(crate::orm::DbErr::Type(format!(
+            "Missing value for column '{column_name}'"
+        ))),
+        Err(error) => Err(crate::orm::DbErr::Decode {
+            column: column_name.to_owned(),
+            source: std::sync::Arc::new(error),
+        }),
     }
 }
 
-/// The model's encrypted fields, each paired with its column.
-///
-/// The two `ModelMeta` lists are declared independently, so a mismatched length
-/// is possible in hand-written metadata. Zipping them would silently drop the
-/// trailing entries, and a dropped entry looks exactly like "this column is not
-/// encrypted" — which would write plaintext into an encrypted column, or read
-/// ciphertext back as the value. Refuse instead.
-pub(crate) fn encrypted_field_columns<M: ModelMeta>()
--> crate::error::Result<Vec<(&'static str, &'static str)>> {
-    let encrypted_fields = M::encrypted_fields();
-    let encrypted_columns = M::encrypted_column_names();
+/// An encrypted field's plaintext as `ModelTrait::get` reads it, which
+/// comparisons and dirty-tracking baselines hold: text as a string, `null` as
+/// NULL, any other document as JSON.
+#[doc(hidden)]
+pub fn __encrypted_field_value<T: serde::Serialize>(value: &T) -> crate::orm::Value {
+    use crate::orm::Value;
 
-    if encrypted_fields.len() != encrypted_columns.len() {
-        return Err(crate::error::Error::configuration(format!(
-            "Model '{}' declares {} encrypted field name(s) but {} encrypted column name(s); \
-             encrypted_fields() and encrypted_column_names() must describe the same columns in \
-             the same order, otherwise an encrypted column can be written as plaintext",
-            M::table_name(),
-            encrypted_fields.len(),
-            encrypted_columns.len()
-        )));
+    match serde_json::to_value(value) {
+        Ok(serde_json::Value::String(text)) => Value::String(Some(text)),
+        Ok(serde_json::Value::Null) => Value::String(None),
+        Ok(document) => Value::Json(Some(Box::new(document))),
+        // The field's write reports why it does not serialize.
+        Err(_) => Value::Json(None),
     }
+}
 
-    Ok(encrypted_fields
-        .into_iter()
-        .zip(encrypted_columns)
-        .collect())
+/// `value` as an encrypted field's plaintext, for `ModelTrait::try_set`.
+#[doc(hidden)]
+pub fn __encrypted_field_from_value<T: serde::de::DeserializeOwned>(
+    value: crate::orm::Value,
+) -> std::result::Result<T, crate::orm::DbErr> {
+    serde_json::from_value(crate::internal::value_document(&value))
+        .map_err(|error| crate::orm::DbErr::Type(error.to_string()))
 }
 
 /// An encrypted column a projection reads: its model's table, which with the
@@ -138,20 +143,24 @@ impl EncryptedColumn {
             self.table, self.column
         ))
     }
+
+    /// `M`'s encrypted columns.
+    pub(crate) fn of<M: ModelMeta>() -> impl Iterator<Item = Self> {
+        M::encrypted_fields()
+            .iter()
+            .map(|&(field, column)| EncryptedColumn {
+                table: M::table_name(),
+                field,
+                column,
+            })
+    }
 }
 
 /// `M`'s encrypted column named `column` (by column or field name), if any.
 #[doc(hidden)]
-pub fn __encrypted_column<M: ModelMeta>(column: &str) -> crate::Result<Option<EncryptedColumn>> {
+pub fn __encrypted_column<M: ModelMeta>(column: &str) -> Option<EncryptedColumn> {
     let column = M::column_named(column);
-    Ok(encrypted_field_columns::<M>()?
-        .into_iter()
-        .find(|(_, encrypted)| *encrypted == column)
-        .map(|(field, column)| EncryptedColumn {
-            table: M::table_name(),
-            field,
-            column,
-        }))
+    EncryptedColumn::of::<M>().find(|encrypted| encrypted.column == column)
 }
 
 /// Decrypt explicitly resolved projections, plus implicitly selected model fields.
@@ -164,16 +173,9 @@ pub(crate) fn decrypt_json_rows<M: ModelMeta>(
         .iter()
         .filter_map(|(name, source)| source.map(|source| (name.clone(), source)))
         .collect();
-    for (field, column) in encrypted_field_columns::<M>()? {
-        if !outputs.iter().any(|(name, _)| name == column) {
-            encrypted_outputs.push((
-                column.to_string(),
-                EncryptedColumn {
-                    table: M::table_name(),
-                    field,
-                    column,
-                },
-            ));
+    for encrypted in EncryptedColumn::of::<M>() {
+        if !outputs.iter().any(|(name, _)| name == encrypted.column) {
+            encrypted_outputs.push((encrypted.column.to_string(), encrypted));
         }
     }
     for row in rows {
@@ -183,15 +185,33 @@ pub(crate) fn decrypt_json_rows<M: ModelMeta>(
         for (name, source) in &encrypted_outputs {
             if let Some(value) = members.get_mut(name.as_str()) {
                 *value =
-                    __decrypt_model_field(value.take(), source.table, source.field, source.column)?;
+                    decrypt_json_value(value.take(), source.table, source.field, source.column)?;
             }
         }
     }
     Ok(())
 }
 
-#[doc(hidden)]
-pub fn __prepare_batch_update_value<M: ModelMeta>(
+/// One JSON row's encrypted value decrypted into the document it seals.
+fn decrypt_json_value(
+    value: serde_json::Value,
+    table_name: &str,
+    field_name: &str,
+    column_name: &str,
+) -> crate::Result<serde_json::Value> {
+    #[cfg(feature = "encrypted-fields")]
+    {
+        encryption::decrypt_json_value(value, table_name, field_name, column_name)
+    }
+
+    #[cfg(not(feature = "encrypted-fields"))]
+    {
+        let _ = (value, table_name, field_name, column_name);
+        Err(encryption_unavailable())
+    }
+}
+
+pub(crate) fn prepare_batch_update_value<M: ModelMeta>(
     field_or_column: &str,
     value: UpdateValue,
 ) -> crate::error::Result<UpdateValue> {
@@ -238,38 +258,6 @@ pub fn __is_default<T: Default + PartialEq>(value: &T) -> bool {
     *value == T::default()
 }
 
-/// A float field as dirty tracking compares it: a number, or the text of a
-/// NaN or infinite value, which JSON would write as `null`.
-#[doc(hidden)]
-pub trait __FloatCompare {
-    fn __compare_value(&self) -> serde_json::Value;
-}
-
-impl __FloatCompare for f64 {
-    fn __compare_value(&self) -> serde_json::Value {
-        serde_json::Number::from_f64(*self).map_or_else(
-            || serde_json::Value::String(self.to_string()),
-            serde_json::Value::Number,
-        )
-    }
-}
-
-impl __FloatCompare for f32 {
-    fn __compare_value(&self) -> serde_json::Value {
-        match serde_json::to_value(self) {
-            Ok(serde_json::Value::Null) | Err(_) => serde_json::Value::String(self.to_string()),
-            Ok(value) => value,
-        }
-    }
-}
-
-impl<T: __FloatCompare> __FloatCompare for Option<T> {
-    fn __compare_value(&self) -> serde_json::Value {
-        self.as_ref()
-            .map_or(serde_json::Value::Null, __FloatCompare::__compare_value)
-    }
-}
-
 /// The value an auto-increment key is inserted with: unset while it is still
 /// the unsaved default, for the database to number, and otherwise the key
 /// the model holds.
@@ -299,27 +287,14 @@ pub fn __uuid_key(key: uuid::Uuid) -> uuid::Uuid {
 // These wrappers stay available in all builds because macro-generated code may
 // expand into downstream crates, where TideORM dependency features are not
 // directly visible through `cfg(feature = ...)` checks.
-//
-// Dirty tracking is best-effort bookkeeping beside a statement that already
-// succeeded, so a baseline that cannot be recorded or dropped — its primary key
-// failed to serialize — is logged rather than failing the operation.
 #[cfg(feature = "dirty-tracking")]
-fn warn_on_snapshot_error(action: &str, result: crate::error::Result<()>) {
-    if let Err(error) = result {
-        crate::tide_warn!("dirty tracking could not {} a baseline: {}", action, error);
-    }
-}
-
-#[doc(hidden)]
-pub fn __clear_dirty_snapshots() {
-    #[cfg(feature = "dirty-tracking")]
+pub(crate) fn clear_dirty_snapshots() {
     dirty_tracking::clear_all();
 }
 
 /// Whether a row with this primary key exists, trashed or not: how `save()`
 /// chooses between an update and an insert.
-#[doc(hidden)]
-pub async fn __exists_including_trashed<M: Model>(
+pub(crate) async fn exists_including_trashed<M: Model>(
     primary_key: &M::PrimaryKey,
 ) -> crate::Result<bool> {
     M::query()
@@ -345,52 +320,28 @@ pub async fn __soft_delete_by_primary_key<M: Model>(
 #[cfg_attr(not(feature = "dirty-tracking"), allow(unused_variables))]
 pub fn __forget_dirty_snapshot<M: Model>(model: &M) {
     #[cfg(feature = "dirty-tracking")]
-    warn_on_snapshot_error("forget", dirty_tracking::forget_model(model));
+    dirty_tracking::forget_model(model);
 }
 
-#[doc(hidden)]
-pub fn __invalidate_dirty_snapshots<M: Model>() {
+pub(crate) fn invalidate_dirty_snapshots<M: Model>() {
     #[cfg(feature = "dirty-tracking")]
     dirty_tracking::invalidate_model::<M>();
 }
 
-/// Run `load` with the models it builds remembered as read from `origin`.
-#[cfg_attr(not(feature = "dirty-tracking"), allow(unused_variables))]
-pub(crate) fn __loading_from<T>(origin: Option<u64>, load: impl FnOnce() -> T) -> T {
-    #[cfg(feature = "dirty-tracking")]
-    return dirty_tracking::loading_from(origin, load);
-    #[cfg(not(feature = "dirty-tracking"))]
-    load()
-}
-
-/// Run `load` with the models it builds remembered as read through
-/// `connection`'s pool, which for `find_with(id, db)` need not be the scope's.
+/// The last step of every load: `model`, its relations built, was read
+/// through `connection`, which for `find_with(id, db)` need not be the
+/// scope's. Its relations query the pool the row came from, never the
+/// transaction it was read in, which they would keep from committing, and
+/// its dirty-tracking baseline is that pool's, recorded in that transaction
+/// so it goes back if the transaction rolls back.
 #[doc(hidden)]
-pub fn __loading_through<T>(
-    connection: &crate::database::ConnectionRef,
-    load: impl FnOnce() -> T,
-) -> T {
-    // A row read or written in a transaction is that transaction's: the
-    // baselines its load records go back if it rolls back.
-    connection.recording(|| {
-        crate::database::with_loading_connection(connection, || {
-            __loading_from(connection.origin(), load)
-        })
-    })
-}
-
-#[doc(hidden)]
-#[cfg_attr(not(feature = "dirty-tracking"), allow(unused_variables))]
-pub fn __remember_dirty_snapshots<M: Model>(models: &[M]) {
+pub fn __finish_load<M: Model>(model: &mut M, connection: &crate::database::ConnectionRef) {
+    model.__attach_query_database(&crate::database::Database::from_handle(
+        crate::database::ConnectionRef::Database(connection.pool().clone()),
+    ));
     #[cfg(feature = "dirty-tracking")]
-    warn_on_snapshot_error("record", dirty_tracking::remember_collection(models));
-}
-
-#[doc(hidden)]
-#[cfg_attr(not(feature = "dirty-tracking"), allow(unused_variables))]
-pub fn __remember_dirty_snapshot<M: Model>(model: &M) {
-    #[cfg(feature = "dirty-tracking")]
-    warn_on_snapshot_error("record", dirty_tracking::remember_model(model));
+    connection
+        .recording(|| dirty_tracking::remember_model_from(model, Some(connection.identity())));
 }
 
 #[cfg(test)]

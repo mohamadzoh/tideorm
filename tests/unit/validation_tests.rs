@@ -128,7 +128,14 @@ fn test_validation_builder() {
         .build();
 
     assert_eq!(field, "email");
-    assert_eq!(format!("{rules:?}"), "[Required, Email, MaxLength(255)]");
+    assert_eq!(
+        rules,
+        [
+            ValidationRule::Required,
+            ValidationRule::Email,
+            ValidationRule::MaxLength(255)
+        ]
+    );
 }
 
 /// A module that imports TideORM's one-parameter `Result`, as `use tideorm::*;`

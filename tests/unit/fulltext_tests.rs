@@ -1,6 +1,8 @@
 use super::*;
 use crate::config::DatabaseType;
 use crate::internal::Value;
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+use crate::test_support::{sqlite_execute, sqlite_memory};
 
 mod builder_test_model {
     #[tideorm::model(table = "fulltext_test_articles")]
@@ -42,7 +44,7 @@ fn ranked_search_avoids_all_model_column_names_on_every_backend() {
     ] {
         for query in ["alpha", ""] {
             let builder =
-                FullTextSearchBuilder::<builder_test_model::RankCollision>::new(&["body"], query);
+                FullTextSearchBuilder::<builder_test_model::RankCollision>::new(["body"], query);
             let (sql, _) = builder.build_ranked_sql(backend).unwrap();
             assert!(sql.contains(" AS _fts_rank__"), "{sql}");
             if !query.is_empty() && backend != DatabaseType::SQLite {
@@ -57,7 +59,7 @@ fn ranked_search_avoids_all_model_column_names_on_every_backend() {
 #[test]
 fn test_search_sql_selects_model_columns_and_quotes_searched_ones() {
     let (postgres, _) =
-        FullTextSearchBuilder::<FullTextTestArticle>::new(&["ti\"tle", "content"], "rust")
+        FullTextSearchBuilder::<FullTextTestArticle>::new(["ti\"tle", "content"], "rust")
             .build_sql(DatabaseType::Postgres)
             .unwrap();
     assert!(
@@ -72,7 +74,7 @@ fn test_search_sql_selects_model_columns_and_quotes_searched_ones() {
     );
 
     let (mysql, _) =
-        FullTextSearchBuilder::<FullTextTestArticle>::new(&["ti`tle", "content"], "rust")
+        FullTextSearchBuilder::<FullTextTestArticle>::new(["ti`tle", "content"], "rust")
             .build_sql(DatabaseType::MySQL)
             .unwrap();
     assert!(
@@ -81,7 +83,7 @@ fn test_search_sql_selects_model_columns_and_quotes_searched_ones() {
     );
 
     let (sqlite, _) =
-        FullTextSearchBuilder::<FullTextTestArticle>::new(&["title", "content"], "rust")
+        FullTextSearchBuilder::<FullTextTestArticle>::new(["title", "content"], "rust")
             .build_sql(DatabaseType::SQLite)
             .unwrap();
     assert!(
@@ -131,9 +133,9 @@ fn test_term_filters_leave_words_out_of_the_search() {
     let config = FullTextConfig::new()
         .min_word_length(3)
         .max_word_length(10)
-        .stop_words(vec!["The".to_string()]);
+        .stop_words(["The"]);
     let builder = FullTextSearchBuilder::<FullTextTestArticle>::new(
-        &["title"],
+        ["title"],
         "the go +rust enormouslylong ownership",
     )
     .config(config.clone());
@@ -146,7 +148,7 @@ fn test_term_filters_leave_words_out_of_the_search() {
         Value::String(Some("{\"title\"} : (\"+rust\" \"ownership\")".to_string()))
     );
 
-    let nothing_left = FullTextSearchBuilder::<FullTextTestArticle>::new(&["title"], "the go")
+    let nothing_left = FullTextSearchBuilder::<FullTextTestArticle>::new(["title"], "the go")
         .config(config.clone());
     let (sql, _) = nothing_left.build_sql(DatabaseType::SQLite).unwrap();
     assert!(
@@ -154,7 +156,7 @@ fn test_term_filters_leave_words_out_of_the_search() {
         "a query with no term left matches nothing: {sql}"
     );
 
-    let phrase = FullTextSearchBuilder::<FullTextTestArticle>::new(&["title"], "the go")
+    let phrase = FullTextSearchBuilder::<FullTextTestArticle>::new(["title"], "the go")
         .config(config.clone().mode(SearchMode::Phrase));
     assert_eq!(
         phrase.query_text(),
@@ -164,7 +166,7 @@ fn test_term_filters_leave_words_out_of_the_search() {
 
     // A quoted phrase, and the operator before it, stay as written.
     let quoted = FullTextSearchBuilder::<FullTextTestArticle>::new(
-        &["title"],
+        ["title"],
         "\"the rust book\" -the -\"go the\" +ownership",
     )
     .config(config.mode(SearchMode::Boolean));
@@ -263,13 +265,9 @@ fn test_generate_snippet() {
 
 #[test]
 fn test_fulltext_index_sql_per_backend() {
-    let index = FullTextIndex::new(
-        "idx_articles_search",
-        "articles",
-        vec!["title".to_string(), "content".to_string()],
-    )
-    .language("english")
-    .pg_index_type(PgFullTextIndexType::GIN);
+    let index = FullTextIndex::new("idx_articles_search", "articles", ["title", "content"])
+        .language("english")
+        .pg_index_type(PgFullTextIndexType::GIN);
 
     assert_eq!(
         index.to_postgres_sql(),
@@ -316,7 +314,7 @@ fn test_fulltext_index_sql_per_backend() {
 
 #[test]
 fn a_fulltext_index_names_a_qualified_table_part_by_part() {
-    let index = FullTextIndex::new("posts_search", "tenant.posts", vec!["body".to_string()]);
+    let index = FullTextIndex::new("posts_search", "tenant.posts", ["body"]);
 
     assert!(
         index
@@ -355,7 +353,7 @@ fn a_fulltext_index_names_a_qualified_table_part_by_part() {
 
 #[test]
 fn test_fulltext_index_mysql_quotes_the_parser_name() {
-    let mut index = FullTextIndex::new("idx", "articles", vec!["title".to_string()]);
+    let mut index = FullTextIndex::new("idx", "articles", ["title"]);
 
     index.config.mysql_parser = Some("ngram".to_string());
     assert!(index.to_mysql_sql().contains(" WITH PARSER `ngram`"));
@@ -369,7 +367,7 @@ fn test_fulltext_index_mysql_quotes_the_parser_name() {
 
 #[test]
 fn test_sqlite_fts_triggers_quote_the_virtual_table_consistently() {
-    let index = FullTextIndex::new("idx", "art\"icles", vec!["title".to_string()]);
+    let index = FullTextIndex::new("idx", "art\"icles", ["title"]);
     let sqls = index.to_sqlite_sql();
 
     // The AFTER INSERT trigger used to write the quotes by hand, which broke on
@@ -385,35 +383,53 @@ fn test_sqlite_fts_triggers_quote_the_virtual_table_consistently() {
 }
 
 #[test]
-fn test_postgres_index_sql_escapes_literals_without_doubling_backslashes() {
-    let index =
-        FullTextIndex::new("idx", "articles", vec!["title".to_string()]).language("en'g\\ish");
+fn test_postgres_index_sql_writes_the_language_as_a_postgres_literal() {
+    let index = FullTextIndex::new("idx", "articles", ["title"]).language("en'g\\ish");
     let sql = index.to_postgres_sql();
 
-    assert!(sql.contains("to_tsvector('en''g\\ish'"));
-    assert!(!sql.contains("\\\\"));
+    // The escape-string form reads its backslashes whatever
+    // `standard_conforming_strings` says.
+    assert!(sql.contains("to_tsvector(E'en\\'g\\\\ish'"), "{sql}");
 }
 
 #[test]
-fn test_pg_headline_sql_escapes_literals_and_quotes_identifiers() {
-    let sql = pg_headline_sql("posts.body\"text", "don't panic", "en'g", "<b>'", "</b>'");
+fn test_pg_headline_sql_binds_its_text_and_quotes_identifiers() {
+    let (sql, values) = pg_headline_sql("posts.body\"text", "don't panic", "en'g", "<b>'", "</b>'");
 
-    assert!(sql.contains("\"posts\".\"body\"\"text\""));
-    assert!(sql.contains("plainto_tsquery('en''g', 'don''t panic')"));
-    assert!(sql.contains("'StartSel=\"<b>''\", StopSel=\"</b>''\", MaxWords=35, MinWords=15'"));
-    assert!(!sql.contains("\\"));
+    assert_eq!(
+        sql,
+        "ts_headline($1::regconfig, \"posts\".\"body\"\"text\", \
+         plainto_tsquery($1::regconfig, $2), $3)"
+    );
+    assert_eq!(
+        values,
+        vec![
+            Value::from("en'g"),
+            Value::from("don't panic"),
+            Value::from("StartSel=\"<b>'\", StopSel=\"</b>'\", MaxWords=35, MinWords=15"),
+        ]
+    );
 }
 
 #[test]
 fn test_pg_headline_sql_tags_cannot_inject_headline_options() {
-    let sql = pg_headline_sql("body", "term", "english", "<b>, MaxWords=1", "</b>");
+    let options = |start_tag, end_tag| {
+        let (_, values) = pg_headline_sql("body", "term", "english", start_tag, end_tag);
+        values[2].clone()
+    };
 
     // The tag stays a single quoted option value instead of becoming another
     // `MaxWords` option that overrides the one below.
-    assert!(sql.contains("StartSel=\"<b>, MaxWords=1\", StopSel=\"</b>\", MaxWords=35"));
-
-    let sql = pg_headline_sql("body", "term", "english", "<span class=\"a\">", "</span>");
-    assert!(sql.contains("StartSel=\"<span class=\"\"a\"\">\""));
+    assert_eq!(
+        options("<b>, MaxWords=1", "</b>"),
+        Value::from("StartSel=\"<b>, MaxWords=1\", StopSel=\"</b>\", MaxWords=35, MinWords=15")
+    );
+    assert_eq!(
+        options("<span class=\"a\">", "</span>"),
+        Value::from(
+            "StartSel=\"<span class=\"\"a\"\">\", StopSel=\"</span>\", MaxWords=35, MinWords=15"
+        )
+    );
 }
 
 #[test]
@@ -451,7 +467,7 @@ fn test_sanitize_postgres_tsquery_builds_literal_terms() {
 #[test]
 fn test_postgres_fulltext_sql_parameterizes_runtime_values() {
     let builder =
-        FullTextSearchBuilder::<FullTextTestArticle>::new(&["title", "content"], "rust safety")
+        FullTextSearchBuilder::<FullTextTestArticle>::new(["title", "content"], "rust safety")
             .language("custom_lang")
             .limit(10)
             .offset(5);
@@ -471,16 +487,12 @@ fn test_postgres_fulltext_sql_parameterizes_runtime_values() {
         params,
         vec![
             Value::String(Some("rust safety".to_string())),
-            Value::BigInt(Some(5)),
+            Value::BigUnsigned(Some(5)),
         ]
     );
 
-    let index = FullTextIndex::new(
-        "idx",
-        "fulltext_test_articles",
-        vec!["title".to_string(), "content".to_string()],
-    )
-    .language("custom_lang");
+    let index = FullTextIndex::new("idx", "fulltext_test_articles", ["title", "content"])
+        .language("custom_lang");
     let indexed = index.to_postgres_sql();
     let expression = indexed
         .split_once("((")
@@ -494,13 +506,13 @@ fn test_postgres_fulltext_sql_parameterizes_runtime_values() {
         "",
         "pg catalog",
     ] {
-        let refused = FullTextSearchBuilder::<FullTextTestArticle>::new(&["title"], "rust")
+        let refused = FullTextSearchBuilder::<FullTextTestArticle>::new(["title"], "rust")
             .language(language)
             .build_sql(DatabaseType::Postgres);
         assert!(refused.is_err(), "{language:?} was accepted");
     }
     assert!(
-        FullTextSearchBuilder::<FullTextTestArticle>::new(&["title"], "rust")
+        FullTextSearchBuilder::<FullTextTestArticle>::new(["title"], "rust")
             .language("pg_catalog.english")
             .build_sql(DatabaseType::Postgres)
             .is_ok()
@@ -509,7 +521,7 @@ fn test_postgres_fulltext_sql_parameterizes_runtime_values() {
 
 #[test]
 fn test_postgres_ranked_fulltext_sql_parameterizes_weights_and_thresholds() {
-    let builder = FullTextSearchBuilder::<FullTextTestArticle>::new(&["title"], "ranked query")
+    let builder = FullTextSearchBuilder::<FullTextTestArticle>::new(["title"], "ranked query")
         .config(
             FullTextConfig::new()
                 .language("simple")
@@ -522,17 +534,23 @@ fn test_postgres_ranked_fulltext_sql_parameterizes_weights_and_thresholds() {
 
     let (sql, params) = builder.build_ranked_sql(DatabaseType::Postgres).unwrap();
 
-    assert!(sql.contains("ts_rank_cd(CAST($2 AS real[]),"));
-    assert!(sql.contains(" >= $3"));
-    assert!(sql.contains("LIMIT 3 OFFSET $4"), "{sql}");
+    // Each use of the rank and the query binds its values again.
+    assert!(sql.contains("ts_rank_cd(CAST($1 AS real[]),"), "{sql}");
+    assert!(sql.contains(" >= $6"), "{sql}");
+    assert!(sql.contains("LIMIT 3 OFFSET $7"), "{sql}");
     assert!(!sql.contains("{0.05,0.3,0.7,1.5}"));
+    let weights = Value::String(Some("{0.05,0.3,0.7,1.5}".to_string()));
+    let query = Value::String(Some("ranked query".to_string()));
     assert_eq!(
         params,
         vec![
-            Value::String(Some("ranked query".to_string())),
-            Value::String(Some("{0.05,0.3,0.7,1.5}".to_string())),
+            weights.clone(),
+            query.clone(),
+            query.clone(),
+            weights,
+            query,
             Value::Double(Some(0.42)),
-            Value::BigInt(Some(2)),
+            Value::BigUnsigned(Some(2)),
         ]
     );
 }
@@ -540,10 +558,13 @@ fn test_postgres_ranked_fulltext_sql_parameterizes_weights_and_thresholds() {
 #[test]
 fn test_fulltext_offset_without_limit_uses_each_dialects_open_ended_limit() {
     let builder =
-        FullTextSearchBuilder::<FullTextTestArticle>::new(&["title"], "portable query").offset(4);
+        FullTextSearchBuilder::<FullTextTestArticle>::new(["title"], "portable query").offset(4);
 
     let (sqlite_sql, _) = builder.build_sql(DatabaseType::SQLite).unwrap();
-    assert!(sqlite_sql.ends_with(" LIMIT -1 OFFSET ?"), "{sqlite_sql}");
+    assert!(
+        sqlite_sql.ends_with(" ELSE -1 END OFFSET ?"),
+        "{sqlite_sql}"
+    );
     let (mysql_sql, _) = builder.build_sql(DatabaseType::MySQL).unwrap();
     assert!(
         mysql_sql.ends_with(" LIMIT 18446744073709551615 OFFSET ?"),
@@ -556,7 +577,7 @@ fn test_fulltext_offset_without_limit_uses_each_dialects_open_ended_limit() {
 
 #[test]
 fn test_mysql_and_sqlite_fulltext_sql_parameterize_pagination() {
-    let builder = FullTextSearchBuilder::<FullTextTestArticle>::new(&["title"], "portable query")
+    let builder = FullTextSearchBuilder::<FullTextTestArticle>::new(["title"], "portable query")
         .limit(7)
         .offset(4);
 
@@ -566,17 +587,23 @@ fn test_mysql_and_sqlite_fulltext_sql_parameterize_pagination() {
         mysql_params,
         vec![
             Value::String(Some("portable query".to_string())),
-            Value::BigInt(Some(4)),
+            Value::BigUnsigned(Some(4)),
         ]
     );
 
     let (sqlite_sql, sqlite_params) = builder.build_sql(DatabaseType::SQLite).unwrap();
-    assert!(sqlite_sql.contains("LIMIT 7 OFFSET ?"), "{sqlite_sql}");
+    // The limit is the rowid guard, which SQLite evaluates before the scan.
+    assert!(
+        sqlite_sql.contains("LIMIT CASE WHEN EXISTS"),
+        "{sqlite_sql}"
+    );
+    assert!(sqlite_sql.contains("tideorm_raise("), "{sqlite_sql}");
+    assert!(sqlite_sql.ends_with(" ELSE 7 END OFFSET ?"), "{sqlite_sql}");
     assert_eq!(
         sqlite_params,
         vec![
             Value::String(Some("{\"title\"} : (\"portable\" \"query\")".to_string())),
-            Value::BigInt(Some(4)),
+            Value::BigUnsigned(Some(4)),
         ]
     );
 }
@@ -596,7 +623,7 @@ fn test_mysql_against_mode_matches_across_row_ranked_and_count_builders() {
         };
 
         let builder =
-            FullTextSearchBuilder::<FullTextTestArticle>::new(&["title"], "shared mode").mode(mode);
+            FullTextSearchBuilder::<FullTextTestArticle>::new(["title"], "shared mode").mode(mode);
 
         for sql in [
             builder.build_sql(DatabaseType::MySQL).unwrap().0,
@@ -610,7 +637,7 @@ fn test_mysql_against_mode_matches_across_row_ranked_and_count_builders() {
 
 #[test]
 fn test_mysql_ranked_sql_binds_each_placeholder_in_statement_order() {
-    let builder = FullTextSearchBuilder::<FullTextTestArticle>::new(&["title"], "rust")
+    let builder = FullTextSearchBuilder::<FullTextTestArticle>::new(["title"], "rust")
         .min_rank(0.5)
         .limit(3);
 
@@ -633,12 +660,15 @@ fn test_mysql_ranked_sql_binds_each_placeholder_in_statement_order() {
 
 #[test]
 fn test_postgres_ranked_sql_selects_a_double_precision_rank() {
-    let builder = FullTextSearchBuilder::<FullTextTestArticle>::new(&["title"], "rust");
+    let builder = FullTextSearchBuilder::<FullTextTestArticle>::new(["title"], "rust");
 
     let (sql, _) = builder.build_ranked_sql(DatabaseType::Postgres).unwrap();
 
     // `ts_rank_cd` returns `real`, which the `f64` rank cannot decode.
-    assert!(sql.contains(", CAST(ts_rank_cd(CAST($2 AS real[]), "));
+    assert!(
+        sql.contains(", CAST(ts_rank_cd(CAST($1 AS real[]), "),
+        "{sql}"
+    );
     assert!(
         !sql.contains("SELECT *"),
         "ranked rows name their columns: {sql}"
@@ -647,36 +677,16 @@ fn test_postgres_ranked_sql_selects_a_double_precision_rank() {
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-async fn sqlite_execute(db: &crate::database::Database, statements: &[impl AsRef<str>]) {
-    for statement in statements {
-        let statement = statement.as_ref();
-        db.__execute_with_params(statement, Vec::new())
-            .await
-            .unwrap_or_else(|error| panic!("{statement}: {error}"));
-    }
-}
-
-/// An in-memory SQLite database with `statements` run on it.
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-async fn sqlite_database(statements: &[&str]) -> crate::database::Database {
-    let db = crate::database::Database::connect("sqlite::memory:")
-        .await
-        .expect("sqlite in-memory connection should succeed");
-    sqlite_execute(&db, statements).await;
-    db
-}
-
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn test_search_reports_matching_rows_that_fail_to_decode() {
-    let db = sqlite_database(&[
+    let db = sqlite_memory(&[
         "CREATE TABLE fulltext_test_articles (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, content TEXT)",
     ])
     .await;
     let index = FullTextIndex::new(
         "idx_fulltext_test_articles",
         "fulltext_test_articles",
-        vec!["title".to_string(), "content".to_string()],
+        ["title", "content"],
     );
     sqlite_execute(&db, &index.to_sqlite_sql()).await;
     // `title` is a `String` on the model, so a NULL title cannot decode.
@@ -686,23 +696,21 @@ async fn test_search_reports_matching_rows_that_fail_to_decode() {
     )
     .await;
 
-    let rows = crate::database::__in_db_scope(&db, async {
-        FullTextTestArticle::search(&["content"], "rust")
-            .get()
-            .await
-    })
-    .await;
+    let rows = db
+        .scope(async { FullTextTestArticle::search(["content"], "rust").get().await })
+        .await;
     assert!(
         rows.is_err(),
         "an undecodable match must be reported, not dropped: {rows:?}"
     );
 
-    let ranked = crate::database::__in_db_scope(&db, async {
-        FullTextTestArticle::search(&["content"], "rust")
-            .get_ranked()
-            .await
-    })
-    .await;
+    let ranked = db
+        .scope(async {
+            FullTextTestArticle::search(["content"], "rust")
+                .get_ranked()
+                .await
+        })
+        .await;
     assert!(
         ranked.is_err(),
         "an undecodable ranked match must be reported, not dropped"
@@ -717,7 +725,7 @@ async fn test_search_reports_matching_rows_that_fail_to_decode() {
 fn test_a_search_without_words_matches_nothing_on_every_backend() {
     for query in ["   ", "* -"] {
         let builder =
-            FullTextSearchBuilder::<FullTextTestArticle>::new(&["title"], query).min_rank(0.5);
+            FullTextSearchBuilder::<FullTextTestArticle>::new(["title"], query).min_rank(0.5);
         for db_type in [
             DatabaseType::Postgres,
             DatabaseType::MySQL,
@@ -788,7 +796,7 @@ fn test_mysql_fulltext_operands_always_parse() {
 #[test]
 fn test_a_boolean_search_of_exclusions_alone_matches_nothing() {
     let builder =
-        FullTextSearchBuilder::<FullTextTestArticle>::new(&["title"], "-spam -\"junk mail\"")
+        FullTextSearchBuilder::<FullTextTestArticle>::new(["title"], "-spam -\"junk mail\"")
             .mode(SearchMode::Boolean);
     for db_type in [
         DatabaseType::Postgres,
@@ -799,7 +807,7 @@ fn test_a_boolean_search_of_exclusions_alone_matches_nothing() {
         assert!(sql.contains("WHERE 0 = 1"), "{db_type:?}: {sql}");
     }
 
-    let builder = FullTextSearchBuilder::<FullTextTestArticle>::new(&["title"], "rust -spam")
+    let builder = FullTextSearchBuilder::<FullTextTestArticle>::new(["title"], "rust -spam")
         .mode(SearchMode::Boolean);
     let (sql, _) = builder.build_sql(DatabaseType::Postgres).unwrap();
     assert!(!sql.contains("0 = 1"), "{sql}");
@@ -824,7 +832,7 @@ fn test_boolean_exclusions_stay_exclusions() {
 fn test_each_search_mode_renders_its_own_operand() {
     let render = |mode: SearchMode, db_type: DatabaseType| {
         let builder =
-            FullTextSearchBuilder::<FullTextTestArticle>::new(&["title"], "rust async").mode(mode);
+            FullTextSearchBuilder::<FullTextTestArticle>::new(["title"], "rust async").mode(mode);
         let (sql, mut params) = builder.build_sql(db_type).unwrap();
         (sql, params.remove(0))
     };
@@ -906,7 +914,7 @@ fn test_postgres_proximity_finds_the_words_within_the_distance_either_way() {
 
 #[test]
 fn test_search_leaves_soft_deleted_rows_out_unless_asked() {
-    let search = || FullTextSearchBuilder::<FullTextTestNote>::new(&["body"], "rust");
+    let search = || FullTextSearchBuilder::<FullTextTestNote>::new(["body"], "rust");
     for db_type in [
         DatabaseType::Postgres,
         DatabaseType::MySQL,
@@ -932,7 +940,7 @@ fn test_search_leaves_soft_deleted_rows_out_unless_asked() {
     }
 
     // A model without soft delete has no scope to add.
-    let (sql, _) = FullTextSearchBuilder::<FullTextTestArticle>::new(&["title"], "rust")
+    let (sql, _) = FullTextSearchBuilder::<FullTextTestArticle>::new(["title"], "rust")
         .build_sql(DatabaseType::SQLite)
         .unwrap();
     assert!(!sql.contains("deleted_at"), "{sql}");
@@ -941,14 +949,13 @@ fn test_search_leaves_soft_deleted_rows_out_unless_asked() {
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn a_second_sqlite_index_over_other_columns_fails_instead_of_keeping_the_first() {
-    let db = sqlite_database(&[
-        "CREATE TABLE fts_posts (id INTEGER PRIMARY KEY, title TEXT, body TEXT)",
-    ])
-    .await;
-    let by_title = FullTextIndex::new("posts_title", "fts_posts", vec!["title".to_string()]);
+    let db =
+        sqlite_memory(&["CREATE TABLE fts_posts (id INTEGER PRIMARY KEY, title TEXT, body TEXT)"])
+            .await;
+    let by_title = FullTextIndex::new("posts_title", "fts_posts", ["title"]);
     sqlite_execute(&db, &by_title.to_sqlite_sql()).await;
 
-    let by_body = FullTextIndex::new("posts_body", "fts_posts", vec!["body".to_string()]);
+    let by_body = FullTextIndex::new("posts_body", "fts_posts", ["body"]);
     let mut failure = None;
     for statement in by_body.to_sqlite_sql() {
         if let Err(error) = db.__execute_with_params(&statement, Vec::new()).await {
@@ -966,7 +973,7 @@ async fn a_second_sqlite_index_over_other_columns_fails_instead_of_keeping_the_f
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn test_sqlite_search_reads_earlier_rows_and_only_the_named_columns() {
-    let db = sqlite_database(&[
+    let db = sqlite_memory(&[
         "CREATE TABLE fulltext_test_articles (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, content TEXT)",
         "INSERT INTO fulltext_test_articles (title, content) VALUES ('Rust ORMs', 'Tomatoes')",
         "INSERT INTO fulltext_test_articles (title, content) VALUES ('Gardening', 'rust on the shovel')",
@@ -975,30 +982,28 @@ async fn test_sqlite_search_reads_earlier_rows_and_only_the_named_columns() {
     let index = FullTextIndex::new(
         "idx_fulltext_test_articles",
         "fulltext_test_articles",
-        vec!["title".to_string(), "content".to_string()],
+        ["title", "content"],
     );
     sqlite_execute(&db, &index.to_sqlite_sql()).await;
 
-    crate::database::__in_db_scope(&db, async {
+    db.scope(async {
         // Both rows predate the index.
-        let both = FullTextTestArticle::search(&["title", "content"], "rust")
+        let both = FullTextTestArticle::search(["title", "content"], "rust")
             .count()
             .await?;
         assert_eq!(both, 2);
 
-        let in_title = FullTextTestArticle::search(&["title"], "rust")
-            .get()
-            .await?;
+        let in_title = FullTextTestArticle::search(["title"], "rust").get().await?;
         assert_eq!(in_title.len(), 1);
         assert_eq!(in_title[0].title, "Rust ORMs");
         assert_eq!(
-            FullTextTestArticle::search(&["content"], "rust")
+            FullTextTestArticle::search(["content"], "rust")
                 .count()
                 .await?,
             1
         );
         assert_eq!(
-            FullTextTestArticle::search(&["content"], "gardening")
+            FullTextTestArticle::search(["content"], "gardening")
                 .count()
                 .await?,
             0
@@ -1007,7 +1012,7 @@ async fn test_sqlite_search_reads_earlier_rows_and_only_the_named_columns() {
         // Applying the index again keeps each row indexed once.
         sqlite_execute(&db, &index.to_sqlite_sql()).await;
         assert_eq!(
-            FullTextTestArticle::search(&["title", "content"], "rust")
+            FullTextTestArticle::search(["title", "content"], "rust")
                 .count()
                 .await?,
             2
@@ -1021,39 +1026,35 @@ async fn test_sqlite_search_reads_earlier_rows_and_only_the_named_columns() {
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn test_sqlite_search_skips_soft_deleted_rows() {
-    let db = sqlite_database(&[
+    let db = sqlite_memory(&[
         "CREATE TABLE fulltext_test_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT NOT NULL, deleted_at TEXT)",
         "INSERT INTO fulltext_test_notes (body) VALUES ('rust is live')",
         "INSERT INTO fulltext_test_notes (body, deleted_at) VALUES ('rust is trashed', '2026-01-01T00:00:00Z')",
     ])
     .await;
-    let index = FullTextIndex::new(
-        "idx_fulltext_test_notes",
-        "fulltext_test_notes",
-        vec!["body".to_string()],
-    );
+    let index = FullTextIndex::new("idx_fulltext_test_notes", "fulltext_test_notes", ["body"]);
     sqlite_execute(&db, &index.to_sqlite_sql()).await;
 
-    crate::database::__in_db_scope(&db, async {
-        let live = FullTextTestNote::search(&["body"], "rust").get().await?;
+    db.scope(async {
+        let live = FullTextTestNote::search(["body"], "rust").get().await?;
         assert_eq!(live.len(), 1);
         assert_eq!(live[0].body, "rust is live");
         assert_eq!(
-            FullTextTestNote::search(&["body"], "rust")
+            FullTextTestNote::search(["body"], "rust")
                 .get_ranked()
                 .await?
                 .len(),
             1
         );
 
-        let trashed = FullTextTestNote::search(&["body"], "rust")
+        let trashed = FullTextTestNote::search(["body"], "rust")
             .only_trashed()
             .get()
             .await?;
         assert_eq!(trashed.len(), 1);
         assert_eq!(trashed[0].body, "rust is trashed");
         assert_eq!(
-            FullTextTestNote::search(&["body"], "rust")
+            FullTextTestNote::search(["body"], "rust")
                 .with_trashed()
                 .count()
                 .await?,
@@ -1063,4 +1064,81 @@ async fn test_sqlite_search_skips_soft_deleted_rows() {
     })
     .await
     .expect("searching a soft-delete model should succeed");
+}
+
+#[test]
+fn search_and_index_columns_may_be_typed_columns() {
+    let by_name = FullTextTestArticle::search(["title", "content"], String::from("rust"))
+        .build_sql(DatabaseType::Postgres)
+        .unwrap();
+    let typed = FullTextTestArticle::search(
+        (FullTextTestArticle::TITLE, FullTextTestArticle::CONTENT),
+        "rust",
+    )
+    .build_sql(DatabaseType::Postgres)
+    .unwrap();
+    assert_eq!(typed.0, by_name.0);
+
+    let index = FullTextIndex::new(
+        "idx",
+        "fulltext_test_articles",
+        (FullTextTestArticle::TITLE, FullTextTestArticle::CONTENT),
+    );
+    assert_eq!(index.columns, ["title", "content"]);
+}
+
+#[test]
+fn highlight_config_setters_match_the_fields_they_set() {
+    let text = "one two three four five six seven eight nine fox ten eleven twelve";
+    let fox = term_pattern("fox");
+    let chained = HighlightConfig::default()
+        .tags("[", "]")
+        .max_length(20)
+        .fragment_words(2)
+        .escape_html(false);
+    let literal = HighlightConfig {
+        start_tag: "[".to_string(),
+        end_tag: "]".to_string(),
+        max_length: Some(20),
+        fragment_words: Some(2),
+        escape_html: false,
+    };
+    assert_eq!(
+        chained.mark(text, fox.as_ref()),
+        literal.mark(text, fox.as_ref())
+    );
+    assert_eq!(
+        HighlightConfig::default()
+            .whole_text()
+            .mark("the fox ran", fox.as_ref()),
+        ("the <mark>fox</mark> ran".to_string(), 1)
+    );
+}
+
+#[test]
+fn highlight_config_highlight_escapes_what_the_free_helpers_do_not() {
+    let text = "<b>fox</b> & the lazy dog";
+    assert_eq!(
+        HighlightConfig::default()
+            .whole_text()
+            .highlight(text, "fox"),
+        "&lt;b&gt;<mark>fox</mark>&lt;/b&gt; &amp; the lazy dog"
+    );
+    assert_eq!(
+        highlight_text(text, "fox", "<mark>", "</mark>"),
+        "<b><mark>fox</mark></b> & the lazy dog"
+    );
+    assert_eq!(
+        HighlightConfig::default()
+            .fragment_words(1)
+            .highlight("one two fox three four", "fox"),
+        "...two <mark>fox</mark> three..."
+    );
+    assert_eq!(
+        HighlightConfig::default()
+            .whole_text()
+            .highlight("a < b", "  "),
+        "a &lt; b",
+        "with no word to mark the text is still escaped"
+    );
 }

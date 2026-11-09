@@ -157,7 +157,7 @@ fn bulk_removal_preserves_order_and_removes_duplicate_keys() {
     for key in ["a", "b", "a", "c", "d"] {
         files.add_many("many", FileAttachment::new(key));
     }
-    files.remove_many("many", &["a", "c"]);
+    files.remove_many("many", ["a", "c"]);
     assert_eq!(
         files
             .try_get_many("many")

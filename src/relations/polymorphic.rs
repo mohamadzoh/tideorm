@@ -13,11 +13,12 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::marker::PhantomData;
 
 use crate::error::{Error, Result};
+use crate::internal::Value;
 use crate::model::Model;
 use crate::query::QueryBuilder;
 
 use super::helpers::{
-    QuerySource, ensure_relation_configured, owner_is_unsaved, require_scalar_relation_key,
+    QuerySource, ensure_relation_configured, is_null_key, require_scalar_relation_key,
     required_key, where_key,
 };
 use super::state::{RelationState, relation_serde};
@@ -54,7 +55,7 @@ pub struct MorphTo<Morphable> {
     /// `MorphOne`/`MorphMany` naming the key its children hold.
     child_table: &'static str,
     type_value: Option<String>,
-    id_value: Option<serde_json::Value>,
+    id_value: Option<Value>,
     source: QuerySource,
     _morphable: PhantomData<Morphable>,
 }
@@ -68,9 +69,10 @@ impl<Morphable> MorphTo<Morphable> {
     ///
     /// Both must be non-empty; loading a wrapper built by [`Default`] fails with
     /// "MorphTo relation is not configured". Pair with
-    /// [`with_values`](Self::with_values) to make it loadable — normally the
+    /// `with_values` to make it loadable — normally the
     /// derive does both, deriving the names from `morph_name` as
     /// `{morph_name}_type` / `{morph_name}_id`.
+    #[must_use]
     pub fn new(type_column: &'static str, id_column: &'static str) -> Self {
         Self {
             type_column,
@@ -96,13 +98,14 @@ impl<Morphable> MorphTo<Morphable> {
     ///
     /// The type column may be nullable (`Option<String>`): a row with no owner
     /// holds `NULL` in both columns, and `load()` then returns `None`.
+    #[doc(hidden)]
     pub fn with_values(
         mut self,
         type_value: impl Into<Option<String>>,
-        id_value: serde_json::Value,
+        id_value: impl Into<Value>,
     ) -> Self {
         self.type_value = type_value.into();
-        self.id_value = Some(id_value);
+        self.id_value = Some(id_value.into());
         self
     }
 
@@ -113,7 +116,7 @@ impl<Morphable> MorphTo<Morphable> {
     }
 
     /// The stored polymorphic owner key.
-    pub fn id_value(&self) -> Option<&serde_json::Value> {
+    pub fn id_value(&self) -> Option<&Value> {
         self.id_value.as_ref()
     }
 
@@ -135,7 +138,7 @@ impl<Morphable> MorphTo<Morphable> {
         }
 
         let id = match &self.id_value {
-            Some(v) if !v.is_null() => require_scalar_relation_key(v, "MorphTo::load_as")?,
+            Some(v) if !is_null_key(v) => require_scalar_relation_key(v, "MorphTo::load_as")?,
             _ => return Ok(None),
         };
 
@@ -161,7 +164,6 @@ impl<Morphable> MorphTo<Morphable> {
             .await
     }
 
-    #[cfg(feature = "entity-manager")]
     #[doc(hidden)]
     pub fn attach_query_database(&mut self, database: &crate::database::Database) {
         self.source.database = Some(database.clone());
@@ -296,17 +298,24 @@ macro_rules! morph_owner_plumbing {
 
         /// Supply both halves of the polymorphic key: this model's
         /// [`local_key`](Self::local_key) value and its table name, which is what
-        /// the `_type` column is matched against.
+        /// the `_type` column is matched against, and whether the model is new
+        /// (its `is_new()`), whose cached rows carry over when saving it
+        /// rebuilds the relation.
         ///
         /// The pk must be a scalar. Without this the wrapper is inert — every query
         /// method errors with "Parent primary key not set for relation".
-        pub fn with_parent(mut self, pk: serde_json::Value, table: String) -> Self {
-            self.state.key = Some(pk);
+        #[doc(hidden)]
+        pub fn with_parent(
+            mut self,
+            pk: impl Into<Value>,
+            table: String,
+            owner_is_new: bool,
+        ) -> Self {
+            self.state.set_owner_key(pk.into(), owner_is_new);
             self.parent_table = Some(table);
             self
         }
 
-        #[cfg(feature = "entity-manager")]
         #[doc(hidden)]
         pub fn attach_query_database(&mut self, database: &crate::database::Database) {
             self.state.source.database = Some(database.clone());
@@ -320,7 +329,7 @@ macro_rules! morph_owner_plumbing {
                     && self.local_key == previous.local_key
                     && self.parent_table == previous.parent_table
                     && self.state.key == previous.state.key,
-                owner_is_unsaved(&previous.state.key),
+                previous.state.owner_is_new,
             );
         }
     };
@@ -361,7 +370,8 @@ impl<Related: Model> MorphOne<Related> {
     ///
     /// Both must be non-empty; loading a wrapper built by [`Default`] fails with
     /// "MorphOne relation is not configured". Pair with
-    /// [`with_parent`](Self::with_parent) to make it loadable.
+    /// `with_parent` to make it loadable.
+    #[must_use]
     pub fn new(morph_name: &'static str, local_key: &'static str) -> Self {
         Self {
             morph_name,
@@ -388,10 +398,24 @@ impl<Related: Model> MorphOne<Related> {
         self.query("MorphOne::load")?.first().await
     }
 
-    /// The cached row, if one is present. Never queries and never awaits.
-    pub fn get_cached(&self) -> Option<&Related> {
-        self.state.cached().map(|model| &**model)
+    /// Fetch the related row through a caller-supplied refinement of the
+    /// query, which arrives filtered on both the type and id columns. Never
+    /// serves the cache.
+    pub async fn load_with<F>(&self, constraint_fn: F) -> Result<Option<Related>>
+    where
+        F: FnOnce(QueryBuilder<Related>) -> QueryBuilder<Related> + Send,
+    {
+        constraint_fn(self.query("MorphOne::load_with")?)
+            .first()
+            .await
     }
+
+    /// Whether a related row exists, without reading it. Always queries.
+    pub async fn exists(&self) -> Result<bool> {
+        self.query("MorphOne::exists")?.exists().await
+    }
+
+    crate::relations::state::one_row_cache!(Related);
 
     #[doc(hidden)]
     pub fn set_cached(&mut self, model: Option<Related>) {
@@ -440,7 +464,8 @@ impl<Related: Model> MorphMany<Related> {
     ///
     /// Both must be non-empty; every method rejects a wrapper built by
     /// [`Default`] with "MorphMany relation is not configured". Pair with
-    /// [`with_parent`](Self::with_parent) to make it loadable.
+    /// `with_parent` to make it loadable.
+    #[must_use]
     pub fn new(morph_name: &'static str, local_key: &'static str) -> Self {
         Self {
             morph_name,
@@ -485,13 +510,13 @@ impl<Related: Model> MorphMany<Related> {
         self.query("MorphMany::count")?.count().await
     }
 
-    /// The cached rows, if any are present. Never queries and never awaits.
-    ///
-    /// `Some(&[])` means "loaded, and there are none"; `None` means nothing was
-    /// ever loaded.
-    pub fn get_cached(&self) -> Option<&[Related]> {
-        self.state.cached().map(Vec::as_slice)
+    /// Whether at least one related row exists, without counting them all.
+    /// Always queries.
+    pub async fn exists(&self) -> Result<bool> {
+        self.query("MorphMany::exists")?.exists().await
     }
+
+    crate::relations::state::many_rows_cache!(Related);
 
     #[doc(hidden)]
     pub fn set_cached(&mut self, models: Vec<Related>) {

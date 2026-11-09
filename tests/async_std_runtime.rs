@@ -22,37 +22,31 @@ fn async_std_connections_transactions_and_cancellation() {
             .await
             .unwrap();
         let writer = db.clone();
-        db.transaction(move |_| {
-            Box::pin(async move {
-                writer
-                    .exec_raw("INSERT INTO runtime_items VALUES(1, 'committed')")
-                    .await?;
-                Ok(())
-            })
+        db.transaction(async move |_| {
+            writer
+                .exec_raw("INSERT INTO runtime_items VALUES(1, 'committed')")
+                .await?;
+            Ok(())
         })
         .await
         .unwrap();
         let writer = db.clone();
         let rolled_back: tideorm::Result<()> = db
-            .transaction(move |_| {
-                Box::pin(async move {
-                    writer
-                        .exec_raw("UPDATE runtime_items SET name = 'rolled back'")
-                        .await?;
-                    Err(tideorm::Error::query("roll back"))
-                })
+            .transaction(async move |_| {
+                writer
+                    .exec_raw("UPDATE runtime_items SET name = 'rolled back'")
+                    .await?;
+                Err(tideorm::Error::query("roll back"))
             })
             .await;
         assert!(rolled_back.is_err());
         let writer = db.clone();
-        let cancelled = db.transaction(move |_| {
-            Box::pin(async move {
-                writer
-                    .exec_raw("UPDATE runtime_items SET name = 'cancelled'")
-                    .await?;
-                std::future::pending::<()>().await;
-                Ok(())
-            })
+        let cancelled = db.transaction(async move |_| {
+            writer
+                .exec_raw("UPDATE runtime_items SET name = 'cancelled'")
+                .await?;
+            std::future::pending::<()>().await;
+            Ok(())
         });
         assert!(
             async_std::future::timeout(Duration::from_millis(100), cancelled)

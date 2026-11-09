@@ -2,6 +2,7 @@
 //! snapshots and [`QueryBuilder::apply`](super::QueryBuilder::apply) merges
 //! back.
 
+use super::advanced::HavingClause;
 use super::builder::DISTINCT_SELECT_MARKER;
 use super::structure::SubquerySelect;
 use super::{CTE, JoinClause, OrGroup, Order, UnionClause, WhereCondition, WindowFunction};
@@ -50,15 +51,8 @@ pub(crate) struct Clauses {
     pub(crate) subquery_select_expressions: Vec<SubquerySelect>,
     /// GROUP BY columns. **Appended.**
     pub(crate) group_by: Vec<String>,
-    /// HAVING clause templates, AND-ed together, each keeping its `?`
-    /// placeholders. **Appended** in lockstep with `having_bindings`.
-    pub(crate) having_conditions: Vec<String>,
-    /// The values bound to each HAVING clause's placeholders, slot `i` for
-    /// clause `i`; empty for a raw clause.
-    pub(crate) having_bindings: Vec<Vec<crate::internal::Value>>,
-    /// Extrema operands retain their JSON value until the query's joins are known.
-    pub(crate) having_typed_bindings:
-        std::collections::BTreeMap<usize, (String, serde_json::Value)>,
+    /// HAVING conditions, AND-ed together. **Appended.**
+    pub(crate) having_conditions: Vec<HavingClause>,
     /// Typed HAVING comparisons rechecked after all joins are known. **Appended.**
     pub(crate) having_comparisons: Vec<(String, &'static str)>,
     /// JOIN clauses, in the order they render. **Appended.**
@@ -162,7 +156,10 @@ impl Clauses {
             .extend_from_slice(&other.subquery_select_expressions);
 
         self.group_by.extend_from_slice(&other.group_by);
-        self.merge_having(other);
+        self.having_conditions
+            .extend_from_slice(&other.having_conditions);
+        self.having_comparisons
+            .extend_from_slice(&other.having_comparisons);
         self.joins.extend_from_slice(&other.joins);
         self.unions.extend_from_slice(&other.unions);
         self.window_functions
@@ -192,36 +189,6 @@ impl Clauses {
         }
 
         self.lock_for_update |= other.lock_for_update;
-    }
-
-    /// Append `other`'s HAVING clauses, each with the values bound to it.
-    ///
-    /// `having_bindings` is topped up to the clause count first: clauses whose
-    /// two vectors had drifted apart would otherwise shift the pairing for
-    /// every clause that follows.
-    fn merge_having(&mut self, other: &Clauses) {
-        self.having_comparisons
-            .extend(other.having_comparisons.iter().cloned());
-        let offset = self.having_conditions.len();
-        self.having_typed_bindings.extend(
-            other
-                .having_typed_bindings
-                .iter()
-                .map(|(index, operand)| (offset + index, operand.clone())),
-        );
-        self.having_bindings
-            .resize(self.having_conditions.len(), Vec::new());
-
-        for (index, condition) in other.having_conditions.iter().enumerate() {
-            self.having_conditions.push(condition.clone());
-            self.having_bindings.push(
-                other
-                    .having_bindings
-                    .get(index)
-                    .cloned()
-                    .unwrap_or_default(),
-            );
-        }
     }
 
     /// Append `other`'s OR groups, merging the group its `or_where_*` calls

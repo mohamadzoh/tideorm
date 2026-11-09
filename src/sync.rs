@@ -9,8 +9,9 @@
 //! TideORM models describe themselves with a `ModelSchema`, which the macros
 //! generate. Discover all linked models with `TideConfig::auto_models()`, or
 //! select a subset with `TideConfig::models::<User>()` or
-//! `TideConfig::models::<(User, Post)>()`. Enable synchronization
-//! with `sync(true)`. The legacy `models_matching` path filter remains available.
+//! `TideConfig::models::<(User, Post)>()`, or by source path with
+//! `TideConfig::models_matching("src/models/*")`. Enable synchronization
+//! with `sync(true)`.
 //!
 //! When sync fails, inspect the reported SQL/backend error first. Common causes
 //! are unsupported type changes, existing tables with incompatible columns, or a
@@ -21,7 +22,10 @@
 //! ### Normal Sync (`sync(true)`)
 //!
 //! - Creates missing tables
-//! - Adds missing columns to existing tables
+//! - Adds missing columns to existing tables. A `NOT NULL` column without a
+//!   default can be added only to an empty table (and not on SQLite, which
+//!   adds it as nullable); with rows in the table, sync fails and names the
+//!   column, since its rows would hold `NULL`
 //! - Reports columns the model no longer declares
 //! - **Does NOT drop existing tables or columns**
 //!
@@ -37,7 +41,8 @@
 //!
 //! ### Force Sync (`force_sync(true)`)
 //!
-//! - Drops and recreates the table of every registered model
+//! - Drops the table of every registered model, a table before the registered
+//!   tables its foreign keys reference, and then creates them all
 //!
 //! ## ⚠️ Warning
 //!
@@ -53,6 +58,7 @@ use crate::database::Database;
 use crate::error::Result;
 use crate::{tide_info, tide_warn};
 
+mod recreate;
 mod registry;
 mod schema;
 
@@ -63,7 +69,6 @@ pub use registry::{RegisterModels, SyncModel};
 pub(crate) use registry::{
     registered_column_names, registered_column_type, registered_encrypted_column,
 };
-pub(crate) use schema::decode_table_exists;
 use schema::sync_model_schemas;
 pub use schema::{ColumnDef, ModelSchema};
 
@@ -141,29 +146,39 @@ impl SyncRegistry {
     }
 }
 
-/// Synchronize all registered models with the database.
-///
-/// Creates the tables that are missing and adds the columns an existing table
-/// lacks; see the [module documentation](self) for what it leaves alone.
+/// How [`sync_database_with`] brings a registered model's table in line with
+/// the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SyncMode {
+    /// Create the tables that are missing and add the columns an existing
+    /// table lacks; see the [module documentation](self) for what it leaves
+    /// alone.
+    #[default]
+    Additive,
+    /// Drop the table of every registered model and create it afresh,
+    /// deleting its rows.
+    Recreate,
+}
+
+/// Synchronize all registered models with the database, additively
+/// ([`SyncMode::Additive`]).
 ///
 /// # Warning
 ///
 /// **DO NOT use in production!** This is for development only.
 /// Use proper migrations for production deployments.
 pub async fn sync_database(db: &Database) -> Result<()> {
-    sync_database_with_options(db, false).await
+    sync_database_with(db, SyncMode::Additive).await
 }
 
-/// Synchronize all registered models, optionally recreating their tables.
-///
-/// With `force_sync`, the table of every registered model is dropped and
-/// created afresh instead of being reconciled.
+/// Synchronize all registered models with the database in `mode`.
 ///
 /// # ⚠️ DANGER
 ///
 /// **DO NOT use in production!** This is for development only.
-/// `force_sync` deletes the tables and all of their data.
-pub async fn sync_database_with_options(db: &Database, force_sync: bool) -> Result<()> {
+/// [`SyncMode::Recreate`] deletes the tables and all of their data.
+pub async fn sync_database_with(db: &Database, mode: SyncMode) -> Result<()> {
+    let force_sync = mode == SyncMode::Recreate;
     if force_sync {
         tide_warn!(
             "Database FORCE sync mode is ENABLED - registered tables are dropped and recreated!"

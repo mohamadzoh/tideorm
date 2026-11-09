@@ -7,10 +7,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
         if self.with_ranking {
             return self.build_pg_ranked_sql(None);
         }
-
-        let mut params = Vec::new();
-        let predicate = self.pg_predicate(&mut params)?;
-        Ok(self.select_where(PG, &predicate, params))
+        Ok(self.select_where(PG, self.pg_predicate()?))
     }
 
     pub(super) fn build_postgres_ranked_sql(&self) -> Result<(String, Vec<Value>)> {
@@ -18,84 +15,70 @@ impl<T: Model> FullTextSearchBuilder<T> {
     }
 
     pub(super) fn build_postgres_count_sql(&self) -> Result<(String, Vec<Value>)> {
-        let mut params = Vec::new();
-        let predicate = self.pg_predicate(&mut params)?;
-        Ok(Self::count_where(PG, &predicate, params))
+        Ok(Self::count_where(PG, self.pg_predicate()?))
     }
 
     /// Every column plus its `_fts_rank`, best match first, leaving out rows
     /// that score below `min_rank`.
     fn build_pg_ranked_sql(&self, min_rank: Option<f64>) -> Result<(String, Vec<Value>)> {
-        let mut params = Vec::new();
         let rank_alias = Self::rank_alias();
-        let Some((tsvector, tsquery)) = self.pg_match_parts(&mut params)? else {
+        let mut sql = BoundSql::sql(format!(
+            "SELECT {}, ",
+            crate::query::db_sql::model_columns_sql::<T>(PG, None)
+        ));
+        let from = format!(
+            " FROM {} WHERE ",
+            crate::query::db_sql::quote_table::<T>(PG)
+        );
+        let Some((tsvector, tsquery)) = self.pg_match_parts()? else {
             // No word to rank by, and no row to rank.
-            let sql = SqlBuilder::new(PG, &mut params)
-                .raw("SELECT ")
-                .raw(&crate::query::db_sql::model_columns_sql::<T>(PG, None))
-                .raw(", CAST(0 AS double precision) AS ")
-                .raw(&rank_alias)
-                .raw(" FROM ")
-                .raw(&crate::query::db_sql::quote_table::<T>(PG))
-                .raw(" WHERE ")
-                .raw(MATCH_NOTHING)
-                .into_sql();
-            return Ok((sql, params));
+            sql.push(format!(
+                "CAST(0 AS double precision) AS {rank_alias}{from}{MATCH_NOTHING}"
+            ));
+            return Ok(sql.build(PG.dialect()));
         };
         let weights = self.config.weights.clone().unwrap_or_default().pg_array();
-        let rank = SqlBuilder::new(PG, &mut params)
-            .raw("ts_rank_cd(CAST(")
-            .param(Value::String(Some(weights)))
-            .raw(" AS real[]), ")
-            .raw(&tsvector)
-            .raw(", ")
-            .raw(&tsquery)
-            .raw(")")
-            .into_sql();
+        let mut rank = BoundSql::sql("ts_rank_cd(CAST(");
+        rank.push(Value::String(Some(weights)))
+            .push(format!(" AS real[]), {tsvector}, "))
+            .push(tsquery.clone())
+            .push(")");
 
         // `ts_rank_cd` returns `real`, which does not decode as the `f64` rank.
-        let mut sql = SqlBuilder::new(PG, &mut params)
-            .raw("SELECT ")
-            .raw(&crate::query::db_sql::model_columns_sql::<T>(PG, None))
-            .raw(", CAST(")
-            .raw(&rank)
-            .raw(" AS double precision) AS ")
-            .raw(&rank_alias)
-            .raw(" FROM ")
-            .raw(&crate::query::db_sql::quote_table::<T>(PG))
-            .raw(" WHERE ")
-            .raw(&self.scoped(PG, format!("{tsvector} @@ {tsquery}"), None))
-            .into_sql();
-
+        let mut matched = BoundSql::sql(format!("{tsvector} @@ "));
+        matched.push(tsquery);
+        sql.push("CAST(")
+            .push(rank.clone())
+            .push(format!(" AS double precision) AS {rank_alias}{from}"))
+            .push(self.scoped(PG, matched, None));
         if let Some(min_rank) = min_rank {
-            let threshold = push_param(PG, &mut params, Value::Double(Some(min_rank)));
-            sql.push_str(" AND ");
-            sql.push_str(&rank);
-            sql.push_str(" >= ");
-            sql.push_str(&threshold);
+            sql.push(" AND ")
+                .push(rank)
+                .push(" >= ")
+                .push(Value::Double(Some(min_rank)));
         }
-
-        sql.push_str(" ORDER BY ");
-        sql.push_str(&rank_alias);
-        sql.push_str(" DESC");
-        self.append_limit_offset(PG, &mut sql, &mut params);
-
-        Ok((sql, params))
+        sql.push(format!(" ORDER BY {rank_alias} DESC"))
+            .push(PG.dialect().limit_offset(self.limit, self.offset));
+        Ok(sql.build(PG.dialect()))
     }
 
     /// `tsvector @@ tsquery`, binding the query, or a predicate that matches
     /// nothing when the search text holds no word, where `plainto_tsquery('')`
     /// would read the whole table to match nothing.
-    fn pg_predicate(&self, params: &mut Vec<Value>) -> Result<String> {
-        Ok(match self.pg_match_parts(params)? {
-            Some((tsvector, tsquery)) => self.scoped(PG, format!("{tsvector} @@ {tsquery}"), None),
-            None => MATCH_NOTHING.to_string(),
+    fn pg_predicate(&self) -> Result<BoundSql> {
+        Ok(match self.pg_match_parts()? {
+            Some((tsvector, tsquery)) => {
+                let mut matched = BoundSql::sql(format!("{tsvector} @@ "));
+                matched.push(tsquery);
+                self.scoped(PG, matched, None)
+            }
+            None => BoundSql::sql(MATCH_NOTHING),
         })
     }
 
-    /// The `tsvector` and `tsquery` expressions, binding the query, or `None`
-    /// when the search text holds no word.
-    fn pg_match_parts(&self, params: &mut Vec<Value>) -> Result<Option<(String, String)>> {
+    /// The `tsvector` expression and the `tsquery` binding the query, or
+    /// `None` when the search text holds no word.
+    fn pg_match_parts(&self) -> Result<Option<(String, BoundSql)>> {
         let language = self.config.language.as_deref();
         if let Some(name) = language
             && !name.split('.').all(is_safe_identifier_segment)
@@ -108,11 +91,11 @@ impl<T: Model> FullTextSearchBuilder<T> {
             return Ok(None);
         }
         let tsvector = pg_tsvector(language, &self.column_names());
-        let tsquery = self.build_pg_tsquery_expr(&pg_language(language), params);
+        let tsquery = self.build_pg_tsquery_expr(&pg_language(language));
         Ok(Some((tsvector, tsquery)))
     }
 
-    fn build_pg_tsquery_expr(&self, language: &str, params: &mut Vec<Value>) -> String {
+    fn build_pg_tsquery_expr(&self, language: &str) -> BoundSql {
         let query = self.query_text();
         let (function, text) = match self.config.mode {
             SearchMode::Natural => ("plainto_tsquery", query),
@@ -131,14 +114,9 @@ impl<T: Model> FullTextSearchBuilder<T> {
             }
         };
 
-        SqlBuilder::new(PG, params)
-            .raw(function)
-            .raw("(")
-            .raw(language)
-            .raw(", ")
-            .param(Value::String(Some(text)))
-            .raw(")")
-            .into_sql()
+        let mut tsquery = BoundSql::sql(format!("{function}({language}, "));
+        tsquery.push(Value::String(Some(text))).push(")");
+        tsquery
     }
 
     /// Parse sanitized literal terms with `to_tsquery`, or fall back to

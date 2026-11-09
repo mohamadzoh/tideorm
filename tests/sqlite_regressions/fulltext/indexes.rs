@@ -22,11 +22,7 @@ struct ScopedArticle {
 }
 
 async fn index(db: &Database) -> tideorm::Result<()> {
-    let index = FullTextIndex::new(
-        "audit_articles_search",
-        "audit_articles",
-        vec!["body".into()],
-    );
+    let index = FullTextIndex::new("audit_articles_search", "audit_articles", ["body"]);
     install(db, &index).await
 }
 
@@ -38,7 +34,7 @@ async fn fulltext_rank_does_not_shadow_model_column() {
     )
     .await;
     index(&db).await.unwrap();
-    let ranked = Article::search(&["body"], "alpha")
+    let ranked = Article::search(["body"], "alpha")
         .get_ranked()
         .await
         .unwrap();
@@ -48,7 +44,7 @@ async fn fulltext_rank_does_not_shadow_model_column() {
     assert!(ranked[0].rank > ranked[1].rank);
     assert!(ranked.iter().all(|r| r.rank > 0.0 && r.rank < 1.0));
     assert!(
-        Article::search(&["body"], "alpha")
+        Article::search(["body"], "alpha")
             .min_rank(1.0)
             .get_ranked()
             .await
@@ -88,22 +84,16 @@ async fn fulltext_conflicting_triggers_fail_without_replacing_user_definitions()
         db.exec_raw("INSERT INTO audit_articles VALUES(2,'alpha',456.5)")
             .await
             .unwrap();
-        assert_eq!(
-            Article::search(&["body"], "alpha").count().await.unwrap(),
-            1
-        );
+        assert_eq!(Article::search(["body"], "alpha").count().await.unwrap(), 1);
         db.exec_raw("UPDATE audit_articles SET body='beta' WHERE id=2")
             .await
             .unwrap();
-        assert_eq!(
-            Article::search(&["body"], "alpha").count().await.unwrap(),
-            0
-        );
-        assert_eq!(Article::search(&["body"], "beta").count().await.unwrap(), 1);
+        assert_eq!(Article::search(["body"], "alpha").count().await.unwrap(), 0);
+        assert_eq!(Article::search(["body"], "beta").count().await.unwrap(), 1);
         db.exec_raw("DELETE FROM audit_articles WHERE id=2")
             .await
             .unwrap();
-        assert_eq!(Article::search(&["body"], "beta").count().await.unwrap(), 0);
+        assert_eq!(Article::search(["body"], "beta").count().await.unwrap(), 0);
     }
 }
 
@@ -116,11 +106,7 @@ async fn fulltext_trigger_checks_use_the_index_schema_and_are_idempotent() {
          CREATE TABLE tenant.audit_articles(id INTEGER PRIMARY KEY,body TEXT)",
     )
     .await;
-    let index = FullTextIndex::new(
-        "tenant_search",
-        "tenant.audit_articles",
-        vec!["body".into()],
-    );
+    let index = FullTextIndex::new("tenant_search", "tenant.audit_articles", ["body"]);
     for _ in 0..2 {
         install(&db, &index).await.unwrap();
     }
@@ -128,7 +114,7 @@ async fn fulltext_trigger_checks_use_the_index_schema_and_are_idempotent() {
         .await
         .unwrap();
     assert_eq!(
-        ScopedArticle::search(&["body"], "alpha")
+        ScopedArticle::search(["body"], "alpha")
             .count()
             .await
             .unwrap(),
@@ -138,7 +124,7 @@ async fn fulltext_trigger_checks_use_the_index_schema_and_are_idempotent() {
         .await
         .unwrap();
     assert_eq!(
-        ScopedArticle::search(&["body"], "beta")
+        ScopedArticle::search(["body"], "beta")
             .count()
             .await
             .unwrap(),
@@ -148,7 +134,7 @@ async fn fulltext_trigger_checks_use_the_index_schema_and_are_idempotent() {
         .await
         .unwrap();
     assert_eq!(
-        ScopedArticle::search(&["body"], "beta")
+        ScopedArticle::search(["body"], "beta")
             .count()
             .await
             .unwrap(),
@@ -184,50 +170,44 @@ async fn searches_use_the_models_index_when_schema_names_collide() {
         "main.query_behavior_articles",
         "tenant.query_behavior_articles",
     ] {
-        install(
-            &db,
-            &FullTextIndex::new("search", table, vec!["title".into()]),
-        )
-        .await
-        .unwrap();
+        install(&db, &FullTextIndex::new("search", table, ["title"]))
+            .await
+            .unwrap();
     }
-    db.transaction(|_| {
-        Box::pin(async {
-            let search = || FullTextSearchBuilder::<TenantArticle>::new(&["title"], "apple");
-            let result = search().get().await?;
-            assert_eq!(result.iter().map(|r| r.id).collect::<Vec<_>>(), vec![2]);
-            assert_eq!(search().first().await?.unwrap().id, 2);
-            let ranked = search().min_rank(0.0).get_ranked().await?;
-            assert_eq!(
-                ranked.iter().map(|r| r.record.id).collect::<Vec<_>>(),
-                vec![2]
-            );
-            assert!(ranked[0].rank > 0.0);
-            assert_eq!(search().count().await?, 1);
-            let mut main_ids: Vec<_> =
-                FullTextSearchBuilder::<MainArticle>::new(&["title"], "apple")
-                    .get()
-                    .await?
-                    .iter()
-                    .map(|r| r.id)
-                    .collect();
-            main_ids.sort_unstable();
-            assert_eq!(main_ids, vec![1, 3]);
-            assert_eq!(
-                FullTextSearchBuilder::<MainArticle>::new(&["title"], "apple")
-                    .count()
-                    .await?,
-                2
-            );
-            // A query with no search terms must not invoke bm25 without MATCH.
-            assert!(
-                FullTextSearchBuilder::<TenantArticle>::new(&["title"], "")
-                    .get_ranked()
-                    .await?
-                    .is_empty()
-            );
-            Ok(())
-        })
+    db.transaction(async |_| {
+        let search = || FullTextSearchBuilder::<TenantArticle>::new(["title"], "apple");
+        let result = search().get().await?;
+        assert_eq!(result.iter().map(|r| r.id).collect::<Vec<_>>(), vec![2]);
+        assert_eq!(search().first().await?.unwrap().id, 2);
+        let ranked = search().min_rank(0.0).get_ranked().await?;
+        assert_eq!(
+            ranked.iter().map(|r| r.record.id).collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert!(ranked[0].rank > 0.0);
+        assert_eq!(search().count().await?, 1);
+        let mut main_ids: Vec<_> = FullTextSearchBuilder::<MainArticle>::new(["title"], "apple")
+            .get()
+            .await?
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        main_ids.sort_unstable();
+        assert_eq!(main_ids, vec![1, 3]);
+        assert_eq!(
+            FullTextSearchBuilder::<MainArticle>::new(["title"], "apple")
+                .count()
+                .await?,
+            2
+        );
+        // A query with no search terms must not invoke bm25 without MATCH.
+        assert!(
+            FullTextSearchBuilder::<TenantArticle>::new(["title"], "")
+                .get_ranked()
+                .await?
+                .is_empty()
+        );
+        Ok(())
     })
     .await
     .unwrap();

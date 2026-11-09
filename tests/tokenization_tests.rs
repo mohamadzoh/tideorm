@@ -3,7 +3,7 @@
 //! tokens are bound to the struct name. A derived model's tokens are bound to
 //! its table; `sqlite_regressions/tokenization.rs` covers those.
 
-use std::sync::Once;
+use std::sync::{Arc, Once};
 
 use tideorm::error::{Error, Result};
 use tideorm::tokenization::{
@@ -175,11 +175,11 @@ impl Tokenizable for CustomModel {
     }
 
     fn token_encoder() -> Option<TokenEncoder> {
-        Some(prefix_encoder)
+        Some(Arc::new(prefix_encoder))
     }
 
     fn token_decoder() -> Option<TokenDecoder> {
-        Some(prefix_decoder)
+        Some(Arc::new(prefix_decoder))
     }
 
     async fn from_token(token: &str) -> Result<Self> {

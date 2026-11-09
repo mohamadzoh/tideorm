@@ -1,12 +1,18 @@
 //! TideORM Procedural Macros
 //!
 //! This crate provides derive macros for TideORM models.
+//!
+//! It also carries the entity derives and attributes that TideORM
+//! re-exports from `tideorm::orm`. They read `#[orm(...)]` attributes and
+//! their expansions name absolute `::tideorm::orm::` paths, like the `Model`
+//! derive's.
 
 mod case;
 mod context;
 mod entity_gen;
 mod meta_support;
 mod model_trait;
+mod orm;
 mod parse;
 mod relation_gen;
 mod scope_gen;
@@ -124,7 +130,6 @@ fn expand_model(model_attr: TokenStream2, input: DeriveInput) -> syn::Result<Tok
         ));
     }
 
-    let other_attrs: Vec<_> = attrs.iter().collect();
     let inline_tide_attr = if has_inline_model_options {
         Some(quote! { #[tideorm(#model_attr)] })
     } else {
@@ -135,7 +140,7 @@ fn expand_model(model_attr: TokenStream2, input: DeriveInput) -> syn::Result<Tok
     Ok(quote! {
         #[derive(tideorm::Model)]
         #inline_tide_attr
-        #(#other_attrs)*
+        #(#attrs)*
         #vis struct #name #struct_body
     })
 }
@@ -156,6 +161,49 @@ fn struct_body_tokens(generics: &syn::Generics, fields: &syn::Fields) -> TokenSt
         syn::Fields::Unnamed(_) => quote! { #generics #fields #where_clause ; },
         syn::Fields::Unit => quote! { #generics #where_clause ; },
     }
+}
+
+// Entry points of the `tideorm::orm` derives.
+
+#[doc = include_str!("../docs/derive_active_enum.md")]
+#[proc_macro_derive(DeriveActiveEnum, attributes(orm))]
+pub fn derive_active_enum(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as syn::DeriveInput);
+
+    orm::derives::expand_derive_active_enum(input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Implements `Iterable` for an enum of unit variants: `ALL` lists them in
+/// declaration order.
+#[proc_macro_derive(EnumIter)]
+pub fn enum_iter(input: TokenStream) -> TokenStream {
+    let ast = syn::parse_macro_input!(input as syn::DeriveInput);
+
+    orm::enum_iter::expand(&ast)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Reads a struct from a raw result row, each named field from the column of
+/// its name, for `Database::raw_as`. An `Option` field takes SQL `NULL`.
+#[proc_macro_derive(FromQueryResult)]
+pub fn derive_from_query_result(input: TokenStream) -> TokenStream {
+    let ast = syn::parse_macro_input!(input as syn::DeriveInput);
+
+    orm::from_query_result::expand(&ast)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+#[doc = include_str!("../docs/derive_value_type.md")]
+#[proc_macro_derive(DeriveValueType, attributes(orm))]
+pub fn derive_value_type(input: TokenStream) -> TokenStream {
+    let derive_input = syn::parse_macro_input!(input as syn::DeriveInput);
+    orm::derives::expand_derive_value_type(derive_input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
 }
 
 #[cfg(test)]

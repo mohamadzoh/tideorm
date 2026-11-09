@@ -1,5 +1,10 @@
 use super::*;
 
+/// Remember `model` as read from the scope's pool.
+fn remember_model<M: Model>(model: &M) {
+    remember_model_from(model, crate::database::scope_origin())
+}
+
 #[tideorm::model(table = "dirty_tracking_baseline_users")]
 struct BaselineUser {
     #[tideorm(primary_key, auto_increment)]
@@ -17,42 +22,30 @@ fn baseline_user() -> BaselineUser {
 #[test]
 fn a_missing_baseline_is_distinguishable_from_an_unchanged_model() {
     let model = baseline_user();
-    forget_model(&model).expect("forgetting an absent baseline should succeed");
+    forget_model(&model);
 
     // No baseline: nothing was compared, so there is no field list at all.
-    assert_eq!(
-        changed_fields(&model).expect("dirty check should succeed"),
-        None
-    );
+    assert_eq!(changed_fields(&model), None);
     assert_eq!(
         original_value(&model, "name").expect("original value lookup should succeed"),
         None
     );
 
-    remember_model(&model).expect("remembering a baseline should succeed");
+    remember_model(&model);
 
     // Baseline present and matching: an empty list, not a missing one.
-    assert_eq!(
-        changed_fields(&model).expect("dirty check should succeed"),
-        Some(Vec::new())
-    );
+    assert_eq!(changed_fields(&model), Some(Vec::new()));
     assert_eq!(
         original_value(&model, "name").expect("original value lookup should succeed"),
-        Some(Some(serde_json::json!("Alice")))
+        Some(Some(Value::from("Alice")))
     );
 
     let mut edited = model.clone();
     edited.name = "Bob".to_string();
-    assert_eq!(
-        changed_fields(&edited).expect("dirty check should succeed"),
-        Some(vec!["name"])
-    );
+    assert_eq!(changed_fields(&edited), Some(vec!["name"]));
 
-    forget_model(&model).expect("forgetting a baseline should succeed");
-    assert_eq!(
-        changed_fields(&model).expect("dirty check should succeed"),
-        None
-    );
+    forget_model(&model);
+    assert_eq!(changed_fields(&model), None);
 }
 
 #[test]
@@ -60,10 +53,7 @@ fn an_unsaved_model_reports_no_baseline() {
     let mut model = baseline_user();
     model.id = 0;
 
-    assert_eq!(
-        changed_fields(&model).expect("dirty check should succeed"),
-        None
-    );
+    assert_eq!(changed_fields(&model), None);
     assert_eq!(
         original_value(&model, "name").expect("original value lookup should succeed"),
         None
@@ -92,30 +82,24 @@ fn a_key_read_from_two_databases_has_a_baseline_only_where_they_agree() {
         name: "Carol".to_string(),
     };
     let remember_from = |origin, model: &TwoDatabaseUser| {
-        loading_from(origin, || remember_model(model)).expect("remembering should succeed");
+        remember_model_from(model, origin);
     };
 
     // Read through a database other than the scope's (none here).
     remember_from(Some(2), &bob);
-    assert_eq!(
-        changed_fields(&bob).expect("dirty check should succeed"),
-        Some(Vec::new())
-    );
+    assert_eq!(changed_fields(&bob), Some(Vec::new()));
 
     // A second database gave the key the same row.
     remember_from(Some(1), &bob);
     assert_eq!(
         original_value(&bob, "name").expect("original value lookup should succeed"),
-        Some(Some(serde_json::json!("Bob")))
+        Some(Some(Value::from("Bob")))
     );
 
     // It gave the key another row: either could be the model's.
     remember_from(Some(1), &carol);
     for model in [&bob, &carol] {
-        assert_eq!(
-            changed_fields(model).expect("dirty check should succeed"),
-            None
-        );
+        assert_eq!(changed_fields(model), None);
         assert_eq!(
             original_value(model, "name").expect("original value lookup should succeed"),
             None
@@ -124,40 +108,34 @@ fn a_key_read_from_two_databases_has_a_baseline_only_where_they_agree() {
 
     // Forgetting one of them leaves the key as unknown as before: the other
     // database's baseline is not the model's either.
-    loading_from(Some(1), || forget_model(&carol)).expect("forgetting should succeed");
+    forget_model_from(&carol, Some(1));
     for model in [&bob, &carol] {
-        assert_eq!(
-            changed_fields(model).expect("dirty check should succeed"),
-            None
-        );
+        assert_eq!(changed_fields(model), None);
     }
 
     // Reading the row again gives the key a baseline both databases agree on.
     remember_from(Some(1), &bob);
-    assert_eq!(
-        changed_fields(&bob).expect("dirty check should succeed"),
-        Some(Vec::new())
-    );
+    assert_eq!(changed_fields(&bob), Some(Vec::new()));
 
     invalidate_model::<TwoDatabaseUser>();
-    assert_eq!(
-        changed_fields(&bob).expect("dirty check should succeed"),
-        None
-    );
+    assert_eq!(changed_fields(&bob), None);
 }
 
 fn named(name: &str) -> SnapshotValues {
-    HashMap::from([("name".to_string(), serde_json::json!(name))])
+    std::sync::Arc::new(HashMap::from([("name", Value::from(name))]))
 }
 
-fn store_row(key: &str) -> RowKey {
-    (TypeId::of::<BaselineUser>(), key.to_string())
+fn store_row(key: i64) -> RowKey {
+    (
+        TypeId::of::<BaselineUser>(),
+        vec![ValueKey::new(key.into())],
+    )
 }
 
 #[test]
 fn a_rolled_back_read_leaves_a_baseline_written_since_alone() {
     let mut store = SnapshotStore::new(10);
-    let row = store_row("1");
+    let row = store_row(1);
     store.replace(row.clone(), None, Some(named("Alice")));
 
     // A transaction reads the row, and before it rolls back another task
@@ -172,7 +150,7 @@ fn a_rolled_back_read_leaves_a_baseline_written_since_alone() {
 #[test]
 fn a_rolled_back_transaction_restores_the_baseline_before_its_first_write() {
     let mut store = SnapshotStore::new(10);
-    let row = store_row("1");
+    let row = store_row(1);
     store.replace(row.clone(), None, Some(named("Alice")));
 
     let (first_previous, first) = store.replace(row.clone(), None, Some(named("Bob")));
@@ -187,22 +165,22 @@ fn a_rolled_back_transaction_restores_the_baseline_before_its_first_write() {
 #[test]
 fn eviction_drops_every_databases_baseline_of_a_key_together() {
     let mut store = SnapshotStore::new(2);
-    let row = store_row("1");
+    let row = store_row(1);
     store.replace(row.clone(), Some(1), Some(named("Bob")));
     store.replace(row.clone(), Some(2), Some(named("Carol")));
     // Past capacity, the oldest baseline goes, and with it the key's other.
-    store.replace(store_row("2"), Some(1), Some(named("Dave")));
+    store.replace(store_row(2), Some(1), Some(named("Dave")));
 
     assert!(!store.entries.contains_key(&row));
     assert_eq!(store.order.len(), 1);
-    assert_eq!(store.get(&store_row("2")), Some(&named("Dave")));
+    assert_eq!(store.get(&store_row(2)), Some(&named("Dave")));
 }
 
 #[test]
 fn bulk_invalidation_rollback_does_not_overwrite_a_later_read() {
     let mut model = baseline_user();
     model.id = 71;
-    remember_model(&model).unwrap();
+    remember_model(&model);
     let pending = std::sync::Arc::new(parking_lot::Mutex::new(
         crate::cache::PendingInvalidations::new(None),
     ));
@@ -212,11 +190,11 @@ fn bulk_invalidation_rollback_does_not_overwrite_a_later_read() {
     drop(scope);
     // Another task reads a newer baseline before the bulk write rolls back.
     model.name = "newer".into();
-    remember_model(&model).unwrap();
+    remember_model(&model);
     drop(pending);
     assert_eq!(
         original_value(&model, "name").unwrap(),
-        Some(Some(serde_json::json!("newer")))
+        Some(Some(Value::from("newer")))
     );
 }
 
@@ -225,7 +203,7 @@ fn a_committed_bulk_invalidation_drops_all_origin_tombstones() {
     let mut model = baseline_user();
     model.id = 72;
     for origin in [Some(701), Some(702)] {
-        loading_from(origin, || remember_model(&model)).unwrap();
+        remember_model_from(&model, origin);
     }
     let pending = std::sync::Arc::new(parking_lot::Mutex::new(
         crate::cache::PendingInvalidations::new(None),
@@ -238,10 +216,10 @@ fn a_committed_bulk_invalidation_drops_all_origin_tombstones() {
         .unwrap()
         .into_inner()
         .replay();
-    loading_from(Some(703), || remember_model(&model)).unwrap();
+    remember_model_from(&model, Some(703));
     assert_eq!(
         original_value(&model, "name").unwrap(),
-        Some(Some(serde_json::json!("Alice")))
+        Some(Some(Value::from("Alice")))
     );
 }
 
@@ -253,8 +231,9 @@ struct Measurement {
     ratio: Option<f32>,
 }
 
-/// JSON writes a NaN or an infinite float as `null`, which no longer hides a
-/// change to or from one, nor one between them.
+/// Fields compare as values: a NaN equals itself, and a change to or from a
+/// non-finite float shows, as does one between two of them. A NULL field's
+/// original value is `None`.
 #[test]
 fn a_change_to_or_from_a_non_finite_float_shows() {
     let model = Measurement {
@@ -262,28 +241,26 @@ fn a_change_to_or_from_a_non_finite_float_shows() {
         value: f64::NAN,
         ratio: None,
     };
-    remember_model(&model).unwrap();
-    assert_eq!(changed_fields(&model).unwrap(), Some(Vec::new()));
+    remember_model(&model);
+    assert_eq!(changed_fields(&model), Some(Vec::new()));
     assert_eq!(
         original_value(&model, "value").unwrap(),
-        Some(Some(serde_json::json!("NaN")))
+        Some(Some(Value::from(f64::NAN)))
     );
+    assert_eq!(original_value(&model, "ratio").unwrap(), Some(None));
 
     let mut edited = model.clone();
     edited.value = f64::INFINITY;
     edited.ratio = Some(f32::NAN);
-    assert_eq!(
-        changed_fields(&edited).unwrap(),
-        Some(vec!["value", "ratio"])
-    );
+    assert_eq!(changed_fields(&edited), Some(vec!["value", "ratio"]));
 
     edited.value = 1.5;
     edited.ratio = Some(f32::NEG_INFINITY);
-    remember_model(&edited).unwrap();
+    remember_model(&edited);
     let mut back = edited.clone();
     back.ratio = None;
-    assert_eq!(changed_fields(&back).unwrap(), Some(vec!["ratio"]));
-    forget_model(&edited).unwrap();
+    assert_eq!(changed_fields(&back), Some(vec!["ratio"]));
+    forget_model(&edited);
 }
 
 /// Baselines recorded by real reads and writes.
@@ -326,7 +303,7 @@ mod stored {
         model.changed_fields().expect("dirty check should succeed")
     }
 
-    fn original_name(model: &StoredUser) -> Option<Option<serde_json::Value>> {
+    fn original_name(model: &StoredUser) -> Option<Option<crate::DbValue>> {
         model
             .original_value("name")
             .expect("original value lookup should succeed")
@@ -338,25 +315,25 @@ mod stored {
     async fn loaded_models_track_changes_against_the_latest_stored_baseline() {
         let _guard = crate::test_support::global_db_lock().lock().await;
         let (_db, alice) = saved_alice().await;
-        let alice_json = Some(Some(serde_json::json!("Alice")));
-        let bob_json = Some(Some(serde_json::json!("Bob")));
+        let was_alice = Some(Some(crate::DbValue::from("Alice")));
+        let was_bob = Some(Some(crate::DbValue::from("Bob")));
 
         let mut first = find(alice.id).await;
         let mut second = find(alice.id).await;
         assert_eq!(changed(&first), Some(Vec::new()));
-        assert_eq!(original_name(&first), alice_json);
+        assert_eq!(original_name(&first), was_alice);
 
         first.name = "Bob".to_string();
         assert_eq!(changed(&first), Some(vec!["name"]));
-        assert_eq!(original_name(&first), alice_json);
+        assert_eq!(original_name(&first), was_alice);
 
         let mut first = first.update().await.expect("update should succeed");
         assert_eq!(changed(&first), Some(Vec::new()));
-        assert_eq!(original_name(&first), bob_json);
+        assert_eq!(original_name(&first), was_bob);
 
         first.name = "Carol".to_string();
         assert_eq!(changed(&first), Some(vec!["name"]));
-        assert_eq!(original_name(&first), bob_json);
+        assert_eq!(original_name(&first), was_bob);
 
         second.name = "Dana".to_string();
         assert_eq!(
@@ -364,7 +341,7 @@ mod stored {
             Some(vec!["name"]),
             "a stale copy compares against the latest baseline"
         );
-        assert_eq!(original_name(&second), bob_json);
+        assert_eq!(original_name(&second), was_bob);
 
         crate::test_support::reset_globals_and_cache();
     }
@@ -377,7 +354,7 @@ mod stored {
         let first = crate::test_support::cached_rows::<StoredUser>().await;
         assert_eq!(first.len(), 1);
 
-        crate::model::__clear_dirty_snapshots();
+        crate::model::clear_dirty_snapshots();
 
         let mut cached = crate::test_support::cached_rows::<StoredUser>().await;
         cached[0].name = "Cached Bob".to_string();
@@ -385,7 +362,7 @@ mod stored {
         assert_eq!(changed(&cached[0]), Some(vec!["name"]));
         assert_eq!(
             original_name(&cached[0]),
-            Some(Some(serde_json::json!("Alice")))
+            Some(Some(crate::DbValue::from("Alice")))
         );
 
         crate::test_support::reset_globals_and_cache();
@@ -406,11 +383,9 @@ mod stored {
             ..loaded.clone()
         };
         let result: crate::error::Result<()> = db
-            .transaction(|_| {
-                Box::pin(async move {
-                    edited.update().await?;
-                    Err(crate::error::Error::query("roll it back"))
-                })
+            .transaction(async move |_| {
+                edited.update().await?;
+                Err(crate::error::Error::query("roll it back"))
             })
             .await;
         assert!(result.is_err(), "the transaction should roll back");
@@ -418,7 +393,7 @@ mod stored {
         assert_eq!(changed(&loaded), Some(Vec::new()));
         assert_eq!(
             original_name(&loaded),
-            Some(Some(serde_json::json!("Alice")))
+            Some(Some(crate::DbValue::from("Alice")))
         );
 
         crate::test_support::reset_globals_and_cache();

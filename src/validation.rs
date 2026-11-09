@@ -3,9 +3,10 @@
 //! `#[validate(..)]` field attributes compile to [`ValidationRule`]s. The
 //! derived [`Validate::validate`] checks every rule on every field and returns
 //! all failures together in one [`ValidationErrors`], before `create`,
-//! `update` or `save` reaches the database. [`Validator::validate_rule`]
-//! applies a single rule by hand, and [`ValidationBuilder`] assembles the rule
-//! list for one field.
+//! `update` or `save` reaches the database; the [`Error::Validation`](crate::Error::Validation)
+//! those return carries the whole set. [`Validator::validate_rule`] applies a
+//! single rule by hand, [`ValidationErrors::check`] a field's rules, and
+//! [`ValidationBuilder`] assembles and applies the rules for one field.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -24,7 +25,7 @@ use values::compiled_validation_regex;
 /// derived model is the order the struct declares them, so [`first`](Self::first),
 /// [`messages`](Self::messages) and the error `create()` returns are the same
 /// on every run.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ValidationErrors {
     errors: HashMap<String, Vec<String>>,
     order: Vec<String>,
@@ -32,6 +33,7 @@ pub struct ValidationErrors {
 
 impl ValidationErrors {
     /// Start an empty validation-error collection.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -45,20 +47,44 @@ impl ValidationErrors {
         self.errors.entry(field).or_default().push(message.into());
     }
 
-    /// Apply each of `rules` to `field`'s `value`, recording every failure; a
-    /// generated `Validate` impl checks each field with one call.
-    #[doc(hidden)]
-    pub fn __check<T: ValidatableValue>(
+    /// Apply each of `rules` to `field`'s `value`, recording every failure.
+    ///
+    /// A derived `Validate` impl checks each field with one call, and so can
+    /// a hand-written one:
+    ///
+    /// ```
+    /// use tideorm::validation::{Validate, ValidationErrors, ValidationRule};
+    ///
+    /// struct Signup {
+    ///     email: String,
+    ///     age: i32,
+    /// }
+    ///
+    /// impl Validate for Signup {
+    ///     fn validate(&self) -> Result<(), ValidationErrors> {
+    ///         let mut errors = ValidationErrors::new();
+    ///         errors
+    ///             .check("email", &self.email, &[ValidationRule::Required, ValidationRule::Email])
+    ///             .check("age", &self.age, &[ValidationRule::MinExact("18".into())]);
+    ///         errors.to_result()
+    ///     }
+    /// }
+    ///
+    /// let errors = Signup { email: "nope".into(), age: 12 }.validate().unwrap_err();
+    /// assert_eq!(errors.len(), 2);
+    /// ```
+    pub fn check<T: ValidatableValue>(
         &mut self,
         field: &str,
         value: &T,
         rules: &[ValidationRule],
-    ) {
+    ) -> &mut Self {
         for rule in rules {
             if let Some(message) = Validator::validate_rule(value, rule, field) {
                 self.add(field, message);
             }
         }
+        self
     }
 
     /// True when no field errors have been collected.
@@ -144,24 +170,28 @@ impl fmt::Display for ValidationErrors {
 
 impl std::error::Error for ValidationErrors {}
 
+/// An [`Error::Validation`](crate::Error::Validation) naming the first failure
+/// and carrying every one.
 impl From<ValidationErrors> for crate::error::Error {
     fn from(errors: ValidationErrors) -> Self {
-        if let Some((field, message)) = errors.first() {
-            crate::error::Error::Validation {
-                field: field.clone(),
-                message: message.clone(),
-            }
-        } else {
-            crate::error::Error::Validation {
-                field: "unknown".to_string(),
-                message: "Validation failed".to_string(),
-            }
+        let (field, message) = errors.first().map_or_else(
+            || ("unknown".to_string(), "Validation failed".to_string()),
+            |(field, message)| (field.clone(), message.clone()),
+        );
+        crate::error::Error::Validation {
+            field,
+            message,
+            errors: Box::new(errors),
         }
     }
 }
 
 /// A single validation rule
-#[derive(Debug, Clone)]
+///
+/// Marked `#[non_exhaustive]`: rules are added over time, so match with a
+/// wildcard arm.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum ValidationRule {
     /// Field must not be empty
     Required,

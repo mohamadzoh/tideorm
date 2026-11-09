@@ -60,11 +60,11 @@ macro_rules! impl_ord {
 macro_rules! impl_in {
     (@methods $value:ty) => {
         fn is_in(self, values: impl IntoIterator<Item = $value>) -> ColumnCondition {
-            self.cond(Operator::In, ConditionValue::members(values))
+            self.cond(Operator::In, ConditionValue::list(values))
         }
 
         fn not_in(self, values: impl IntoIterator<Item = $value>) -> ColumnCondition {
-            self.cond(Operator::NotIn, ConditionValue::members(values))
+            self.cond(Operator::NotIn, ConditionValue::list(values))
         }
     };
     (<$lifetime:lifetime> $value:ty => $($column:ty),+) => {$(
@@ -86,38 +86,34 @@ macro_rules! impl_like {
             }
 
             fn contains(self, substr: &str) -> ColumnCondition {
-                self.cond(Operator::LikeEscaped, ConditionValue::contains(substr))
+                self.cond(Operator::Contains, ConditionValue::text(substr))
             }
 
             fn starts_with(self, prefix: &str) -> ColumnCondition {
-                self.cond(Operator::LikeEscaped, ConditionValue::starts_with(prefix))
+                self.cond(Operator::StartsWith, ConditionValue::text(prefix))
             }
 
             fn ends_with(self, suffix: &str) -> ColumnCondition {
-                self.cond(Operator::LikeEscaped, ConditionValue::ends_with(suffix))
+                self.cond(Operator::EndsWith, ConditionValue::text(suffix))
             }
         }
     )+};
 }
 
-macro_rules! impl_nullable {
-    ($($column:ty),+) => {$(
-        impl ColumnNullable for Column<$column> {
-            fn is_null(self) -> ColumnCondition {
-                self.cond(Operator::IsNull, ConditionValue::None)
-            }
+// Every nullable column, whatever it holds: an enum, JSON, a newtype.
+impl<T> ColumnNullable for Column<Option<T>> {
+    fn is_null(self) -> ColumnCondition {
+        self.cond(Operator::IsNull, ConditionValue::None)
+    }
 
-            fn is_not_null(self) -> ColumnCondition {
-                self.cond(Operator::IsNotNull, ConditionValue::None)
-            }
-        }
-    )+};
+    fn is_not_null(self) -> ColumnCondition {
+        self.cond(Operator::IsNotNull, ConditionValue::None)
+    }
 }
 
 macro_rules! impl_ordered {
     ($($t:ty),*) => {$(
         impl_ord!($t => $t, Option<$t>);
-        impl_nullable!(Option<$t>);
     )*};
 }
 
@@ -132,26 +128,25 @@ impl_ordered!(
 );
 
 impl_eq!(&str => String, Option<String>);
+// Text compares in the column's collation: `Name.gte("M")`.
+impl_ord!(&str => String, Option<String>);
 impl_like!(String, Option<String>);
 impl_in!(<'a> &'a str => String, Option<String>);
-impl_nullable!(Option<String>);
-
-impl_nullable!(Option<bool>);
-// Equality and IN lists work for a column of any type that serializes — an
+// Equality and IN lists work for a column of any type a column can hold — an
 // enum, a newtype, a JSON value — and a nullable column (`Column<Option<T>>`)
 // compares with a plain `T` too.
-impl<T: serde::Serialize> ColumnEq<T> for Column<T> {
+impl<T: Into<crate::DbValue>> ColumnEq<T> for Column<T> {
     impl_eq!(@methods T);
 }
 
-impl<T: serde::Serialize> ColumnEq<T> for Column<Option<T>> {
+impl<T: Into<crate::DbValue>> ColumnEq<T> for Column<Option<T>> {
     impl_eq!(@methods T);
 }
 
-impl<T: serde::Serialize> ColumnIn<T> for Column<T> {
+impl<T: Into<crate::DbValue>> ColumnIn<T> for Column<T> {
     impl_in!(@methods T);
 }
 
-impl<T: serde::Serialize> ColumnIn<T> for Column<Option<T>> {
+impl<T: Into<crate::DbValue>> ColumnIn<T> for Column<Option<T>> {
     impl_in!(@methods T);
 }

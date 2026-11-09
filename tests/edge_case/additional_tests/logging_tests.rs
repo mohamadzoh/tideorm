@@ -21,17 +21,16 @@ mod logging_operation_detection {
 
     #[test]
     fn test_operation_display_matches_as_str() {
-        for op in [
-            QueryOperation::Select,
-            QueryOperation::Insert,
-            QueryOperation::Update,
-            QueryOperation::Delete,
-            QueryOperation::Transaction,
-            QueryOperation::Unknown,
+        for (op, text) in [
+            (QueryOperation::Select, "SELECT"),
+            (QueryOperation::Insert, "INSERT"),
+            (QueryOperation::Update, "UPDATE"),
+            (QueryOperation::Delete, "DELETE"),
+            (QueryOperation::Transaction, "TRANSACTION"),
+            (QueryOperation::Unknown, "UNKNOWN"),
         ] {
-            let s = op.as_str();
-            assert!(!s.is_empty());
-            assert_eq!(format!("{}", op), s);
+            assert_eq!(op.as_str(), text);
+            assert_eq!(op.to_string(), text);
         }
     }
 }
@@ -44,11 +43,11 @@ mod logging_entry_formatting {
     fn test_log_entry_is_slow_at_or_past_the_threshold() {
         let entry = QueryLogEntry::new("SELECT 1").with_duration(Duration::from_millis(150));
 
-        assert!(entry.is_slow(100));
-        assert!(entry.is_slow(150));
-        assert!(!entry.is_slow(200));
+        assert!(entry.is_slow(Duration::from_millis(100)));
+        assert!(entry.is_slow(Duration::from_millis(150)));
+        assert!(!entry.is_slow(Duration::from_millis(200)));
         assert!(
-            !QueryLogEntry::new("SELECT 1").is_slow(0),
+            !QueryLogEntry::new("SELECT 1").is_slow(Duration::from_millis(0)),
             "an entry with no duration is never slow"
         );
     }
@@ -61,13 +60,10 @@ mod logging_entry_formatting {
             .with_rows(3)
             .with_params(vec!["1".to_string()]);
 
-        let output = entry.format_console();
-        assert!(output.contains("[TideORM]"));
-        assert!(output.contains("SELECT"));
-        assert!(output.contains("users"));
-        assert!(output.contains("42ms"));
-        assert!(output.contains("3 rows"));
-        assert!(output.contains("Params:"));
+        assert_eq!(
+            entry.format_console(),
+            "[TideORM][SELECT] users (42ms) [3 rows]\n  SQL: SELECT * FROM users WHERE id = 1\n  Params: [\"1\"]"
+        );
     }
 
     #[test]
@@ -124,15 +120,20 @@ mod logging_level_parsing {
             ("3", LogLevel::Info),
             ("debug", LogLevel::Debug),
             ("4", LogLevel::Debug),
-            ("trace", LogLevel::Trace),
+            ("TRACE", LogLevel::Trace),
             ("all", LogLevel::Trace),
             ("5", LogLevel::Trace),
-            // Anything else turns logging off.
-            ("verbose", LogLevel::Off),
-            ("", LogLevel::Off),
-            ("garbage", LogLevel::Off),
         ] {
-            assert_eq!(LogLevel::parse_str(text), level, "{text:?}");
+            assert_eq!(text.parse::<LogLevel>().unwrap(), level, "{text:?}");
+        }
+        // Anything else is refused, naming the text.
+        for text in ["verbose", "", "6"] {
+            let error = text.parse::<LogLevel>().unwrap_err();
+            assert!(
+                matches!(error, tideorm::Error::Configuration { .. })
+                    && error.to_string().contains(&format!("'{text}'")),
+                "{error}"
+            );
         }
     }
 

@@ -117,7 +117,7 @@ fn test_has_attachments_sync_replaces_all() {
         .unwrap();
     assert_eq!(product.keys("images"), ["new1.jpg", "new2.jpg"]);
 
-    product.sync("images", vec![]).unwrap();
+    product.sync("images", Vec::<&str>::new()).unwrap();
     assert!(!product.has_files("images").unwrap());
 }
 

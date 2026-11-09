@@ -5,7 +5,7 @@ fn self_ref_tree_sql_uses_recursive_cte_and_local_key() {
     let (sql, params) = build_self_ref_tree_sql::<RelationTestNode>(
         "parent_slug",
         "slug",
-        &serde_json::json!("root"),
+        &Value::from("root"),
         3,
         DatabaseType::Postgres,
     )
@@ -29,7 +29,7 @@ fn self_ref_tree_sql_uses_backend_specific_placeholders() {
     let (sql, params) = build_self_ref_tree_sql::<RelationTestNode>(
         "parent_slug",
         "slug",
-        &serde_json::json!("root"),
+        &Value::from("root"),
         2,
         DatabaseType::MySQL,
     )
@@ -47,7 +47,7 @@ fn self_ref_tree_sql_rejects_unknown_columns() {
     let err = build_self_ref_tree_sql::<RelationTestNode>(
         "parent_slug",
         "missing_column",
-        &serde_json::json!("root"),
+        &Value::from("root"),
         2,
         DatabaseType::MySQL,
     )
@@ -66,7 +66,7 @@ async fn relation_loads_reject_composite_keys() {
         (
             "HasMany::load",
             HasMany::<RelationTestNode>::new("parent_slug", "slug")
-                .with_parent_pk(composite_key())
+                .with_parent_pk(composite_key(), false)
                 .load()
                 .await
                 .map(drop),
@@ -88,7 +88,7 @@ async fn relation_loads_reject_composite_keys() {
                 "id",
                 "relation_test_pivots",
             )
-            .with_parent_pk(composite_key())
+            .with_parent_pk(composite_key(), false)
             .load()
             .await
             .map(drop),
@@ -96,7 +96,7 @@ async fn relation_loads_reject_composite_keys() {
         (
             "MorphOne::load",
             MorphOne::<RelationTestNode>::new("nodeable", "id")
-                .with_parent(composite_key(), "relation_test_nodes".to_string())
+                .with_parent(composite_key(), "relation_test_nodes".to_string(), false)
                 .load()
                 .await
                 .map(drop),
@@ -104,7 +104,7 @@ async fn relation_loads_reject_composite_keys() {
         (
             "SelfRefMany::load_tree",
             SelfRefMany::<RelationTestNode>::new("parent_slug", "slug")
-                .with_parent_pk(composite_key())
+                .with_parent_pk(composite_key(), false)
                 .load_tree(2)
                 .await
                 .map(drop),
@@ -125,7 +125,7 @@ fn self_ref_tree_sql_collapses_cyclic_duplicates_to_one_row_per_node() {
     let (sql, _params) = build_self_ref_tree_sql::<RelationTestNode>(
         "parent_slug",
         "slug",
-        &json!("root"),
+        &Value::from("root"),
         5,
         DatabaseType::Postgres,
     )
@@ -147,7 +147,7 @@ fn self_ref_tree_sql_matches_every_column_of_a_composite_key() {
     let (sql, _params) = build_self_ref_tree_sql::<CompositeTreeNode>(
         "parent_code",
         "code",
-        &json!("root"),
+        &Value::from("root"),
         3,
         DatabaseType::Postgres,
     )
@@ -175,7 +175,7 @@ fn self_ref_tree_sql_renders_a_field_name_as_its_column() {
     let (sql, _params) = build_self_ref_tree_sql::<AliasedKeyModel>(
         "account_id",
         "id",
-        &json!(1),
+        &Value::from(1_i64),
         2,
         DatabaseType::Postgres,
     )

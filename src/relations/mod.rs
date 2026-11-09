@@ -42,7 +42,7 @@
 //! - **Serde destroys the wrappers' runtime state.** Only the cached payload
 //!   survives a round trip; the keys and connection that make a relation
 //!   loadable do not. A model rebuilt from JSON has dead relations until
-//!   [`refresh_runtime_relations_from`](crate::internal::InternalModel::refresh_runtime_relations_from)
+//!   [`__rebuild_relations`](crate::internal::InternalModel::__rebuild_relations)
 //!   re-derives them from the fresh column values, which is what TideORM's own
 //!   JSON paths do. Any new such path must call it too.
 //! - **`load()` prefers the database.** Every wrapper that keeps a cache —
@@ -69,14 +69,12 @@ pub use direct::{BelongsTo, HasMany, HasOne};
 // `EagerLoadModel` is exported from this module and from nowhere else on
 // purpose: it is `#[doc(hidden)]` machinery that macro-generated code names
 // through the fully qualified `::tideorm::relations::EagerLoadModel` path, both
-// to implement `__eager_load` and to call `__load_grouped_by_key`. It is
+// to implement `__eager_load`. It is
 // deliberately absent from the crate root and the prelude — see the matching
 // note in `lib.rs` — so do not "restore" it there for symmetry with the other
 // relation exports.
-pub use eager::{EagerLoadModel, EagerQueryBuilder, RelationPath, RelationTree, WithRelations};
+pub use eager::{EagerLoadModel, EagerQueryBuilder, RelationPath, RelationTree};
 
-#[cfg(feature = "entity-manager")]
-pub(crate) use eager::__relation_key;
 #[cfg(feature = "fulltext")]
 pub(crate) use helpers::soft_delete_clause;
 pub use many_to_many::HasManyThrough;
@@ -86,10 +84,9 @@ pub use self_referencing::{SelfRef, SelfRefMany};
 pub(crate) use state::RelationState;
 
 #[doc(hidden)]
-pub use eager::{
-    __eager_keyed_many, __eager_keyed_one, __eager_load_nested_many, __eager_load_nested_one,
-    __eager_through,
-};
+pub use eager::keys::{__eager_keyed_many, __eager_keyed_one, __eager_through};
+#[doc(hidden)]
+pub use eager::{__eager_load_nested_many, __eager_load_nested_one};
 
 #[cfg(test)]
 #[path = "../../tests/unit/relations_tests.rs"]

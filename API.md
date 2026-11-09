@@ -44,7 +44,8 @@ does not run SQL. For deployed schemas, use migrations instead of sync.
 
 All filters and modifiers consume and return the builder unless indicated.
 `C: ColumnValue<V>` means a typed `Column<T>` takes a `T` or a `&T`, so
-`where_in(User::ID, &ids)` works; a string column accepts any serializable value.
+`where_in(User::ID, &ids)` works; a string column accepts any `impl Into<DbValue>`,
+bound as its own type, or a `serde_json::Value`, read as the column's type.
 `String` and `Option<String>` columns accept `&str`. Nullable columns accept
 `Option<T>` (including `None::<T>`) or `T`. Integer, float and decimal columns
 accept narrower numbers that convert losslessly (an `i32` for an `i64` column).
@@ -64,7 +65,7 @@ where_raw(sql: &str) -> Self
 where_raw_with(sql: &str, params: Vec<DbValue>) -> Self
 when(condition: bool, f: impl FnOnce(Self) -> Self) -> Self
 when_some<T>(option: Option<T>, f: impl FnOnce(Self, T) -> Self) -> Self
-select(columns: Vec<&str>) -> Self
+select(columns: impl IntoColumnNames) -> Self   // names, typed columns, or a tuple of typed columns
 select_raw(sql: &str) -> Self
 order_by(column: impl IntoColumnName, order: Order) -> Self
 order_asc / order_desc(column: impl IntoColumnName) -> Self
@@ -72,12 +73,14 @@ sort(spec: &str) -> Self                        // "-created_at,name"
 limit(n: u64) / offset(n: u64) -> Self
 page(page: u64, per_page: u64) -> Self          // one-based
 with(relation: &str) -> EagerQueryBuilder<M>
-with_many(relations: &[&str]) -> EagerQueryBuilder<M>
+with_many(relations: impl IntoIterator<Item = impl AsRef<str>>) -> EagerQueryBuilder<M>
 with_trashed() / only_trashed() -> Self
 consolidate(&self) -> QueryFragment<M>
 apply(fragment: &QueryFragment<M>) -> Self
 validate(&self) -> Result<()>
 build_sql_preview(&self) -> String             // diagnostics, not execution
+build_sql_preview_for(&self, db: DatabaseType) -> String   // in that backend's dialect
+debug(&self) / debug_for(&self, db: DatabaseType) -> QueryDebugInfo   // parameterized SQL, params, clauses
 ```
 
 Scalar comparisons, ranges and IN lists enforce the typed column's value type,
@@ -110,8 +113,8 @@ count(self) -> Result<u64>
 exists(self) -> Result<bool>
 get_json(self) -> Result<Vec<serde_json::Value>>
 get_as<T: DeserializeOwned>(self) -> Result<Vec<T>>
-pluck<T: DeserializeOwned>(self, column: impl IntoColumnName) -> Result<Vec<T>>
-value<T: DeserializeOwned>(self, column: impl IntoColumnName) -> Result<Option<T>>
+pluck<T: DeserializeOwned>(self, column: impl ColumnRead<T>) -> Result<Vec<T>>
+value<T: DeserializeOwned>(self, column: impl ColumnRead<T>) -> Result<Option<T>>
 paginate(self, page: u64, per_page: u64) -> Result<Paginated<M>>
 sum<T: DeserializeOwned>(self, column: impl IntoColumnName) -> Result<T>
 avg<T: DeserializeOwned>(self, column: impl IntoColumnName) -> Result<Option<T>>
@@ -120,10 +123,14 @@ delete(self) / delete_all(self) / soft_delete(self) / restore(self) / force_dele
 ```
 
 Check the individual terminal's documentation for projection, soft-delete and
-unfiltered mutation rules. Eager terminals return `WithRelations<M>` wrappers:
-`get() -> Result<Vec<WithRelations<M>>>`, `first()` and `find(id)` return
-`Result<Option<WithRelations<M>>>`. Use `.query(|q| q.where_eq(...))` to modify
-the root query after `.with(...)`.
+unfiltered mutation rules. `C: ColumnRead<T>` means a typed `Column<T>` reads as
+its field's type, so `pluck(User::ID)` is a `Vec<i64>` with no annotation; a
+string column reads as the `T` you name. Eager terminals return the models
+themselves, each requested relation loaded into its field (read it with
+`get_cached()`): `get() -> Result<Vec<M>>`, `first()` and `find(id)` return
+`Result<Option<M>>`, and `paginate`, `count` and the `_or_fail` forms work as on
+`QueryBuilder`. Use `.query(|q| q.where_eq(...))` to modify the root query after
+`.with(...)`.
 
 ```rust,ignore
 let user = User { id: 0, name: "Ada".into(), active: true }.save().await?;
@@ -133,13 +140,13 @@ let user = user.update().await?;
 user.delete().await?;
 
 User::query().where_eq(User::ACTIVE, false)
-    .update_all().set("active", true).execute().await?;
+    .update_all().set(User::ACTIVE, true).execute().await?; // set() is typed as filters are
 
-User::transaction(|_tx| Box::pin(async {
+require_db()?.transaction(async |_tx| {
     // Model operations use this transaction's scoped connection.
     User { id: 0, name: "Grace".into(), active: true }.save().await?;
     Ok(()) // Err rolls back
-})).await?;
+}).await?;
 ```
 
 ## Cargo features and toolchain
@@ -148,7 +155,7 @@ Default features: `postgres`, `runtime-tokio`. To use only SQLite:
 
 ```toml
 [dependencies]
-tideorm = { version = "0.16.2", default-features = false, features = ["sqlite", "runtime-tokio"] }
+tideorm = { version = "0.17.0", default-features = false, features = ["sqlite", "runtime-tokio"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -168,6 +175,7 @@ A method missing at compile time may need its feature and the corresponding
 trait from the prelude. docs.rs includes all module flags, so its API is broader
 than the default build.
 
-MSRV: **Rust 1.94**, required by SeaORM 2.0.2 and SQLx 0.9. The project's MSRV CI
-checks that version. Select it explicitly with `cargo +1.94.0 check`; declaring
-1.91 would not make the current dependencies build there.
+MSRV: **Rust 1.94**, declared in the `rust-version` of every TideORM crate
+(macros, engine, SQL builder and drivers included). The
+project's MSRV CI checks that version. Select it explicitly with
+`cargo +1.94.0 check`.

@@ -1,13 +1,34 @@
 use parking_lot::RwLock;
 use std::collections::VecDeque;
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 use super::entry::{LogLevel, QueryLogEntry, QueryStats, StatsCounters};
 use super::format::{format_debug, format_error, format_slow, format_summary};
 
 /// The slow-query threshold the logger and the profiler both start from.
-pub(crate) const DEFAULT_SLOW_QUERY_THRESHOLD_MS: u64 = 100;
+const DEFAULT_SLOW_QUERY_THRESHOLD: Duration = Duration::from_millis(100);
+
+/// How many entries the history keeps until a limit is set.
+const DEFAULT_HISTORY_LIMIT: usize = 100;
+
+/// `TIDE_SLOW_QUERY_MS` as `var` reads it, or the default threshold.
+fn slow_query_threshold_from(var: impl Fn(&str) -> Option<String>) -> Duration {
+    var("TIDE_SLOW_QUERY_MS")
+        .and_then(|value| value.parse().ok())
+        .map_or(DEFAULT_SLOW_QUERY_THRESHOLD, Duration::from_millis)
+}
+
+/// The slow-query threshold `TIDE_SLOW_QUERY_MS` sets, or the default; the
+/// logger and the global profiler both start from it.
+pub(crate) fn slow_query_threshold_from_env() -> Duration {
+    slow_query_threshold_from(|name| std::env::var(name).ok())
+}
+
+/// Where [`QueryLogger`] sends what it prints: the entry, and the text its
+/// level renders for it.
+pub type QueryLogSink = Arc<dyn Fn(&QueryLogEntry, &str) + Send + Sync>;
 
 /// Process-wide logger state, built from the environment on first use so that
 /// `TIDE_LOG_*` applies before anything else and settings made in code land on
@@ -22,6 +43,8 @@ struct LoggerState {
     level: RwLock<Option<LogLevel>>,
     history: RwLock<VecDeque<QueryLogEntry>>,
     history_limit: RwLock<usize>,
+    /// `None` prints to stderr.
+    sink: RwLock<Option<QueryLogSink>>,
 }
 
 impl LoggerState {
@@ -31,22 +54,21 @@ impl LoggerState {
     }
 
     /// Build the state from `TIDE_LOG_LEVEL` and `TIDE_SLOW_QUERY_MS` as
-    /// `var` reads them, and `TIDE_LOG_QUERIES` from the environment.
+    /// `var` reads them, and `TIDE_LOG_QUERIES` from the environment. A level
+    /// the logger does not know turns it off.
     fn from_vars(var: impl Fn(&str) -> Option<String>) -> Self {
-        let level = var("TIDE_LOG_LEVEL").map(|value| LogLevel::parse_str(&value));
+        let level = var("TIDE_LOG_LEVEL").map(|value| value.parse().unwrap_or(LogLevel::Off));
         let enabled =
             super::query_logging_enabled() || level.is_some_and(|level| level != LogLevel::Off);
-        let slow_threshold_ms = var("TIDE_SLOW_QUERY_MS")
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(DEFAULT_SLOW_QUERY_THRESHOLD_MS);
 
         Self {
             enabled: AtomicBool::new(enabled),
             timing: AtomicBool::new(true),
-            counters: StatsCounters::new(slow_threshold_ms),
+            counters: StatsCounters::new(slow_query_threshold_from(var)),
             level: RwLock::new(level),
             history: RwLock::new(VecDeque::new()),
-            history_limit: RwLock::new(100),
+            history_limit: RwLock::new(DEFAULT_HISTORY_LIMIT),
+            sink: RwLock::new(None),
         }
     }
 }
@@ -55,9 +77,12 @@ impl LoggerState {
 pub struct QueryLogger;
 
 impl QueryLogger {
-    /// Start configuring the global query logger.
+    /// Start configuring the global query logger; nothing changes until the
+    /// builder is [`enable`](QueryLoggerBuilder::enable)d,
+    /// [`disable`](QueryLoggerBuilder::disable)d or
+    /// [`apply`](QueryLoggerBuilder::apply)'d.
     pub fn global() -> QueryLoggerBuilder {
-        QueryLoggerBuilder::new()
+        QueryLoggerBuilder::default()
     }
 
     /// Enable logging with the current global settings.
@@ -94,6 +119,56 @@ impl QueryLogger {
         *STATE.level.write() = Some(level);
     }
 
+    /// The duration at or above which a query counts as slow.
+    pub fn slow_query_threshold() -> Duration {
+        STATE.counters.slow_threshold()
+    }
+
+    /// Send what the logger prints to `sink` instead of stderr, such as a
+    /// `tracing` event or a test's buffer. The sink receives each entry the
+    /// level prints, with the text it renders for it; it runs on the thread
+    /// that executed the statement, so keep it quick.
+    ///
+    /// ```
+    /// use tideorm::logging::{LogLevel, QueryLogger};
+    ///
+    /// QueryLogger::set_sink(|entry, text| {
+    ///     if !entry.success {
+    ///         eprintln!("query failed: {text}");
+    ///     }
+    /// });
+    /// QueryLogger::global().level(LogLevel::Error).enable();
+    /// # QueryLogger::reset();
+    /// ```
+    pub fn set_sink(sink: impl Fn(&QueryLogEntry, &str) + Send + Sync + 'static) {
+        *STATE.sink.write() = Some(Arc::new(sink));
+    }
+
+    /// Print to stderr again.
+    pub fn clear_sink() {
+        *STATE.sink.write() = None;
+    }
+
+    /// Put the logger back as the environment configures it, as on first
+    /// use: `TIDE_LOG_LEVEL` and `TIDE_SLOW_QUERY_MS` read again, counters and
+    /// history emptied, the history limit at 100, timing shown, and output on
+    /// stderr. For tests that change the global logger.
+    pub fn reset() {
+        let fresh = LoggerState::from_env();
+        STATE
+            .enabled
+            .store(fresh.enabled.into_inner(), Ordering::SeqCst);
+        STATE.timing.store(true, Ordering::SeqCst);
+        STATE.counters.reset();
+        STATE
+            .counters
+            .set_slow_threshold(fresh.counters.slow_threshold());
+        *STATE.level.write() = fresh.level.into_inner();
+        STATE.history.write().clear();
+        *STATE.history_limit.write() = DEFAULT_HISTORY_LIMIT;
+        *STATE.sink.write() = None;
+    }
+
     /// Record one query entry and update counters while logging is enabled,
     /// and print it if the level allows: the level, `Off` until one is set,
     /// decides only what is printed, so `QueryLogger::enable()` or
@@ -103,41 +178,49 @@ impl QueryLogger {
             return;
         }
 
-        let threshold = STATE.counters.slow_threshold_ms();
+        let threshold = STATE.counters.slow_threshold();
         let is_slow = STATE.counters.record(entry.duration);
 
-        // Rendered before the entry moves into the history, so it is never
-        // copied; the history keeps the duration that hidden timing leaves
-        // out of the output.
-        let output = match Self::level() {
-            LogLevel::Off => None,
-            level => {
-                let duration = entry.duration;
-                if !Self::timing_enabled() {
-                    entry.duration = None;
-                }
-                let output = render(level, &entry, is_slow, threshold);
-                entry.duration = duration;
-                output
-            }
-        };
-
-        {
-            let mut history = STATE.history.write();
-            let limit = *STATE.history_limit.read();
-            if limit == 0 {
-                history.clear();
-            } else {
-                while history.len() >= limit {
-                    history.pop_front();
-                }
-                history.push_back(entry);
+        if let Some(output) = Self::render_for_level(&mut entry, is_slow, threshold) {
+            // Cloned out, so a sink that calls back into the logger finds no
+            // lock held.
+            let sink = STATE.sink.read().clone();
+            match sink {
+                Some(sink) => sink(&entry, &output),
+                None => eprintln!("{}", output),
             }
         }
 
-        if let Some(output) = output {
-            eprintln!("{}", output);
+        let mut history = STATE.history.write();
+        let limit = *STATE.history_limit.read();
+        if limit == 0 {
+            history.clear();
+        } else {
+            while history.len() >= limit {
+                history.pop_front();
+            }
+            history.push_back(entry);
         }
+    }
+
+    /// What the current level prints for `entry`, without its duration when
+    /// timing is hidden; the entry keeps its duration for the history.
+    fn render_for_level(
+        entry: &mut QueryLogEntry,
+        is_slow: bool,
+        threshold: Duration,
+    ) -> Option<String> {
+        let level = Self::level();
+        if level == LogLevel::Off {
+            return None;
+        }
+        let duration = entry.duration;
+        if !Self::timing_enabled() {
+            entry.duration = None;
+        }
+        let output = render(level, entry, is_slow, threshold);
+        entry.duration = duration;
+        output
     }
 
     /// Snapshot the current aggregate query counters.
@@ -162,7 +245,7 @@ impl QueryLogger {
 
     /// Return history entries that meet the current slow-query threshold.
     pub fn slow_queries() -> Vec<QueryLogEntry> {
-        let threshold = STATE.counters.slow_threshold_ms();
+        let threshold = STATE.counters.slow_threshold();
         STATE
             .history
             .read()
@@ -177,7 +260,12 @@ impl QueryLogger {
 ///
 /// `is_slow` is decided before timing is stripped from `entry`, so a slow
 /// query is still reported as slow when durations are hidden.
-fn render(level: LogLevel, entry: &QueryLogEntry, is_slow: bool, threshold: u64) -> Option<String> {
+fn render(
+    level: LogLevel,
+    entry: &QueryLogEntry,
+    is_slow: bool,
+    threshold: Duration,
+) -> Option<String> {
     let output = match level {
         LogLevel::Off => return None,
         LogLevel::Error if entry.success => return None,
@@ -192,44 +280,51 @@ fn render(level: LogLevel, entry: &QueryLogEntry, is_slow: bool, threshold: u64)
     Some(output)
 }
 
-/// Builder for configuring the query logger
+/// Builder for configuring the query logger, from [`QueryLogger::global`].
+///
+/// Settings left unset keep their current value.
+///
+/// ```
+/// use std::time::Duration;
+/// use tideorm::logging::{LogLevel, QueryLogger};
+///
+/// QueryLogger::global()
+///     .level(LogLevel::Warn)
+///     .slow_query_threshold(Duration::from_millis(250))
+///     .history_limit(500)
+///     .enable();
+/// # QueryLogger::reset();
+/// ```
+#[derive(Debug, Default)]
+#[must_use = "a logger builder changes nothing until it is enabled, disabled or applied"]
 pub struct QueryLoggerBuilder {
     level: Option<LogLevel>,
     timing: Option<bool>,
-    threshold_ms: Option<u64>,
+    threshold: Option<Duration>,
     history_limit: Option<usize>,
 }
 
 impl QueryLoggerBuilder {
-    fn new() -> Self {
-        Self {
-            level: None,
-            timing: None,
-            threshold_ms: None,
-            history_limit: None,
-        }
-    }
-
     /// Set the log level to apply.
-    pub fn set_level(mut self, level: LogLevel) -> Self {
+    pub fn level(mut self, level: LogLevel) -> Self {
         self.level = Some(level);
         self
     }
 
     /// Control whether timing data should be emitted with log output.
-    pub fn enable_timing(mut self, enable: bool) -> Self {
+    pub fn timing(mut self, enable: bool) -> Self {
         self.timing = Some(enable);
         self
     }
 
-    /// Set the slow-query threshold in milliseconds.
-    pub fn set_slow_query_threshold_ms(mut self, ms: u64) -> Self {
-        self.threshold_ms = Some(ms);
+    /// Set the duration at or above which a query counts as slow.
+    pub fn slow_query_threshold(mut self, threshold: Duration) -> Self {
+        self.threshold = Some(threshold);
         self
     }
 
-    /// Cap how many recent queries are kept in memory.
-    pub fn set_history_limit(mut self, limit: usize) -> Self {
+    /// Cap how many recent queries are kept in memory; `0` keeps none.
+    pub fn history_limit(mut self, limit: usize) -> Self {
         self.history_limit = Some(limit);
         self
     }
@@ -246,15 +341,16 @@ impl QueryLoggerBuilder {
         QueryLogger::disable();
     }
 
-    fn apply(self) {
+    /// Apply the builder settings, leaving logging enabled or disabled as it is.
+    pub fn apply(self) {
         if let Some(level) = self.level {
             QueryLogger::set_level(level);
         }
         if let Some(timing) = self.timing {
             STATE.timing.store(timing, Ordering::SeqCst);
         }
-        if let Some(ms) = self.threshold_ms {
-            STATE.counters.set_slow_threshold_ms(ms);
+        if let Some(threshold) = self.threshold {
+            STATE.counters.set_slow_threshold(threshold);
         }
         if let Some(limit) = self.history_limit {
             *STATE.history_limit.write() = limit;

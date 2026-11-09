@@ -1,16 +1,14 @@
 //! The statement behind `insert_or_update()` and `on_conflict(..).insert()`.
 
+use crate::config::DatabaseType;
 use crate::error::{Error, Result};
 use crate::internal::{
-    ActiveModelTrait, Backend, ColumnTrait, ConnectionTrait, EntityTrait, InternalModel,
-    IntoActiveModel, ModelTrait, OnConflict, QueryFilter,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, OnConflict, QueryFilter,
 };
 use crate::orm::QuerySelect;
-use crate::orm::sea_query::Expr;
+use crate::orm::sql_builder::Expr;
 
 use super::{Model, OnConflictBuilder};
-
-type EntityModel<M> = <<M as InternalModel>::Entity as EntityTrait>::Model;
 
 /// Insert `model`, or update the stored row it collides with on `builder`'s
 /// conflict columns, and return the row as stored. No callback runs, as none
@@ -24,14 +22,13 @@ pub async fn __upsert<M>(
 ) -> Result<M>
 where
     M: Model,
-    EntityModel<M>: IntoActiveModel<M::ActiveModel>,
 {
     crate::validation::Validate::validate(&model).map_err(Error::from)?;
     let table = M::table_name();
 
     for column in &builder.conflict_columns {
         // Compared as the column it names, as the conflict target is.
-        if super::__encrypted_column::<M>(column)?.is_some() {
+        if super::__encrypted_column::<M>(column).is_some() {
             return Err(Error::query(format!(
                 "encrypted field '{}' cannot be used as an insert_or_update conflict column for {}; encrypted fields use randomized ciphertext, so use a plaintext unique key instead",
                 column, table
@@ -67,9 +64,9 @@ where
         .map(|column| resolve(column, "conflict"))
         .collect::<Result<Vec<_>>>()?;
 
-    // The values the row is looked up by afterwards. The plaintext conversion
-    // is safe here: a conflict column is never encrypted, and a key never is.
-    let lookup = model.to_entity_model();
+    // The values the row is looked up by afterwards, before the write
+    // encrypts any: a conflict column is never encrypted, and a key never is.
+    let lookup = model.clone();
     let mut active = model.try_into_active_model()?;
     // The insert half stamps managed timestamps like `create()` does; a
     // conflict on the key needs the key in the insert as well, and any other
@@ -110,7 +107,10 @@ where
     let connection = super::crud::writable_connection::<M>(&active)?;
     let executor = connection.executor();
 
-    if Backend::from(executor.get_database_backend()) == Backend::MySql {
+    if matches!(
+        executor.get_database_backend(),
+        DatabaseType::MySQL | DatabaseType::MariaDB
+    ) {
         if update_cols.iter().any(|column| is_key_column(column)) {
             return Err(Error::query(
                 "MySQL upsert update_columns() cannot update a primary key; omit primary-key columns from the update list",
@@ -143,7 +143,7 @@ where
     }
     let explicit_key = crate::internal::holds_auto_increment_key::<M>(&active);
     let row = connection
-        .invalidating(crate::internal::run_profiled(
+        .invalidating(crate::internal::run_statement(
             M::Entity::insert(active)
                 .on_conflict(on_conflict)
                 .exec_with_returning(&executor),
@@ -206,7 +206,7 @@ fn update_column_names<M: Model>(
 /// nothing. A NULL conflict value matches no row: MySQL's unique keys never
 /// treat NULLs as equal.
 async fn upsert_mysql<M>(
-    lookup: EntityModel<M>,
+    lookup: M,
     active: M::ActiveModel,
     conflict_columns: Vec<<M::Entity as EntityTrait>::Column>,
     update_columns: Vec<<M::Entity as EntityTrait>::Column>,
@@ -214,108 +214,97 @@ async fn upsert_mysql<M>(
 ) -> Result<M>
 where
     M: Model,
-    EntityModel<M>: IntoActiveModel<M::ActiveModel>,
 {
     crate::database::__current_db()?
-        .transaction(move |_| {
-            Box::pin(async move {
-                validate_mysql_conflict_target::<M>(&conflict_columns).await?;
-                let conflicts_on_null = conflict_columns.iter().any(|column| {
-                    let value = lookup.get(*column);
-                    value == value.as_null()
-                });
-                let existing = if conflicts_on_null {
-                    None
-                } else {
-                    let connection = crate::database::__current_connection()?;
-                    let finder = conflict_columns
-                        .iter()
-                        .fold(M::Entity::find(), |finder, column| {
-                            finder.filter(column.eq(lookup.get(*column)))
-                        })
-                        .lock_exclusive();
-                    crate::internal::run_profiled(
-                        finder.all(&connection.executor()),
-                        &error_context,
-                    )
+        .transaction(async move |_| {
+            let connection = crate::database::__current_connection()?;
+            validate_mysql_conflict_target::<M>(&connection, &conflict_columns).await?;
+            let conflicts_on_null = conflict_columns.iter().any(|column| {
+                let value = lookup.get(*column);
+                value == value.as_null()
+            });
+            let existing = if conflicts_on_null {
+                None
+            } else {
+                let finder = conflict_columns
+                    .iter()
+                    .fold(M::Entity::find(), |finder, column| {
+                        finder.filter(column.eq(lookup.get(*column)))
+                    })
+                    .lock_exclusive();
+                crate::internal::run_statement(finder.all(&connection.executor()), &error_context)
                     .await?
                     .into_iter()
                     .next()
-                };
+            };
 
-                let Some(row) = existing else {
-                    return super::__insert_row::<M>(active).await;
-                };
-                if update_columns.is_empty() {
-                    let connection = crate::database::__current_connection()?;
-                    return super::__loading_through(&connection, || M::try_from_entity_model(row));
+            let Some(row) = existing else {
+                return super::__insert_row::<M>(active).await;
+            };
+            let stored = row.clone().finish_load(&connection);
+            if update_columns.is_empty() {
+                return Ok(stored);
+            }
+            let primary_key = stored.primary_key();
+            let mut update = row.into_active_model();
+            for column in update_columns {
+                if let Some(value) = active.get(column).into_value() {
+                    update.set(column, value);
                 }
-                let primary_key = M::try_from_entity_model(row.clone())?.primary_key();
-                let mut update = row.into_active_model();
-                for column in update_columns {
-                    if let Some(value) = active.get(column).into_value() {
-                        update.set(column, value);
-                    }
-                }
-                super::__update_row::<M>(update, &primary_key).await
-            })
+            }
+            super::__update_row::<M>(update, &primary_key).await
         })
         .await
 }
 
-/// MySQL's emulation must have the same full unique-key target as ON CONFLICT.
+/// MySQL's emulation must have the same full unique-key target as ON
+/// CONFLICT: a unique index whose key parts are the conflict columns, whole.
+/// A target found valid is remembered per pool, since only DDL changes it.
 async fn validate_mysql_conflict_target<M: Model>(
+    connection: &crate::database::ConnectionRef,
     columns: &[<M::Entity as EntityTrait>::Column],
 ) -> Result<()> {
-    use crate::orm::sea_query::Iden;
-    let connection = crate::database::__current_connection()?;
-    let executor = connection.executor();
-    let sql = "SELECT INDEX_NAME AS index_name, COLUMN_NAME AS column_name,
-        CAST(SUB_PART AS SIGNED) AS prefix_length FROM information_schema.statistics
-        WHERE TABLE_SCHEMA = COALESCE(?, DATABASE()) AND TABLE_NAME = ? AND NON_UNIQUE = 0
-        ORDER BY INDEX_NAME, SEQ_IN_INDEX";
-    let statement = crate::internal::build_statement_with_values(
-        executor.get_database_backend(),
-        sql,
-        vec![
-            M::schema_name().map(str::to_string).into(),
-            M::table_name().into(),
-        ],
+    use crate::orm::sql_builder::Iden;
+    use std::collections::{BTreeSet, HashSet};
+    type Target = (u64, Option<&'static str>, &'static str, BTreeSet<String>);
+    // shortcut: a unique key dropped while the process runs goes unnoticed
+    // until it restarts; key the entries by a schema version if that matters.
+    static VALID: std::sync::LazyLock<parking_lot::Mutex<HashSet<Target>>> =
+        std::sync::LazyLock::new(Default::default);
+
+    let target: BTreeSet<String> = columns.iter().map(Iden::to_string).collect();
+    let key = (
+        connection.identity(),
+        M::schema_name(),
+        M::table_name(),
+        target,
     );
-    let rows = executor
-        .query_all_raw(statement)
-        .await
-        .map_err(crate::internal::translate_error)?;
-    let mut indexes = std::collections::BTreeMap::<String, Vec<Option<String>>>::new();
-    for row in rows {
-        let index: String = row
-            .try_get("", "index_name")
-            .map_err(crate::internal::translate_error)?;
-        let column: Option<String> = row
-            .try_get("", "column_name")
-            .map_err(crate::internal::translate_error)?;
-        let prefix: Option<i64> = row
-            .try_get("", "prefix_length")
-            .map_err(crate::internal::translate_error)?;
-        indexes
-            .entry(index)
-            .or_default()
-            .push(column.filter(|_| prefix.is_none()));
+    if VALID.lock().contains(&key) {
+        return Ok(());
     }
-    let target: std::collections::BTreeSet<String> = columns.iter().map(Iden::to_string).collect();
+    let executor = connection.executor();
+    let indexes = crate::schema::catalog::table_indexes(
+        &executor,
+        executor.get_database_backend(),
+        key.1,
+        key.2,
+    )
+    .await?;
+    let target = &key.3;
     let valid = target.len() == columns.len()
-        && indexes.values().any(|parts| {
-            parts.len() == target.len()
-                && parts
-                    .iter()
-                    .all(|part| part.as_ref().is_some_and(|name| target.contains(name)))
+        && indexes.iter().any(|index| {
+            index.unique
+                && index.whole_columns
+                && index.columns.len() == target.len()
+                && index.columns.iter().all(|column| target.contains(column))
         });
     if !valid {
         return Err(Error::query(format!(
             "upsert conflict columns ({}) must match a complete unique index on {}",
-            target.into_iter().collect::<Vec<_>>().join(", "),
+            target.iter().cloned().collect::<Vec<_>>().join(", "),
             M::table_name()
         )));
     }
+    VALID.lock().insert(key);
     Ok(())
 }

@@ -1,26 +1,21 @@
 //! `insert_all`: the batch strategy each backend can run, and putting the rows
 //! a multi-row insert returns back in the caller's order.
 
+use crate::config::DatabaseType;
 use std::collections::{HashMap, HashSet};
 use std::iter::Peekable;
 
 use super::{
-    ActiveModelTrait, Backend, ColumnTrait, Condition, ConnectionTrait, EntityTrait, InternalModel,
-    IntoActiveModel, Iterable, ModelTrait, QueryFilter, Value, advance_key_sequence,
-    ensure_fields_storable, holds_auto_increment_key, model_error_context, run_profiled,
-    translate_error,
+    ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, EntityTrait, InternalModel,
+    Iterable, QueryFilter, Value, advance_key_sequence, holds_auto_increment_key,
+    model_error_context, models_read_through, run_statement, translate_error,
 };
 use crate::error::{Error, ErrorContext, Result};
 
-type EntityModel<M> = <<M as InternalModel>::Entity as EntityTrait>::Model;
-
-/// The most bind parameters one SQLite statement takes
-/// (`SQLITE_MAX_VARIABLE_NUMBER` in the bundled build).
-const SQLITE_MAX_BIND_PARAMETERS: usize = 32_766;
-
-/// The most bytes of values one MySQL or MariaDB insert carries, unless a
-/// single row is larger. The server refuses a statement longer than
-/// `max_allowed_packet`, 4 MB by default on MySQL 5.7 and 16 MB on MariaDB.
+/// The most bytes of values, as estimated, one MySQL or MariaDB insert
+/// carries; a larger single row is sent alone. The server refuses a statement
+/// longer than `max_allowed_packet` (4 MB by default on MySQL 5.7, 16 MB on
+/// MariaDB), so this stays well under it, SQL and protocol overhead included.
 const MYSQL_MAX_STATEMENT_BYTES: usize = 1 << 20;
 
 /// How a batch is written.
@@ -28,8 +23,7 @@ enum Strategy {
     /// Multi-row `INSERT .. RETURNING`, the returned rows put in input order.
     Returning(Order),
     /// Multi-row `INSERT`, then one `SELECT` of the rows by their keys. MySQL
-    /// and MariaDB return no rows, but a key the model sets itself is known up
-    /// front.
+    /// returns no rows, but a key the model sets itself is known up front.
     InsertThenSelect(Vec<ClientKey>),
     /// One `INSERT` per row.
     PerRow,
@@ -37,7 +31,7 @@ enum Strategy {
 
 /// How rows returned by a multi-row insert are put in input order.
 enum Order {
-    /// PostgreSQL returns them in input order.
+    /// PostgreSQL and MariaDB return them in input order.
     AsReturned,
     /// SQLite's order is arbitrary, but it assigns an auto-increment key in
     /// the order it inserts.
@@ -55,14 +49,14 @@ struct ClientKey {
 
 /// Insert `models` and return them as stored, in the order they were passed.
 ///
-/// PostgreSQL sends multi-row `INSERT .. RETURNING` statements, and so does
-/// SQLite, which returns rows in no particular order: they are matched back to
-/// their models by key. The engine renders no `RETURNING` for MySQL or
-/// MariaDB, so there a model that sets its own integer or `Uuid` key is
-/// inserted with multi-row statements, each read back with a `SELECT`, and
-/// any other model is inserted a row at a time. A batch needing more bind
-/// parameters than one statement takes is split, and so is a MySQL or MariaDB
-/// batch of large rows. Every batch of several rows runs in a transaction, a
+/// PostgreSQL and MariaDB send multi-row `INSERT .. RETURNING` statements,
+/// and so does SQLite, which returns rows in no particular order: they are
+/// matched back to their models by key. MySQL has no `RETURNING`, so there a
+/// model that sets its own integer or `Uuid` key is inserted with multi-row
+/// statements, each read back with a `SELECT`, and any other model is
+/// inserted a row at a time. A batch needing more bind parameters than one
+/// statement takes is split, and so is a MySQL or MariaDB batch of large
+/// rows. Every batch of several rows runs in a transaction, a
 /// savepoint inside the caller's, so it stays all-or-nothing on every backend,
 /// down to a statement whose returned rows do not match the batch.
 pub(super) async fn insert_many<M>(
@@ -71,14 +65,12 @@ pub(super) async fn insert_many<M>(
 ) -> Result<Vec<M>>
 where
     M: InternalModel + crate::model::Model,
-    EntityModel<M>: IntoActiveModel<M::ActiveModel>,
 {
     let executor = connection.executor();
     let conn = &executor;
     if models.is_empty() {
         return Ok(Vec::new());
     }
-    ensure_fields_storable::<M, _>(conn)?;
 
     let batch_size = models.len();
     let error_context = model_error_context::<M>(format!("insert_many(batch_size={batch_size})"));
@@ -100,21 +92,15 @@ where
         return Ok(results);
     }
 
-    let backend = Backend::from(conn.get_database_backend());
+    let backend = conn.get_database_backend();
     let strategy = strategy::<M>(backend, &active_models, held_keys);
-    // One statement carries at most `u16::MAX` bind parameters on PostgreSQL
-    // and MySQL, and 32,766 on SQLite, so a larger batch is split.
-    let parameter_limit = match backend {
-        Backend::Sqlite => SQLITE_MAX_BIND_PARAMETERS,
-        Backend::Postgres | Backend::MySql => usize::from(u16::MAX),
-    };
-    let rows_per_statement = (parameter_limit / M::column_names().len().max(1)).max(1);
+    let rows_per_statement = rows_per_statement(backend, M::column_names().len())?;
 
     // One statement of several rows runs in a transaction too, since what it
     // returns is checked after the rows are in: a trigger can leave one out.
     // `begin()` on an open transaction opens a SAVEPOINT, so this also nests
     // inside a caller's transaction.
-    let scope = crate::database::TransactionScope::begin(connection)
+    let scope = crate::database::TransactionScope::begin(connection, Default::default())
         .await
         .map_err(translate_error)
         .map_err(|err| err.with_context(error_context.clone()))?;
@@ -129,7 +115,10 @@ where
                 &batch_connection,
                 &strategy,
                 active_models,
-                rows_per_statement,
+                Chunks {
+                    rows: rows_per_statement,
+                    limit_bytes: matches!(backend, DatabaseType::MySQL | DatabaseType::MariaDB),
+                },
                 &error_context,
             )
             .await;
@@ -158,26 +147,41 @@ where
     .await
 }
 
-/// Insert `active_models` as `strategy` says, at most `rows_per_statement` in
-/// one statement, and return them as stored, in input order.
+fn rows_per_statement(backend: DatabaseType, columns: usize) -> Result<usize> {
+    // Fails only for a backend whose driver is not compiled in.
+    let parameter_limit = backend.max_bind_parameters().map_err(translate_error)?;
+    Ok((parameter_limit / columns.max(1)).max(1))
+}
+
+/// How many rows one statement of a batch carries.
+#[derive(Clone, Copy)]
+struct Chunks {
+    /// At most this many rows, as the bind parameter limit allows.
+    rows: usize,
+    /// On MySQL and MariaDB, also at most [`MYSQL_MAX_STATEMENT_BYTES`] of
+    /// values unless the first row alone is larger.
+    limit_bytes: bool,
+}
+
+/// Insert `active_models` as `strategy` says, as many in one statement as
+/// `chunks` allows, and return them as stored, in input order.
 async fn insert_by_strategy<M>(
     connection: &crate::database::ConnectionRef,
     strategy: &Strategy,
     active_models: Vec<M::ActiveModel>,
-    rows_per_statement: usize,
+    chunks: Chunks,
     error_context: &ErrorContext,
 ) -> Result<Vec<M>>
 where
     M: InternalModel + crate::model::Model,
-    EntityModel<M>: IntoActiveModel<M::ActiveModel>,
 {
     let count = active_models.len();
     match strategy {
         Strategy::Returning(order) => {
             let mut results = Vec::with_capacity(count);
-            let mut remaining = active_models.into_iter();
+            let mut remaining = active_models.into_iter().peekable();
             loop {
-                let chunk: Vec<_> = remaining.by_ref().take(rows_per_statement).collect();
+                let chunk = next_chunk::<M, _>(&mut remaining, chunks);
                 if chunk.is_empty() {
                     return Ok(results);
                 }
@@ -191,7 +195,7 @@ where
             let mut results = Vec::with_capacity(count);
             let mut remaining = active_models.into_iter().peekable();
             loop {
-                let chunk = mysql_chunk::<M, _>(&mut remaining, rows_per_statement);
+                let chunk = next_chunk::<M, _>(&mut remaining, chunks);
                 if chunk.is_empty() {
                     return Ok(results);
                 }
@@ -217,7 +221,7 @@ fn held_keys<M: crate::model::Model>(active_models: &[M::ActiveModel]) -> usize 
 
 /// The batch strategy `backend` can run for `M`, `held` of whose models hold
 /// their auto-increment key.
-fn strategy<M>(backend: Backend, active_models: &[M::ActiveModel], held: usize) -> Strategy
+fn strategy<M>(backend: DatabaseType, active_models: &[M::ActiveModel], held: usize) -> Strategy
 where
     M: InternalModel + crate::model::Model,
 {
@@ -230,20 +234,18 @@ where
         return Strategy::PerRow;
     }
     let numbered = auto_increment && held == 0;
-    // MariaDB has `RETURNING` too, but the engine renders none for the MySQL
-    // family, which it reports as one backend, so MariaDB batches like MySQL.
-    if backend == Backend::Postgres {
+    if matches!(backend, DatabaseType::Postgres | DatabaseType::MariaDB) {
         return Strategy::Returning(Order::AsReturned);
     }
-    if backend == Backend::Sqlite && numbered && M::primary_key_names().len() == 1 {
+    if backend == DatabaseType::SQLite && numbered && M::primary_key_names().len() == 1 {
         return Strategy::Returning(Order::ByIncreasingKey);
     }
     if numbered {
         return Strategy::PerRow;
     }
     match (backend, client_keys::<M>(active_models, backend)) {
-        (Backend::Sqlite, Some(keys)) => Strategy::Returning(Order::ByClientKey(keys)),
-        (Backend::MySql, Some(keys)) => Strategy::InsertThenSelect(keys),
+        (DatabaseType::SQLite, Some(keys)) => Strategy::Returning(Order::ByClientKey(keys)),
+        (DatabaseType::MySQL, Some(keys)) => Strategy::InsertThenSelect(keys),
         _ => Strategy::PerRow,
     }
 }
@@ -254,7 +256,7 @@ where
 /// constraint then decides the batch row by row.
 fn client_keys<M: InternalModel>(
     active_models: &[M::ActiveModel],
-    backend: Backend,
+    backend: DatabaseType,
 ) -> Option<Vec<ClientKey>> {
     let columns = M::primary_key_columns();
     let keys = active_models
@@ -282,7 +284,7 @@ fn client_keys<M: InternalModel>(
 /// Whether a key value comes back from `backend` exactly as it was sent:
 /// integers and UUIDs everywhere, and text on SQLite, which keeps it as
 /// written, while a MySQL `CHAR` key comes back without trailing spaces.
-fn returns_exactly(value: &Value, backend: Backend) -> bool {
+fn returns_exactly(value: &Value, backend: DatabaseType) -> bool {
     match value {
         Value::TinyInt(Some(_))
         | Value::SmallInt(Some(_))
@@ -293,13 +295,13 @@ fn returns_exactly(value: &Value, backend: Backend) -> bool {
         | Value::Unsigned(Some(_))
         | Value::BigUnsigned(Some(_))
         | Value::Uuid(Some(_)) => true,
-        Value::String(Some(_)) => backend == Backend::Sqlite,
+        Value::String(Some(_)) => backend == DatabaseType::SQLite,
         _ => false,
     }
 }
 
 /// The text of `row`'s key, as [`ClientKey::text`] renders a sent one.
-fn stored_key<M: InternalModel>(row: &EntityModel<M>) -> String {
+fn stored_key<M: InternalModel>(row: &M) -> String {
     let values: Vec<Value> = M::primary_key_columns()
         .into_iter()
         .map(|column| row.get(column))
@@ -309,17 +311,13 @@ fn stored_key<M: InternalModel>(row: &EntityModel<M>) -> String {
 
 /// Put `rows` in the order of `keys`, the keys of the models that were
 /// inserted, failing if a row is missing or was not among them.
-fn order_by_keys<M: InternalModel>(
-    rows: Vec<EntityModel<M>>,
-    keys: &[ClientKey],
-) -> Result<Vec<EntityModel<M>>> {
+fn order_by_keys<M: InternalModel>(rows: Vec<M>, keys: &[ClientKey]) -> Result<Vec<M>> {
     let mut positions: HashMap<&str, usize> = keys
         .iter()
         .enumerate()
         .map(|(position, key)| (key.text.as_str(), position))
         .collect();
-    let mut ordered: Vec<Option<EntityModel<M>>> =
-        std::iter::repeat_with(|| None).take(keys.len()).collect();
+    let mut ordered: Vec<Option<M>> = std::iter::repeat_with(|| None).take(keys.len()).collect();
     for row in rows {
         let key = stored_key::<M>(&row);
         let position = positions.remove(key.as_str()).ok_or_else(|| {
@@ -346,12 +344,11 @@ async fn insert_returning<M>(
 ) -> Result<Vec<M>>
 where
     M: InternalModel + crate::model::Model,
-    EntityModel<M>: IntoActiveModel<M::ActiveModel>,
 {
     let conn = connection.executor();
     let count = active_models.len();
     let insert = M::Entity::insert_many(active_models).exec_with_returning(&conn);
-    let rows = run_profiled(insert, || error_context.clone()).await?;
+    let rows = run_statement(insert, || error_context.clone()).await?;
     // A trigger can skip rows (PostgreSQL routing one to another table,
     // SQLite's `RAISE(IGNORE)`), which would leave the rest out of line with
     // the models they came from.
@@ -367,12 +364,7 @@ where
         Order::AsReturned => rows,
         Order::ByClientKey(keys) => order_by_keys::<M>(rows, &keys[offset..offset + count])?,
         Order::ByIncreasingKey => {
-            let mut models = rows
-                .into_iter()
-                .map(|row| {
-                    crate::model::__loading_through(connection, || M::try_from_entity_model(row))
-                })
-                .collect::<Result<Vec<_>>>()?;
+            let mut models = models_read_through::<M>(connection, rows);
             models.sort_by_cached_key(|model| {
                 serde_json::to_value(model.primary_key())
                     .ok()
@@ -381,30 +373,28 @@ where
             return Ok(models);
         }
     };
-    rows.into_iter()
-        .map(|row| crate::model::__loading_through(connection, || M::try_from_entity_model(row)))
-        .collect()
+    Ok(models_read_through(connection, rows))
 }
 
-/// The next rows of `remaining` for one MySQL or MariaDB insert: at most
-/// `max_rows`, and at most [`MYSQL_MAX_STATEMENT_BYTES`] of values unless the
-/// first row alone is larger.
-fn mysql_chunk<M, I>(remaining: &mut Peekable<I>, max_rows: usize) -> Vec<M::ActiveModel>
+/// The next rows of `remaining` for one insert, as many as `chunks` allows.
+fn next_chunk<M, I>(remaining: &mut Peekable<I>, chunks: Chunks) -> Vec<M::ActiveModel>
 where
     M: InternalModel,
     I: Iterator<Item = M::ActiveModel>,
 {
     let mut chunk = Vec::new();
     let mut bytes = 0;
-    while chunk.len() < max_rows {
+    while chunk.len() < chunks.rows {
         let Some(next) = remaining.peek() else {
             break;
         };
-        let size = row_bytes::<M>(next);
-        if !chunk.is_empty() && bytes + size > MYSQL_MAX_STATEMENT_BYTES {
-            break;
+        if chunks.limit_bytes {
+            let size = row_bytes::<M>(next);
+            if !chunk.is_empty() && bytes + size > MYSQL_MAX_STATEMENT_BYTES {
+                break;
+            }
+            bytes += size;
         }
-        bytes += size;
         chunk.extend(remaining.next());
     }
     chunk
@@ -436,7 +426,7 @@ where
 {
     let conn = connection.executor();
     let insert = M::Entity::insert_many(active_models).exec_without_returning(&conn);
-    run_profiled(insert, || error_context.clone()).await?;
+    run_statement(insert, || error_context.clone()).await?;
 
     let columns = M::primary_key_columns();
     let condition = match columns.as_slice() {
@@ -453,12 +443,12 @@ where
         }),
     };
     let select = M::Entity::find().filter(condition).all(&conn);
-    let rows = run_profiled(select, || error_context.clone()).await?;
+    let rows = run_statement(select, || error_context.clone()).await?;
 
-    order_by_keys::<M>(rows, keys)?
-        .into_iter()
-        .map(|row| crate::model::__loading_through(connection, || M::try_from_entity_model(row)))
-        .collect()
+    Ok(models_read_through(
+        connection,
+        order_by_keys::<M>(rows, keys)?,
+    ))
 }
 
 /// Insert models one row at a time, preserving the caller's ordering.
@@ -472,15 +462,12 @@ async fn insert_individually<M>(
 ) -> Result<Vec<M>>
 where
     M: InternalModel + crate::model::Model,
-    EntityModel<M>: IntoActiveModel<M::ActiveModel>,
 {
     let conn = connection.executor();
     let mut results = Vec::with_capacity(active_models.len());
     for active in active_models {
-        let result = run_profiled(active.insert(&conn), || error_context.clone()).await?;
-        results.push(crate::model::__loading_through(connection, || {
-            M::try_from_entity_model(result)
-        })?);
+        let result = run_statement(active.insert(&conn), || error_context.clone()).await?;
+        results.push(result.finish_load(connection));
     }
     Ok(results)
 }

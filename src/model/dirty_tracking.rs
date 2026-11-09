@@ -1,20 +1,22 @@
 use std::any::TypeId;
-use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use parking_lot::RwLock;
 
 use crate::error::{Error, Result};
+use crate::internal::Value;
+use crate::orm::sql_builder::ValueKey;
 
 use super::Model;
 
 /// A baseline's model type and primary key.
-type RowKey = (TypeId, String);
+type RowKey = (TypeId, Vec<ValueKey>);
 /// The pool a baseline's row was read from: the same key in two databases is
 /// two rows, and each keeps its own baseline.
 type Origin = Option<u64>;
-type SnapshotValues = HashMap<String, serde_json::Value>;
+/// Each field's value, by field name, shared so a reader copies no values.
+type SnapshotValues = Arc<HashMap<&'static str, Value>>;
 
 /// Upper bound on how many dirty-tracking baselines are kept in memory.
 ///
@@ -179,101 +181,59 @@ impl SnapshotStore {
     }
 }
 
-thread_local! {
-    /// The pool a load in progress reads from, when it is not the scope's.
-    static LOADING_ORIGIN: Cell<Option<Option<u64>>> = const { Cell::new(None) };
-}
-
-/// Run `load` with the rows it converts remembered as read from `origin`,
-/// for a load through a handle other than the scope's own connection.
-pub(crate) fn loading_from<T>(origin: Option<u64>, load: impl FnOnce() -> T) -> T {
-    /// Puts the previous origin back when the load ends, even by a panic,
-    /// which would otherwise leave later loads on the thread under `origin`.
-    struct Restore(Option<Option<u64>>);
-
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            LOADING_ORIGIN.with(|slot| slot.set(self.0));
-        }
-    }
-
-    let _restore = Restore(LOADING_ORIGIN.with(|slot| slot.replace(Some(origin))));
-    load()
-}
-
-/// The pool the baselines being remembered or forgotten belong to.
-fn origin() -> Origin {
-    LOADING_ORIGIN
-        .with(Cell::get)
-        .unwrap_or_else(crate::database::__scope_origin)
-}
-
 fn snapshot_store() -> &'static RwLock<SnapshotStore> {
     static STORE: OnceLock<RwLock<SnapshotStore>> = OnceLock::new();
     STORE.get_or_init(|| RwLock::new(SnapshotStore::new(DEFAULT_SNAPSHOT_CAPACITY)))
 }
 
-fn row_key_for_primary_key<M: Model>(primary_key: &M::PrimaryKey) -> Result<Option<RowKey>> {
-    if M::primary_key_is_new(primary_key) {
-        return Ok(None);
+/// `model`'s row: its type and its key columns' values, integers by value
+/// whatever their width. `None` for a model not saved yet.
+fn row_key_for_model<M: Model>(model: &M) -> Option<RowKey> {
+    if M::primary_key_is_new(&model.primary_key()) {
+        return None;
     }
-
-    let key = serde_json::to_string(primary_key).map_err(Error::from)?;
-    Ok(Some((TypeId::of::<M>(), key)))
-}
-
-fn row_key_for_model<M: Model>(model: &M) -> Result<Option<RowKey>> {
-    row_key_for_primary_key::<M>(&model.primary_key())
+    let key = M::primary_key_columns()
+        .into_iter()
+        .map(|column| ValueKey::new(crate::orm::ModelTrait::get(model, column)))
+        .collect();
+    Some((TypeId::of::<M>(), key))
 }
 
 /// What `read` takes from `model`'s baseline, read under the store's lock;
 /// `None` when no baseline is known.
-fn read_snapshot<M: Model, T>(
-    model: &M,
-    read: impl FnOnce(&SnapshotValues) -> T,
-) -> Result<Option<T>> {
-    let Some(row) = row_key_for_model(model)? else {
-        return Ok(None);
-    };
-
+fn read_snapshot<M: Model, T>(model: &M, read: impl FnOnce(&SnapshotValues) -> T) -> Option<T> {
+    let row = row_key_for_model(model)?;
     let store = snapshot_store().read();
-    Ok(store.get(&row).map(read))
+    store.get(&row).map(read)
 }
 
-fn capture_snapshot<M: Model>(model: &M) -> Result<SnapshotValues> {
-    let mut snapshot = HashMap::with_capacity(M::field_names().len());
-
-    for field in M::field_names() {
-        if let Some(value) = model.field_compare_value(field)? {
-            snapshot.insert((*field).to_string(), value);
-        }
-    }
-
-    Ok(snapshot)
+fn capture_snapshot<M: Model>(model: &M) -> SnapshotValues {
+    Arc::new(
+        M::field_names()
+            .iter()
+            .filter_map(|field| Some((*field, model.field_value(field)?)))
+            .collect(),
+    )
 }
 
-/// Remember one model's current persisted state as the dirty-tracking baseline.
+/// Remember `model`'s current persisted state as the dirty-tracking baseline
+/// of the pool `origin` it was read from.
 ///
 /// The baseline store is capacity-bounded; remembering past that point evicts
 /// the oldest baselines rather than growing without limit.
-pub fn remember_model<M: Model>(model: &M) -> Result<()> {
-    let Some(row) = row_key_for_model(model)? else {
-        return Ok(());
-    };
-
-    let snapshot = capture_snapshot(model)?;
-    set_baseline(row, Some(snapshot));
-    Ok(())
+pub(crate) fn remember_model_from<M: Model>(model: &M, origin: Origin) {
+    if let Some(row) = row_key_for_model(model) {
+        set_baseline(row, origin, Some(capture_snapshot(model)));
+    }
 }
 
-/// Set the current pool's baseline of `row`, or drop it for `None`.
+/// Set the pool `origin`'s baseline of `row`, or drop it for `None`.
 ///
 /// A row read or written inside a transaction is only what the database
 /// holds once it commits, so if it rolls back instead, the baseline this
 /// replaced comes back, unless the pool's baseline of the row changed again
 /// in the meantime.
-fn set_baseline(row: RowKey, values: Option<SnapshotValues>) {
-    let origin = origin();
+fn set_baseline(row: RowKey, origin: Origin, values: Option<SnapshotValues>) {
     let (previous, standing) = snapshot_store()
         .write()
         .replace(row.clone(), origin, values);
@@ -284,26 +244,16 @@ fn set_baseline(row: RowKey, values: Option<SnapshotValues>) {
     });
 }
 
-/// Remember a collection of models as dirty-tracking baselines.
-///
-/// A collection larger than the store's capacity keeps only its trailing
-/// models; the earlier ones are evicted as the later ones are remembered.
-pub fn remember_collection<M: Model>(models: &[M]) -> Result<()> {
-    for model in models {
-        remember_model(model)?;
-    }
-
-    Ok(())
+/// Forget one model's dirty-tracking baseline.
+pub fn forget_model<M: Model>(model: &M) {
+    forget_model_from(model, crate::database::scope_origin())
 }
 
-/// Forget one model's dirty-tracking baseline.
-pub fn forget_model<M: Model>(model: &M) -> Result<()> {
-    let Some(row) = row_key_for_model(model)? else {
-        return Ok(());
-    };
-
-    set_baseline(row, None);
-    Ok(())
+/// Forget `model`'s baseline as read from the pool `origin`.
+pub(crate) fn forget_model_from<M: Model>(model: &M, origin: Origin) {
+    if let Some(row) = row_key_for_model(model) {
+        set_baseline(row, origin, None);
+    }
 }
 
 /// Forget every dirty-tracking baseline for one model type.
@@ -361,46 +311,60 @@ pub fn clear_all() {
 
 /// Fields whose current value differs from the remembered baseline.
 ///
-/// `Ok(None)` means there is no baseline to compare against — a new or
+/// `None` means there is no baseline to compare against — a new or
 /// hand-built model, a model rebuilt from JSON, one whose baseline was
 /// evicted from the bounded store, or one whose key two databases gave
-/// different rows. `Ok(Some(fields))` means a baseline was
+/// different rows. `Some(fields)` means a baseline was
 /// found, so an empty vector really does mean "nothing changed".
-pub(crate) fn changed_fields<M: Model>(model: &M) -> Result<Option<Vec<&'static str>>> {
-    // A copy, so the model's fields are not serialized under the lock.
-    let Some(snapshot) = read_snapshot(model, SnapshotValues::clone)? else {
-        return Ok(None);
-    };
-
-    let mut changed = Vec::new();
-    for field in M::field_names() {
-        if model.field_compare_value(field)?.as_ref() != snapshot.get(*field) {
-            changed.push(*field);
-        }
-    }
-
-    Ok(Some(changed))
+pub(crate) fn changed_fields<M: Model>(model: &M) -> Option<Vec<&'static str>> {
+    // A shared handle, so the model's fields are not read under the lock.
+    let snapshot = read_snapshot(model, Arc::clone)?;
+    Some(
+        M::field_names()
+            .iter()
+            .filter(|field| model.field_value(field).as_ref() != snapshot.get(**field))
+            .copied()
+            .collect(),
+    )
 }
 
 /// One field's remembered value.
 ///
 /// The outer `Option` reports baseline presence exactly like [`changed_fields`]
 /// does: `Ok(None)` means no baseline exists. The inner `Option` is the
-/// remembered value itself, so `Ok(Some(None))` means the baseline held no
-/// value for this field.
-pub(crate) fn original_value<M: Model>(
-    model: &M,
-    field: &str,
-) -> Result<Option<Option<serde_json::Value>>> {
-    let Some(field_name) = M::canonical_field_name(field) else {
-        return Err(Error::query(format!(
+/// remembered value itself, `None` for SQL NULL.
+pub(crate) fn original_value<M: Model>(model: &M, field: &str) -> Result<Option<Option<Value>>> {
+    let field_name = known_field::<M>(field)?;
+    Ok(read_snapshot(model, |snapshot| {
+        snapshot
+            .get(field_name)
+            .filter(|value| !crate::query::is_sql_null(value))
+            .cloned()
+    }))
+}
+
+/// Whether one field differs from the baseline: `Ok(None)` when no baseline
+/// exists, as for [`changed_fields`].
+pub(crate) fn is_field_dirty<M: Model>(model: &M, field: &str) -> Result<Option<bool>> {
+    let field_name = known_field::<M>(field)?;
+    // A shared handle, as in `changed_fields`: the baseline value is not copied.
+    let Some(snapshot) = read_snapshot(model, Arc::clone) else {
+        return Ok(None);
+    };
+    Ok(Some(
+        model.field_value(field_name).as_ref() != snapshot.get(field_name),
+    ))
+}
+
+/// The field `field` names, by field or column name.
+fn known_field<M: Model>(field: &str) -> Result<&'static str> {
+    M::canonical_field_name(field).ok_or_else(|| {
+        Error::query(format!(
             "unknown field or column '{}' for model '{}'",
             field,
             M::table_name()
-        )));
-    };
-
-    read_snapshot(model, |snapshot| snapshot.get(field_name).cloned())
+        ))
+    })
 }
 
 #[cfg(test)]

@@ -29,7 +29,58 @@ TideConfig::init()
     .await?;
 ```
 
-The driver has one timeout for handing out a connection, opening a new one when the pool has room, so `connect_timeout` and `acquire_timeout` set the same limit, and the longer of the two applies.
+The two timeouts are independent. `connect_timeout` bounds each attempt to open a connection, including socket setup, TLS, handshake, authentication, and driver initialization hooks, both on demand and for `min_connections`. `acquire_timeout` bounds a whole checkout: waiting for a free slot, pinging, hooks, and any connecting. Whichever deadline expires first ends the wait; increasing `connect_timeout` does not extend the wait for a slot.
+
+`pool(..)` replaces every pool setting at once, such as a `PoolConfig` shared with `Database::builder`; `PoolConfig` has a setter for each setting:
+
+```rust
+let pool = PoolConfig::default()
+    .max_connections(20)
+    .acquire_timeout(Duration::from_secs(2));
+
+TideConfig::init()
+    .database("postgres://localhost/mydb")
+    .pool(pool)
+    .connect()
+    .await?;
+```
+
+To shut down cleanly, `db.close().await?` waits for connections in use to come back and closes the pool (SQLite then releases its file); every clone of the handle shares the pool, so statements on them fail afterwards.
+
+### Driver Options
+
+A URL names the common settings. For the rest, such as PostgreSQL's `application_name` or SQLite's journal mode, give `Database::builder` the driver's own options instead of a URL:
+
+```rust
+let db = Database::builder()
+    .postgres_options(
+        PgConnectOptions::new()
+            .host("localhost")
+            .database("mydb")
+            .application_name("billing")
+            .options([("statement_timeout", "5s")]),
+    )
+    .max_connections(20)
+    .build()
+    .await?;
+```
+
+`mysql_options` (MySQL or MariaDB) and `sqlite_options` take `MySqlConnectOptions` and `SqliteConnectOptions` the same way; each needs its backend's feature. The builder's `{:?}` leaves the options out, since they hold the password.
+
+Each connection keeps the statements it prepares, up to 100, dropping the least recently used. `Database::builder().statement_cache_capacity(n)` changes that on every backend, URL or driver options alike; with `0` no statement is kept and each is prepared for its own run, which a transaction-pooling proxy such as PgBouncer needs.
+
+### Pinned Sessions
+
+A pool hands each statement whichever connection is free, so what one statement sets for its session (`SET`, `PRAGMA`, MySQL's `GET_LOCK`) may not hold for the next. `pin_session()` opens a connection of its own, with the pool's settings but outside its slots, and every statement through the returned handle runs on it, transactions included:
+
+```rust
+let session = db.pin_session().await?;
+session.exec_raw("SET FOREIGN_KEY_CHECKS = 0").await?;
+// ... statements that rely on that setting ...
+session.close().await?;
+```
+
+The connection closes with `close()` or once the last clone of the handle drops, and is never replaced: once it is lost, the handle's statements fail.
 
 ### Database Types
 
@@ -49,8 +100,7 @@ TideORM keeps its active database handle, global configuration, and tokenization
 use tideorm::prelude::*;
 
 Database::reset_global();
-TideConfig::reset();
-TokenConfig::reset();
+TideConfig::reset(); // the tokenization key and codecs too
 
 TideConfig::init()
     .database("sqlite::memory:")
@@ -59,7 +109,7 @@ TideConfig::init()
     .await?;
 ```
 
-`TideConfig::apply()` and `TideConfig::connect()` overwrite previously applied TideORM configuration. If a new configuration omits the database type, the stored type is cleared instead of leaving the old backend classification behind.
+`TideConfig::apply()`, `TideConfig::connect()` and `TideConfig::connect_only()` overwrite previously applied TideORM configuration. If a new configuration omits the database type, the stored type is cleared instead of leaving the old backend classification behind. `connect_only()` connects without the startup work the configuration enables (migrations, schema sync, seeds, the schema file), which is how the migration and seed runners `tideorm init` scaffolds connect with the application's own configuration.
 
 ---
 
@@ -69,21 +119,21 @@ TideConfig::init()
 
 | Rust Type | PostgreSQL | MySQL | SQLite | Notes |
 |-----------|------------|-------|--------|-------|
-| `i8` | — | SMALLINT | INTEGER | The PostgreSQL driver has no binding for `i8`; use `i16` there |
+| `i8` | SMALLINT | SMALLINT | INTEGER | |
 | `i16` | SMALLINT | SMALLINT | INTEGER | |
 | `i32` | INTEGER | INT | INTEGER | |
 | `i64` | BIGINT | BIGINT | INTEGER | Recommended for primary keys |
-| `u8` | — | TINYINT UNSIGNED | INTEGER | Not supported on PostgreSQL |
-| `u16` | — | SMALLINT UNSIGNED | INTEGER | Not supported on PostgreSQL |
-| `u32` | INTEGER | INT UNSIGNED | INTEGER | PostgreSQL stores only up to `i32::MAX` |
-| `u64` | — | BIGINT UNSIGNED | — | MySQL only |
+| `u8` | SMALLINT | TINYINT UNSIGNED | INTEGER | |
+| `u16` | INTEGER | SMALLINT UNSIGNED | INTEGER | |
+| `u32` | BIGINT | INT UNSIGNED | INTEGER | |
+| `u64` | BIGINT | BIGINT UNSIGNED | INTEGER | PostgreSQL and SQLite store up to `i64::MAX`; a larger value is refused when it is written |
 | `f32` | REAL | FLOAT | REAL | |
 | `f64` | DOUBLE PRECISION | DOUBLE | REAL | |
 | `bool` | BOOLEAN | TINYINT(1) | INTEGER | |
 | `String` | TEXT | LONGTEXT | TEXT | Schema sync creates a MySQL key or indexed column as `VARCHAR(255)`, because MySQL cannot index `TEXT` without a prefix length |
 | `Option<T>` | (nullable) | (nullable) | (nullable) | Wraps any type to make it nullable |
 | `uuid::Uuid` | UUID | BINARY(16) | TEXT | MySQL binds a UUID as 16 raw bytes, so the column must be `BINARY(16)` |
-| `rust_decimal::Decimal` | DECIMAL | DECIMAL(65,30) | REAL | SQLite reads decimals back through `f64`, so REAL is forced; store a string or minor units if you need exactness |
+| `rust_decimal::Decimal` | DECIMAL | DECIMAL(65,30) | REAL | SQLite has no exact decimal type, and a REAL keeps about 15 significant digits. A decimal is read as SQLite stores it, so a column declared `TEXT` keeps every digit but compares as text; store minor units to keep both |
 | `serde_json::Value` | JSONB | JSON | TEXT | |
 | `Vec<u8>` | BYTEA | LONGBLOB | BLOB | Binary data |
 | `chrono::NaiveDate` | DATE | DATE | TEXT | Date only |
@@ -252,4 +302,4 @@ cargo test --test sqlite_ci_smoke_test --features "sqlite runtime-tokio" --no-de
 mdbook build
 ```
 
-Integration suites may require local database servers and environment variables. When a test needs a fresh TideORM setup, clear global state first with `Database::reset_global()`, `TideConfig::reset()`, and `TokenConfig::reset()`.
+Integration suites may require local database servers and environment variables. When a test needs a fresh TideORM setup, clear global state first with `Database::reset_global()` and `TideConfig::reset()`, which also clears the tokenization settings (`TokenConfig::reset()` clears only those).

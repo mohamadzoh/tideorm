@@ -1,7 +1,27 @@
 use std::time::Duration;
 
 /// Configuration for query result caching
+///
+/// Start from [`CacheConfig::default`] and change what differs:
+///
+/// ```
+/// use std::time::Duration;
+/// use tideorm::cache::{CacheConfig, QueryCache};
+///
+/// let cache = QueryCache::with_config(
+///     CacheConfig::default()
+///         .enabled(true)
+///         .max_entries(5_000)
+///         .default_ttl(Duration::from_secs(300))
+///         .key_prefix("v2"),
+/// );
+/// assert!(cache.is_enabled());
+/// ```
+///
+/// Marked `#[non_exhaustive]`, so a setting added later is not a breaking
+/// change; the fields stay public to read and assign.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct CacheConfig {
     /// Whether caching is enabled
     pub enabled: bool,
@@ -41,6 +61,60 @@ impl Default for CacheConfig {
             cache_empty_results: true,
             key_prefix: None,
         }
+    }
+}
+
+impl CacheConfig {
+    /// Turn caching on or off (off by default).
+    #[must_use]
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Keep at most `entries` results (1,000 by default).
+    #[must_use]
+    pub fn max_entries(mut self, entries: usize) -> Self {
+        self.max_entries = entries;
+        self
+    }
+
+    /// Keep at most `bytes` of serialized results, or `0` (the default) for
+    /// no byte budget.
+    #[must_use]
+    pub fn max_size_bytes(mut self, bytes: usize) -> Self {
+        self.max_size_bytes = bytes;
+        self
+    }
+
+    /// How long a result stays cached when the query names no TTL (60 seconds
+    /// by default).
+    #[must_use]
+    pub fn default_ttl(mut self, ttl: Duration) -> Self {
+        self.default_ttl = ttl;
+        self
+    }
+
+    /// Which entries make room for new ones ([`CacheStrategy::LRU`] by default).
+    #[must_use]
+    pub fn strategy(mut self, strategy: CacheStrategy) -> Self {
+        self.strategy = strategy;
+        self
+    }
+
+    /// Whether a query that found nothing is cached too (`true` by default).
+    #[must_use]
+    pub fn cache_empty_results(mut self, cache: bool) -> Self {
+        self.cache_empty_results = cache;
+        self
+    }
+
+    /// Put `prefix` in front of every key, so caches of two namespaces never
+    /// share an entry.
+    #[must_use]
+    pub fn key_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.key_prefix = Some(prefix.into());
+        self
     }
 }
 

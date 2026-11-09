@@ -21,29 +21,34 @@ mod advanced;
 mod builder;
 mod clauses;
 pub(crate) mod db_sql;
+mod embedded;
 mod filters;
 mod or_clauses;
 mod predicates;
 mod sql;
 mod structure;
 
-pub(crate) use advanced::page_offset;
 pub use advanced::{Aggregate, AggregateCondition, HavingCondition};
+pub(crate) use advanced::{HavingClause, page_offset};
+pub use embedded::Subquery;
+pub(crate) use embedded::{Correlation, Embedded, Operand};
 pub use filters::{
     ConditionValue, LogicalOp, Operator, OrBranchBuilder, OrGroup, Order, SortOrder, WhereCondition,
 };
 pub(crate) use filters::{
-    checked_assignment_value, checked_filter_value, condition_example, condition_is_vacuous,
-    condition_methods, filter_value,
+    comparable_value, condition_example, condition_is_vacuous, condition_methods, is_json_null,
+    is_sql_null,
 };
-pub use sql::execution::Paginated;
+pub use sql::execution::{Chunks, Paginated};
 pub use structure::{
-    CTE, FrameBound, FrameType, JoinClause, JoinResultConsolidator, JoinType, QueryFragment,
-    UnionClause, UnionType, WindowFunction, WindowFunctionType,
+    CTE, FrameBound, FrameType, JoinResultConsolidator, JoinType, QueryFragment, WindowFunction,
+    WindowFunctionType,
 };
+pub(crate) use structure::{JoinClause, UnionClause, UnionType};
 
 /// Fluent query builder for TideORM models.
 #[derive(Debug, Clone)]
+#[must_use = "a query builder does nothing until it is run"]
 pub struct QueryBuilder<M: Model> {
     _marker: PhantomData<M>,
     database: Option<crate::database::Database>,

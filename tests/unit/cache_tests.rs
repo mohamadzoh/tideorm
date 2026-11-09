@@ -451,27 +451,6 @@ fn test_a_ttl_too_long_for_an_instant_keeps_the_entry() {
     assert_eq!(cache.get::<i32>("forever"), Some(1));
 }
 
-/// A deadlock ends the whole transaction on the server, so the enclosing
-/// transactions of the one it failed in learn of it when that one ends.
-#[test]
-fn test_a_deadlock_marks_every_enclosing_transaction() {
-    let outer = Arc::new(parking_lot::Mutex::new(PendingInvalidations::default()));
-    {
-        let inner = Arc::new(parking_lot::Mutex::new(PendingInvalidations::new(Some(
-            outer.clone(),
-        ))));
-        inner.lock().note_failed_statement(true);
-        assert_eq!(inner.lock().aborted(), Some(Abort::Deadlock));
-        assert_eq!(outer.lock().aborted(), None);
-    }
-    assert_eq!(outer.lock().aborted(), Some(Abort::Deadlock));
-
-    let other = Arc::new(parking_lot::Mutex::new(PendingInvalidations::default()));
-    other.lock().note_failed_statement(false);
-    assert!(other.lock().statement_failed());
-    assert_eq!(other.lock().aborted(), None);
-}
-
 #[test]
 fn failed_decode_is_a_miss_and_evicts_payload() {
     for strategy in [CacheStrategy::LRU, CacheStrategy::FIFO, CacheStrategy::TTL] {

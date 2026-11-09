@@ -1,13 +1,15 @@
-use std::future::Future;
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use crate::logging::{DEFAULT_SLOW_QUERY_THRESHOLD_MS, QueryStats, StatsCounters};
+use crate::logging::{QueryStats, StatsCounters, slow_query_threshold_from_env};
 
 /// Global flag controlling process-wide profiling collection.
 static GLOBAL_PROFILING_ENABLED: AtomicBool = AtomicBool::new(false);
 
-static GLOBAL_STATS: StatsCounters = StatsCounters::new(DEFAULT_SLOW_QUERY_THRESHOLD_MS);
+/// Starts from the threshold `TIDE_SLOW_QUERY_MS` sets, as the logger does.
+static GLOBAL_STATS: LazyLock<StatsCounters> =
+    LazyLock::new(|| StatsCounters::new(slow_query_threshold_from_env()));
 
 /// Aggregate counters collected by [`GlobalProfiler`].
 ///
@@ -55,28 +57,14 @@ impl GlobalProfiler {
         GLOBAL_STATS.reset();
     }
 
-    /// Change the duration, in milliseconds, used to classify slow queries.
-    pub fn set_slow_threshold(ms: u64) {
-        GLOBAL_STATS.set_slow_threshold_ms(ms);
+    /// Change the duration at or above which a query counts as slow; it
+    /// starts at `TIDE_SLOW_QUERY_MS`, or 100 ms.
+    pub fn set_slow_threshold(threshold: Duration) {
+        GLOBAL_STATS.set_slow_threshold(threshold);
     }
 
     /// The duration at or above which a query counts as slow.
-    pub(super) fn slow_threshold() -> Duration {
-        Duration::from_millis(GLOBAL_STATS.slow_threshold_ms())
+    pub fn slow_threshold() -> Duration {
+        GLOBAL_STATS.slow_threshold()
     }
-}
-
-#[doc(hidden)]
-pub async fn __profile_future<T, F>(future: F) -> T
-where
-    F: Future<Output = T>,
-{
-    if !GlobalProfiler::is_enabled() {
-        return future.await;
-    }
-
-    let start = Instant::now();
-    let output = future.await;
-    GlobalProfiler::record(start.elapsed());
-    output
 }

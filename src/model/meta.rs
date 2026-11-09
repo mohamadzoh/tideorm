@@ -254,23 +254,21 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
         vec![]
     }
 
-    fn encrypted_fields() -> Vec<&'static str> {
-        vec![]
-    }
-
-    fn encrypted_column_names() -> Vec<&'static str> {
-        vec![]
+    /// The `#[tideorm(encrypted = ..)]` fields, each as `(field, column)`.
+    fn encrypted_fields() -> &'static [(&'static str, &'static str)] {
+        &[]
     }
 
     fn has_encrypted_fields() -> bool {
         !Self::encrypted_fields().is_empty()
     }
 
-    /// `(field, type)` for each field whose integer type some backend's driver
-    /// cannot store and read back; see `internal::ensure_fields_storable`.
+    /// Whether the encrypted field `field` reads `document` back: a batch
+    /// `set()` seals any JSON, which every later load would then fail to
+    /// decrypt into a field of another type.
     #[doc(hidden)]
-    fn driver_limited_fields() -> &'static [(&'static str, &'static str)] {
-        &[]
+    fn __encrypted_field_holds(_field: &str, _document: &serde_json::Value) -> bool {
+        false
     }
 
     fn allowed_languages() -> Vec<String> {
@@ -321,11 +319,6 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
         false
     }
 
-    #[cfg(feature = "attachments")]
-    fn file_url_generator() -> crate::config::FileUrlGenerator {
-        crate::config::Config::get_file_url_generator()
-    }
-
     fn soft_delete_enabled() -> bool {
         false
     }
@@ -345,4 +338,48 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     fn unique_indexes() -> Vec<IndexDefinition> {
         vec![]
     }
+
+    /// Tables a row of this model points at with a foreign key, so they have
+    /// to hold a row before this one is inserted: the tables of its declared
+    /// `belongs_to` relations. An entity manager's flush inserts them first
+    /// and deletes them last. A bare foreign-key column with no relation
+    /// attribute adds nothing, and a `MorphTo` target has no known table.
+    #[cfg(feature = "entity-manager")]
+    #[doc(hidden)]
+    fn __parent_tables() -> Vec<&'static str> {
+        Vec::new()
+    }
+
+    /// Tables whose rows point back at this model with a foreign key: the
+    /// tables of its declared `has_one` and `has_many` relations. A
+    /// `has_many_through` adds none, since relation sync writes the pivot row
+    /// once both sides are saved.
+    #[cfg(feature = "entity-manager")]
+    #[doc(hidden)]
+    fn __child_tables() -> Vec<&'static str> {
+        Vec::new()
+    }
+
+    /// Each `(related table, foreign key, referenced column)` a declared
+    /// `belongs_to`, `has_one`, `has_many` or self-referencing relation joins
+    /// rows with: a row's foreign key holds the referenced column of a row of
+    /// the related table. An entity manager's flush orders the rows of one
+    /// table by the ones whose related table is that table.
+    #[cfg(feature = "entity-manager")]
+    #[doc(hidden)]
+    fn __row_references() -> Vec<(&'static str, &'static str, &'static str)> {
+        Vec::new()
+    }
+
+    /// Make every relation query `database`: the pool the model was loaded
+    /// from, or the one an entity manager that holds it reads through.
+    #[doc(hidden)]
+    fn __attach_query_database(&mut self, _database: &crate::database::Database) {}
+
+    /// Drop every relation's cached rows and load, keeping the relations
+    /// wired to this model's keys: an entity manager's identity map holds a
+    /// row, not the relations one copy of it loaded.
+    #[cfg(feature = "entity-manager")]
+    #[doc(hidden)]
+    fn __unload_relations(&mut self) {}
 }

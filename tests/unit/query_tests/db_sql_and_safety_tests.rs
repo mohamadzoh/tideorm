@@ -1,5 +1,10 @@
 use super::*;
-use crate::query::db_sql::JsonExistence;
+use crate::orm::sql_builder::{ArrayOperator, BoundSql, JsonContainment, JsonExistence};
+
+/// `bound` with `db_type`'s markers, numbered from 1, and its values.
+fn built(db_type: DatabaseType, bound: BoundSql) -> (String, Vec<Value>) {
+    bound.build(db_type.dialect())
+}
 
 #[test]
 fn test_quote_ident() {
@@ -31,23 +36,25 @@ fn test_quote_ident() {
 
 #[test]
 fn test_json_contains_bound_mysql_uses_parameterized_json() {
-    let bound = db_sql::json_containment_bound(
+    let (sql, values) = built(
         DatabaseType::MySQL,
-        "`data`",
-        &serde_json::json!({"role": "admin'"}),
-        db_sql::JsonContainment::Contains,
+        DatabaseType::MySQL.dialect().json_containment(
+            "`data`",
+            &serde_json::json!({"role": "admin'"}),
+            JsonContainment::Contains,
+        ),
     );
 
     // PostgreSQL's reading: the scalar under `role` must not match an array
     // holding it, and the document must be an object.
     assert_eq!(
-        bound.sql,
+        sql,
         "JSON_CONTAINS(`data`, ?) \
          AND JSON_TYPE(JSON_EXTRACT(`data`, ?)) <> 'ARRAY' \
          AND JSON_TYPE(JSON_EXTRACT(`data`, ?)) = 'OBJECT'"
     );
     assert_eq!(
-        bound.values,
+        values,
         vec![
             Value::String(Some("{\"role\":\"admin'\"}".to_string())),
             Value::String(Some("$.\"role\"".to_string())),
@@ -58,35 +65,36 @@ fn test_json_contains_bound_mysql_uses_parameterized_json() {
 
 #[test]
 fn test_json_contained_by_bound_mysql_requires_arrays_where_the_target_has_them() {
-    let bound = db_sql::json_containment_bound(
+    let (sql, values) = built(
         DatabaseType::MySQL,
-        "`data`",
-        &serde_json::json!({"tags": ["a", "b"]}),
-        db_sql::JsonContainment::ContainedBy,
+        DatabaseType::MySQL.dialect().json_containment(
+            "`data`",
+            &serde_json::json!({"tags": ["a", "b"]}),
+            JsonContainment::ContainedBy,
+        ),
     );
 
     assert_eq!(
-        bound.sql,
+        sql,
         "JSON_CONTAINS(?, `data`) \
          AND COALESCE(JSON_TYPE(JSON_EXTRACT(`data`, ?)), 'ARRAY') = 'ARRAY'"
     );
-    assert_eq!(
-        bound.values[1],
-        Value::String(Some("$.\"tags\"".to_string()))
-    );
+    assert_eq!(values[1], Value::String(Some("$.\"tags\"".to_string())));
 }
 
 #[test]
 fn test_json_contains_bound_postgres_uses_postgres_placeholder() {
-    let bound = db_sql::json_containment_bound(
+    let (sql, values) = built(
         DatabaseType::Postgres,
-        "\"data\"",
-        &serde_json::json!({"role": "admin'"}),
-        db_sql::JsonContainment::Contains,
+        DatabaseType::Postgres.dialect().json_containment(
+            "\"data\"",
+            &serde_json::json!({"role": "admin'"}),
+            JsonContainment::Contains,
+        ),
     );
 
-    assert_eq!(bound.sql, "(\"data\")::jsonb @> $1");
-    assert!(matches!(bound.values.as_slice(), [Value::Json(Some(_))]));
+    assert_eq!(sql, "(\"data\")::jsonb @> $1");
+    assert!(matches!(values.as_slice(), [Value::Json(Some(_))]));
 }
 
 /// The SQL of an existence test and the path it binds first.
@@ -107,17 +115,21 @@ fn json_exists_values(
     target: &str,
     negated: bool,
 ) -> Option<(String, Vec<String>)> {
-    db_sql::json_exists_bound(db_type, "\"data\"", existence, target, negated).map(|bound| {
-        let paths = bound
-            .values
-            .iter()
-            .map(|value| match value {
-                Value::String(Some(path)) => path.clone(),
-                other => panic!("expected bound strings, got {other:?}"),
-            })
-            .collect();
-        (bound.sql, paths)
-    })
+    db_type
+        .dialect()
+        .json_exists("\"data\"", existence, target, negated)
+        .ok()
+        .map(|bound| {
+            let (sql, values) = built(db_type, bound);
+            let paths = values
+                .into_iter()
+                .map(|value| match value {
+                    Value::String(Some(path)) => path,
+                    other => panic!("expected bound strings, got {other:?}"),
+                })
+                .collect();
+            (sql, paths)
+        })
 }
 
 #[test]
@@ -241,16 +253,18 @@ fn test_json_path_special_keys_are_quoted_safely() {
 }
 
 #[test]
-fn test_unexpressible_json_path_matches_nothing_instead_of_being_dropped() {
+fn test_unexpressible_json_path_is_refused_instead_of_being_dropped() {
     let path = "$.user') OR 1=1 --";
     for query in [
         QueryBuilder::<QueryTestUser>::new().where_json_path_exists("data", path),
         QueryBuilder::<QueryTestUser>::new().where_json_path_not_exists("data", path),
     ] {
-        let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::MySQL);
+        // Matching nothing for both the test and its negation would hide the mistake.
+        let err = query
+            .build_select_sql_with_params_for_db(DatabaseType::MySQL)
+            .unwrap_err();
 
-        assert!(sql.ends_with("WHERE 0 = 1"), "{sql}");
-        assert!(params.is_empty());
+        assert!(err.to_string().contains("is not a JSON path"), "{err}");
     }
 }
 
@@ -258,7 +272,8 @@ fn test_unexpressible_json_path_matches_nothing_instead_of_being_dropped() {
 fn test_json_path_not_exists_negates_the_path_test_and_binds_the_path() {
     let (sql, params) = QueryBuilder::<QueryTestUser>::new()
         .where_json_path_not_exists("data", "$.user.name")
-        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres)
+        .unwrap();
 
     assert!(
         sql.ends_with(
@@ -310,7 +325,7 @@ fn test_empty_array_predicates_are_valid_and_consistent() {
         ),
     ] {
         let render = |query: QueryBuilder<QueryTestUser>| {
-            let (sql, params) = query.build_select_sql_with_params_for_db(db_type);
+            let (sql, params) = query.build_select_sql_with_params_for_db(db_type).unwrap();
             let where_sql = sql
                 .split_once(" WHERE ")
                 .map(|(_, where_sql)| where_sql.to_string())
@@ -338,14 +353,22 @@ fn test_empty_array_predicates_are_valid_and_consistent() {
 
 #[test]
 fn test_postgres_array_predicates_take_their_placeholders_outside_brackets() {
-    let operands = db_sql::placeholders(DatabaseType::Postgres, 2);
+    let predicate = |operator, null_allowed| {
+        let bound = DatabaseType::Postgres.dialect().array_predicate(
+            "\"roles\"",
+            operator,
+            vec![Value::Int(Some(1)), Value::Int(Some(2))],
+            null_allowed,
+        );
+        built(DatabaseType::Postgres, bound).0
+    };
 
     assert_eq!(
-        db_sql::postgres_array_contains("\"roles\"", &operands),
+        predicate(ArrayOperator::Contains, false),
         "($1 = ANY(\"roles\") AND $2 = ANY(\"roles\"))"
     );
     assert_eq!(
-        db_sql::postgres_array_overlaps("\"roles\"", &operands),
+        predicate(ArrayOperator::Overlaps, false),
         "($1 = ANY(\"roles\") OR $2 = ANY(\"roles\"))"
     );
     // Both NULL guards are part of the contract, because `NOT EXISTS` over
@@ -354,30 +377,17 @@ fn test_postgres_array_predicates_take_their_placeholders_outside_brackets() {
     // is unknown, so the offending row goes uncounted), where `<@` matches
     // neither.
     assert_eq!(
-        db_sql::postgres_array_contained_by("\"roles\"", &operands, false),
+        predicate(ArrayOperator::ContainedBy, false),
         "(\"roles\" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM unnest(\"roles\") AS \
          tideorm_array_element(element) WHERE tideorm_array_element.element IS NULL OR \
          tideorm_array_element.element NOT IN ($1, $2)))"
     );
     // A NULL in the list lets a NULL element through and stays out of NOT IN.
     assert_eq!(
-        db_sql::postgres_array_contained_by("\"roles\"", &operands, true),
+        predicate(ArrayOperator::ContainedBy, true),
         "(\"roles\" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM unnest(\"roles\") AS \
          tideorm_array_element(element) WHERE tideorm_array_element.element NOT IN ($1, $2)))"
     );
-}
-
-#[test]
-fn test_placeholders_follow_the_backend_marker() {
-    assert_eq!(
-        db_sql::placeholders(DatabaseType::Postgres, 3),
-        vec!["$1", "$2", "$3"]
-    );
-    assert_eq!(
-        db_sql::placeholders(DatabaseType::SQLite, 2),
-        vec!["?", "?"]
-    );
-    assert!(db_sql::placeholders(DatabaseType::MySQL, 0).is_empty());
 }
 
 #[test]
@@ -410,7 +420,7 @@ fn test_inline_parameters() {
             "SELECT '?' WHERE a = 1",
         ),
         // A raw fragment can carry a placeholder with no value behind it, and
-        // sea-query's inliner would index past the values and panic: a
+        // `sql_builder`'s inliner would index past the values and panic: a
         // statement whose placeholders and values do not pair up, either way,
         // is shown as it is.
         (
@@ -438,13 +448,20 @@ fn test_inline_parameters() {
             "SELECT 1 WHERE a = $0",
         ),
         (DatabaseType::Postgres, "SELECT 1", &one, "SELECT 1"),
-        // The backends disagree on whether `\'` ends a literal, so a statement
-        // that contains a backslash is shown with its placeholders.
+        // Whether `\'` ends a literal is the backend's call: PostgreSQL's
+        // literal ends there, MySQL's goes on and holds the marker, which
+        // leaves the value unused and the statement shown as it is.
         (
             DatabaseType::Postgres,
             r"SELECT 1 WHERE note = 'C:\' AND a = $1",
             &one,
-            r"SELECT 1 WHERE note = 'C:\' AND a = $1",
+            r"SELECT 1 WHERE note = 'C:\' AND a = 1",
+        ),
+        (
+            DatabaseType::MySQL,
+            r"SELECT 1 WHERE note = 'C:\' AND a = ?",
+            &one,
+            r"SELECT 1 WHERE note = 'C:\' AND a = ?",
         ),
     ] {
         assert_eq!(
@@ -455,50 +472,19 @@ fn test_inline_parameters() {
     }
 }
 
-/// Only real `$n` markers move: one inside a single-quoted, escape-string or
-/// dollar-quoted literal, or inside a comment, is text.
+/// A HAVING description writes each value as its backend's preview does.
 #[test]
-fn test_rebase_placeholders_skips_quoted_text_and_comments() {
-    for (sql, offset, expected) in [
-        (
-            "name = 'price is $5' AND id = $1 AND note = 'it''s still $2'",
-            3,
-            "name = 'price is $5' AND id = $4 AND note = 'it''s still $2'",
-        ),
-        (
-            "note = E'price isn\\'t $5' AND id = $1 AND raw = e'keep \\$2 here'",
-            4,
-            "note = E'price isn\\'t $5' AND id = $5 AND raw = e'keep \\$2 here'",
-        ),
-        (
-            concat!(
-                "note = $$literal $1$$ AND id = $2 ",
-                "/* keep $3 */ ",
-                "-- keep $4\n",
-                "AND body = $tag$still $5$tag$"
-            ),
-            2,
-            concat!(
-                "note = $$literal $1$$ AND id = $4 ",
-                "/* keep $3 */ ",
-                "-- keep $4\n",
-                "AND body = $tag$still $5$tag$"
-            ),
-        ),
-        // A `$1` inside an identifier is no parameter, and PostgreSQL comments
-        // nest.
-        (
-            "a$1 + $1 /* outer /* $2 */ $3 */ + $2",
-            1,
-            "a$1 + $2 /* outer /* $2 */ $3 */ + $3",
-        ),
-    ] {
-        assert_eq!(
-            db_sql::rebase_placeholders(DatabaseType::Postgres, sql, offset),
-            expected,
-            "{sql}"
-        );
-    }
+fn test_having_descriptions_write_values_per_backend() {
+    let clause = crate::query::HavingClause::Raw {
+        sql: "MAX(name) = ?".to_string(),
+        values: vec![Value::String(Some("it's".to_string()))],
+    };
+    let query = QueryBuilder::<QueryTestUser>::new();
+    let describe = |db_type| query.describe_having_clause(db_type, &clause);
+
+    assert_eq!(describe(DatabaseType::Postgres), "MAX(name) = E'it\\'s'");
+    assert_eq!(describe(DatabaseType::SQLite), "MAX(name) = 'it''s'");
+    assert_eq!(describe(DatabaseType::MySQL), "MAX(name) = 'it\\'s'");
 }
 
 /// `format_column` quotes anything that is not a plain `column` or
@@ -567,14 +553,11 @@ fn test_format_identifier_reference_quotes_reserved_words() {
 }
 
 #[test]
-fn test_join_identifier_validation_accepts_safe_values() {
+fn test_join_identifier_validation_accepts_safe_values_and_rejects_injection() {
     assert!(db_sql::validate_identifier("JOIN table", "users").is_ok());
     assert!(db_sql::validate_identifier("JOIN alias", "author_1").is_ok());
     assert!(db_sql::validate_join_column("posts.user_id").is_ok());
-}
 
-#[test]
-fn test_join_identifier_validation_rejects_injection() {
     let table_err =
         db_sql::validate_identifier("JOIN table", "users; DROP TABLE users; --").unwrap_err();
     assert!(table_err.contains("unsafe JOIN table"));
@@ -587,7 +570,7 @@ fn test_join_identifier_validation_rejects_injection() {
 }
 
 #[test]
-fn test_raw_sql_fragment_validation_rejects_injection_tokens() {
+fn test_raw_sql_fragment_validation_rejects_injection_tokens_and_comments() {
     let err =
         db_sql::validate_raw_sql_fragment("WHERE raw SQL", "1 = 1; DROP TABLE users").unwrap_err();
     assert!(err.contains("unsafe WHERE raw SQL"));
@@ -595,10 +578,8 @@ fn test_raw_sql_fragment_validation_rejects_injection_tokens() {
     let comment_err =
         db_sql::validate_raw_sql_fragment("WHERE raw SQL", "1 = 1 -- comment").unwrap_err();
     assert!(comment_err.contains("unsafe WHERE raw SQL"));
-}
 
-#[test]
-fn test_raw_sql_fragment_validation_rejects_mysql_hash_comment() {
+    // MySQL's `#` comment
     let where_err =
         db_sql::validate_raw_sql_fragment("WHERE raw SQL", "\"name\" = 'x' #").unwrap_err();
     assert!(where_err.contains("unsafe WHERE raw SQL"), "{where_err}");
@@ -674,18 +655,18 @@ fn test_template_placeholders_skip_quoted_text() {
     for (template, expected) in [
         (
             "x = ? AND y LIKE 'it''s ?' AND z = ?",
-            "x = $ AND y LIKE 'it''s ?' AND z = $",
+            "x = $1 AND y LIKE 'it''s ?' AND z = $2",
         ),
-        ("name = $$?$$ AND id = ?", "name = $$?$$ AND id = $"),
+        ("name = $$?$$ AND id = ?", "name = $$?$$ AND id = $1"),
+        (
+            NESTED_TEMPLATE,
+            "$1 /* ? /* ? */ ? */ + '?' + $$?$$ + \"?\" -- ?\n + $2",
+        ),
     ] {
-        assert_eq!(
-            db_sql::map_template_placeholders(template, || "$".to_string()),
-            expected,
-            "{template}"
-        );
+        let values = vec![Value::Int(Some(1)); db_sql::count_template_placeholders(template)];
+        let (sql, bound) =
+            db_sql::template_bound(template, values).build(DatabaseType::Postgres.dialect());
+        assert_eq!(sql, expected, "{template}");
+        assert_eq!(bound.len(), db_sql::count_template_placeholders(template));
     }
-    assert_eq!(
-        db_sql::render_template(DatabaseType::Postgres, NESTED_TEMPLATE, 1),
-        "$1 /* ? /* ? */ ? */ + '?' + $$?$$ + \"?\" -- ?\n + $2"
-    );
 }

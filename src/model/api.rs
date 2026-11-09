@@ -102,19 +102,15 @@ pub trait Model:
     /// included, so each model is validated as it was built.
     ///
     /// TideORM uses the most efficient strategy the active backend supports.
-    /// PostgreSQL and SQLite send a batch `INSERT ... RETURNING`. MySQL and
-    /// MariaDB batch models that set their own integer or `Uuid` key and read
-    /// them back with one `SELECT`, and insert other models one at a time, so
-    /// database-generated fields such as auto-incremented IDs are still
-    /// reflected in the result.
+    /// PostgreSQL, SQLite and MariaDB (10.5 and later) send a batch
+    /// `INSERT ... RETURNING`. MySQL batches models that set their own integer
+    /// or `Uuid` key and reads them back with one `SELECT`, and inserts other
+    /// models one at a time, so database-generated fields such as
+    /// auto-incremented IDs are still reflected in the result.
     ///
     /// An auto-increment key still at `0` is numbered by the database, and one
     /// the model holds is written, as with [`create`](Model::create).
-    async fn insert_all(models: Vec<Self>) -> Result<Vec<Self>>
-    where
-        <<Self as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
-            crate::internal::IntoActiveModel<<Self as crate::internal::InternalModel>::ActiveModel>,
-    {
+    async fn insert_all(models: Vec<Self>) -> Result<Vec<Self>> {
         crud::insert_all::<Self>(models).await
     }
 
@@ -125,23 +121,28 @@ pub trait Model:
     /// non-conflict column is overwritten except a managed `created_at`, which
     /// keeps the stored row's creation time; use [`Model::on_conflict`] when only
     /// some of them should be.
-    async fn insert_or_update(model: Self, conflict_columns: Vec<&str>) -> Result<Self> {
-        let conflict_columns = conflict_columns.into_iter().map(str::to_string).collect();
-        Self::__insert_with_conflict(model, OnConflictBuilder::new(conflict_columns)).await
+    ///
+    /// Columns are names or typed columns: `["email"]`,
+    /// `[User::columns.email]`, a `Vec`, or a tuple of typed columns of
+    /// different types, `(User::TENANT_ID, User::EMAIL)`.
+    async fn insert_or_update(
+        model: Self,
+        conflict_columns: impl crate::columns::IntoColumnNames + Send,
+    ) -> Result<Self> {
+        let builder = Self::on_conflict(conflict_columns);
+        Self::__insert_with_conflict(model, builder).await
     }
 
     /// Start an upsert whose conflict behaviour you want to narrow.
     ///
     /// The long form of [`Model::insert_or_update`]: the returned builder can
     /// restrict which columns the update writes, which is how insert-only
-    /// columns are protected.
-    fn on_conflict(conflict_columns: Vec<&str>) -> OnConflictBuilder<Self> {
-        OnConflictBuilder::new(
-            conflict_columns
-                .into_iter()
-                .map(|s| s.to_string())
-                .collect(),
-        )
+    /// columns are protected, or keep the stored row with
+    /// [`OnConflictBuilder::do_nothing`].
+    fn on_conflict(
+        conflict_columns: impl crate::columns::IntoColumnNames,
+    ) -> OnConflictBuilder<Self> {
+        OnConflictBuilder::new(crate::columns::column_names(&conflict_columns))
     }
 
     /// Start a filtered bulk `UPDATE`.
@@ -151,33 +152,6 @@ pub trait Model:
     /// [`BatchUpdateBuilder::with_trashed`] for a backfill that reaches them.
     fn update_all() -> BatchUpdateBuilder<Self> {
         BatchUpdateBuilder::new()
-    }
-
-    /// Run `f` inside a database transaction, committing when it returns `Ok`.
-    ///
-    /// The transaction is installed as the ambient connection for the duration
-    /// of the closure, so plain calls such as `User::find(id)` or
-    /// `Post::query().get()` inside it join the transaction without being handed
-    /// a handle. A nested call opens a savepoint rather than a second
-    /// transaction.
-    ///
-    /// The handle must not outlive the closure: commit fails with "transaction
-    /// handle leaked outside the transaction scope" if a clone escaped. Any
-    /// `Err` return rolls back.
-    ///
-    /// The receiver type is incidental — this does not scope the transaction to
-    /// one model. `Database::transaction` is the same operation spelled without
-    /// an arbitrary model in front of it.
-    async fn transaction<F, T>(f: F) -> Result<T>
-    where
-        F: for<'c> FnOnce(
-                &'c crate::database::Transaction,
-            ) -> std::pin::Pin<
-                Box<dyn std::future::Future<Output = Result<T>> + Send + 'c>,
-            > + Send,
-        T: Send,
-    {
-        crud::transaction(f).await
     }
 
     /// Return one row of this model's table, or `None` when it is empty.
@@ -200,15 +174,18 @@ pub trait Model:
         crate::internal::QueryExecutor::last::<Self>().await
     }
 
-    /// Return one page of models using 1-based page numbers.
+    /// Return one page of models using 1-based page numbers, with the count of
+    /// every row, as [`QueryBuilder::paginate`](crate::query::QueryBuilder::paginate)
+    /// does for a filtered query.
     ///
     /// Rows are ordered by primary key, so walking the pages visits each row
     /// once even while rows are updated in between. For another order, use
-    /// `Model::query().order_asc(..).page(page, per_page)`.
+    /// `Model::query().order_asc(..).paginate(page, per_page)`, or `.page(..)`
+    /// for the rows without the count.
     ///
     /// Returns a validation error when `page == 0` or `per_page == 0`, or when
     /// `per_page` or the page's offset is past `i64::MAX`.
-    async fn paginate(page: u64, per_page: u64) -> Result<Vec<Self>> {
+    async fn paginate(page: u64, per_page: u64) -> Result<crate::query::Paginated<Self>> {
         crate::internal::QueryExecutor::paginate::<Self>(page, per_page).await
     }
 
@@ -276,21 +253,34 @@ pub trait Model:
     /// Persist this model.
     ///
     /// Performs an `INSERT` when `is_new()` returns true, otherwise performs
-    /// an `UPDATE` for the current primary key.
+    /// an `UPDATE` for the current primary key. A natural, UUID or composite
+    /// key the model sets itself that no row holds yet, trashed rows
+    /// included, is inserted; a single auto-increment key no row holds is
+    /// `Error::NotFound` (reset it to `0` to insert a copy).
     async fn save(self) -> Result<Self> {
         if self.is_new() {
             return Self::create(self).await;
         }
-        // The row-presence probe counts trashed rows: saving over a trashed
-        // natural-key row must UPDATE it, not INSERT into a conflict with it.
         let single_counter_key =
             Self::primary_key_auto_increment() && Self::primary_key_names().len() == 1;
-        if single_counter_key
-            || super::__exists_including_trashed::<Self>(&self.primary_key()).await?
-        {
-            self.update().await
-        } else {
-            Self::create(self).await
+        if single_counter_key {
+            return self.update().await;
+        }
+        // The hooks run by what the write is, so a model with callbacks asks
+        // for the row first. The probe counts trashed rows: saving over one
+        // must update it, not insert into a conflict with it.
+        if self.__has_callbacks() {
+            return if super::exists_including_trashed::<Self>(&self.primary_key()).await? {
+                self.update().await
+            } else {
+                Self::create(self).await
+            };
+        }
+        // Otherwise the `UPDATE` by the key is the probe, one round trip: it
+        // reaches a trashed row too, and one that matched no row is `NotFound`.
+        match self.clone().update().await {
+            Err(Error::NotFound { .. }) => Self::create(self).await,
+            saved => saved,
         }
     }
 
@@ -314,6 +304,11 @@ pub trait Model:
 
     #[doc(hidden)]
     async fn __insert_with_conflict(model: Self, builder: OnConflictBuilder<Self>) -> Result<Self>;
+
+    /// Whether the model implements [`Callbacks`](crate::callbacks::Callbacks),
+    /// which only a call site naming the model can tell.
+    #[doc(hidden)]
+    fn __has_callbacks(&self) -> bool;
 
     /// Re-read this record from the database and return the fresh copy.
     ///
@@ -358,7 +353,7 @@ pub trait Model:
     /// ```
     #[cfg(feature = "dirty-tracking")]
     fn changed_fields(&self) -> Result<Option<Vec<&'static str>>> {
-        dirty_tracking::changed_fields(self)
+        Ok(dirty_tracking::changed_fields(self))
     }
 
     /// Return one persisted field's original value from the last snapshot TideORM
@@ -370,15 +365,40 @@ pub trait Model:
     /// [`Model::changed_fields`]:
     ///
     /// - `Ok(None)` — no baseline exists, so no original value is known.
-    /// - `Ok(Some(None))` — a baseline exists but held no value for this field.
-    /// - `Ok(Some(Some(value)))` — the remembered value; a NaN or infinite
-    ///   float, which JSON holds no number for, as its text (`"NaN"`, `"inf"`).
+    /// - `Ok(Some(None))` — a baseline exists and the field was NULL in it.
+    /// - `Ok(Some(Some(value)))` — the remembered value, as the field's
+    ///   column holds it (`DbValue::from("Alice")` for a `String` field).
     ///
     /// Returns an error when `field` names neither a field nor a column of this
     /// model, whether or not a baseline exists.
     #[cfg(feature = "dirty-tracking")]
-    fn original_value(&self, field: &str) -> Result<Option<Option<serde_json::Value>>> {
+    fn original_value(&self, field: &str) -> Result<Option<Option<crate::DbValue>>> {
         dirty_tracking::original_value(self, field)
+    }
+
+    /// Return whether any persisted field differs from the last snapshot, or
+    /// `None` when there is no snapshot to compare against (see
+    /// [`Model::changed_fields`]).
+    ///
+    /// ```ignore
+    /// if model.is_dirty()? != Some(false) {
+    ///     model = model.save().await?;
+    /// }
+    /// ```
+    #[cfg(feature = "dirty-tracking")]
+    fn is_dirty(&self) -> Result<Option<bool>> {
+        Ok(self.changed_fields()?.map(|fields| !fields.is_empty()))
+    }
+
+    /// Return whether one persisted field differs from the last snapshot, or
+    /// `None` when there is no snapshot to compare against.
+    ///
+    /// Accepts either the Rust field name or the database column name, as
+    /// [`Model::original_value`] does, and a typed column such as `User::columns.email`.
+    /// Returns an error when `field` names neither.
+    #[cfg(feature = "dirty-tracking")]
+    fn is_field_dirty(&self, field: impl crate::columns::IntoColumnName) -> Result<Option<bool>> {
+        dirty_tracking::is_field_dirty(self, field.column_name())
     }
 
     /// Render this model as JSON for an API response.
@@ -404,12 +424,29 @@ pub trait Model:
         serialization::try_to_json::<Self>(self, options.as_ref())
     }
 
+    /// Render this model as JSON with its translatable fields in `language`.
+    ///
+    /// [`Model::to_json`] with the `"language"` option set, the one option it
+    /// reads: `model.to_json_in("fr")`.
+    fn to_json_in(&self, language: &str) -> serde_json::Value {
+        serialization::to_json::<Self>(self, Some(&serialization::language_options(language)))
+    }
+
+    /// [`Model::try_to_json`] with its translatable fields in `language`.
+    fn try_to_json_in(&self, language: &str) -> Result<serde_json::Value> {
+        serialization::try_to_json::<Self>(self, Some(&serialization::language_options(language)))
+    }
+
     /// Render a collection, failing if any model cannot be serialized.
+    ///
+    /// Takes the models by value or borrowed: a `Vec<Self>`, `&Vec<Self>` or
+    /// `&[Self]`.
     fn try_collection_to_json(
-        models: Vec<Self>,
+        models: impl AsRef<[Self]>,
         options: Option<HashMap<String, String>>,
     ) -> Result<serde_json::Value> {
         models
+            .as_ref()
             .iter()
             .map(|model| serialization::try_to_json(model, options.as_ref()))
             .collect::<Result<Vec<_>>>()
@@ -419,12 +456,13 @@ pub trait Model:
     /// Render a list of models as a JSON array, applying [`Model::to_json`] to each.
     ///
     /// The same options apply to every element, so one language is used across
-    /// the collection.
+    /// the collection. Takes the models by value or borrowed: a `Vec<Self>`,
+    /// `&Vec<Self>` or `&[Self]`.
     fn collection_to_json(
-        models: Vec<Self>,
+        models: impl AsRef<[Self]>,
         options: Option<HashMap<String, String>>,
     ) -> serde_json::Value {
-        serialization::collection_to_json::<Self>(models, options)
+        serialization::collection_to_json::<Self>(models.as_ref(), options)
     }
 
     /// Flatten this model into string key/value pairs.

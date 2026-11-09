@@ -228,5 +228,7 @@ async fn sqlite_direct_crud_helpers_read_every_row_of_a_regular_model() {
     let page = CiUser::paginate(1, 10)
         .await
         .expect("failed to paginate regular users");
-    assert_eq!(page.len(), 3);
+    assert_eq!(page.items.len(), 3);
+    assert_eq!(page.total, 3);
+    assert!(!page.has_next_page());
 }

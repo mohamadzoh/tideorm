@@ -58,7 +58,7 @@ async fn chunk_rejects_replaced_keys_before_callbacks() {
         Item::query_with(&db)
             .select(vec!["rank", "amount"])
             .select_raw("id AS id"),
-        Item::query_with(&db).select(vec![]),
+        Item::query_with(&db).select(Vec::<&str>::new()),
     ] {
         let mut seen = Vec::new();
         query
@@ -118,7 +118,7 @@ async fn grouped_chunking_is_rejected_before_callbacks() {
                 .group_by("name"),
             QueryShape::query_with(&db)
                 .select_raw("MIN(id) AS id,MIN(name) AS name")
-                .having("COUNT(*) > 0"),
+                .having_raw("COUNT(*) > 0"),
         ] {
             assert_refused(query, size, "GROUP BY or HAVING").await;
         }
@@ -140,7 +140,58 @@ async fn chunk_refuses_windows_before_running_callbacks() {
     let db = chunk_projection_database().await;
     let query = ChunkProjection::query_with(&db)
         .select(vec!["id"])
-        .row_number("rank", None, "id", Order::Asc)
+        .row_number("rank", (), "id", Order::Asc)
         .order_asc("id");
     assert_refused(query, 1, "window").await;
+}
+
+/// `chunks()` hands out `chunk()`'s batches one at a time, so the loop may
+/// hold state across an `.await`, and its future stays `Send` for a
+/// multi-threaded runtime.
+#[tokio::test]
+async fn chunks_hands_out_the_batches_chunk_reads() {
+    fn assert_send<T: Send>(value: T) -> T {
+        value
+    }
+
+    let db = items_database().await;
+    let mut seen = Vec::new();
+    let mut sizes = Vec::new();
+    assert_send(async {
+        let mut batches = Item::query_with(&db).chunks(2)?;
+        while let Some(batch) = batches.next().await? {
+            sizes.push(batch.len());
+            for item in batch {
+                tokio::task::yield_now().await;
+                seen.push(item.id);
+            }
+        }
+        assert!(
+            batches.next().await?.is_none(),
+            "an ended cursor stays ended"
+        );
+        Ok::<_, Error>(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(seen, [1, 2, 3]);
+    assert_eq!(sizes, [2, 1]);
+
+    let mut limited = Item::query_with(&db)
+        .order_desc("id")
+        .limit(2)
+        .chunks(1)
+        .unwrap();
+    let mut ids = Vec::new();
+    while let Some(batch) = limited.next().await.unwrap() {
+        ids.extend(batch.into_iter().map(|item| item.id));
+    }
+    assert_eq!(ids, [3, 2]);
+
+    let refused = Item::query_with(&db)
+        .offset(1)
+        .chunks(2)
+        .err()
+        .expect("offset is refused");
+    assert!(refused.to_string().contains("offset"), "{refused}");
 }

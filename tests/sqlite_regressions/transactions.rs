@@ -1,10 +1,11 @@
 //! Rollbacks, aborted transactions and dirty-tracking baselines.
 
 use crate::fixtures::{
-    ChunkProjection, chunk_projection_database, file_database, memory_database, slow_count,
+    ChunkProjection, chunk_projection_database, file_database, global_memory_database,
+    memory_database, slow_count,
 };
 #[cfg(feature = "dirty-tracking")]
-use crate::fixtures::{User, global_memory_database, users_and_posts};
+use crate::fixtures::{User, users_and_posts};
 use tideorm::prelude::*;
 
 #[cfg(feature = "dirty-tracking")]
@@ -23,22 +24,16 @@ async fn rollback_does_not_undo_an_independent_commit() {
         .unwrap();
     let handle = inner.clone();
     let outcome = outer
-        .transaction(move |_| {
-            Box::pin(async move {
-                handle
-                    .transaction(|_| {
-                        Box::pin(async {
-                            Database::execute(
-                                "UPDATE review_users SET name='COMMITTED' WHERE id=42",
-                            )
-                            .await?;
-                            User::query().where_eq("id", 42).get().await?;
-                            Ok(())
-                        })
-                    })
-                    .await?;
-                Err::<(), _>(tideorm::Error::query("roll back outer"))
-            })
+        .transaction(async move |_| {
+            handle
+                .transaction(async |_| {
+                    Database::execute("UPDATE review_users SET name='COMMITTED' WHERE id=42")
+                        .await?;
+                    User::query().where_eq("id", 42).get().await?;
+                    Ok(())
+                })
+                .await?;
+            Err::<(), _>(tideorm::Error::query("roll back outer"))
         })
         .await;
     assert!(outcome.is_err());
@@ -50,7 +45,7 @@ async fn rollback_does_not_undo_an_independent_commit() {
     };
     assert_eq!(
         model.original_value("name").unwrap(),
-        Some(Some(json!("COMMITTED")))
+        Some(Some(DbValue::from("COMMITTED")))
     );
     assert_eq!(
         inner
@@ -62,28 +57,22 @@ async fn rollback_does_not_undo_an_independent_commit() {
     // A savepoint on the same database must still restore its parent's baseline.
     let nested = inner.clone();
     let outcome = inner
-        .transaction(move |_| {
-            Box::pin(async move {
-                nested
-                    .transaction(|_| {
-                        Box::pin(async {
-                            Database::execute(
-                                "UPDATE review_users SET name='ROLLBACK' WHERE id=42",
-                            )
-                            .await?;
-                            User::query().where_eq("id", 42).get().await?;
-                            Ok(())
-                        })
-                    })
-                    .await?;
-                Err::<(), _>(tideorm::Error::query("roll back parent"))
-            })
+        .transaction(async move |_| {
+            nested
+                .transaction(async |_| {
+                    Database::execute("UPDATE review_users SET name='ROLLBACK' WHERE id=42")
+                        .await?;
+                    User::query().where_eq("id", 42).get().await?;
+                    Ok(())
+                })
+                .await?;
+            Err::<(), _>(tideorm::Error::query("roll back parent"))
         })
         .await;
     assert!(outcome.is_err());
     assert_eq!(
         model.original_value("name").unwrap(),
-        Some(Some(json!("COMMITTED")))
+        Some(Some(DbValue::from("COMMITTED")))
     );
 }
 
@@ -106,28 +95,24 @@ async fn bulk_rollback_restores_dirty_tracking_baselines() {
     let model = Snapshot::find_with(1, &db).await.unwrap().unwrap();
     assert_eq!(
         model.original_value("name").unwrap(),
-        Some(Some(json!("before")))
+        Some(Some(DbValue::from("before")))
     );
     let nested = db.clone();
     let result = db
-        .transaction(move |_| {
-            Box::pin(async move {
-                nested
-                    .transaction(|_| {
-                        Box::pin(async {
-                            Snapshot::query().where_eq("id", 1).delete().await?;
-                            Ok(())
-                        })
-                    })
-                    .await?;
-                Err::<(), _>(tideorm::Error::query("rollback bulk delete"))
-            })
+        .transaction(async move |_| {
+            nested
+                .transaction(async |_| {
+                    Snapshot::query().where_eq("id", 1).delete().await?;
+                    Ok(())
+                })
+                .await?;
+            Err::<(), _>(tideorm::Error::query("rollback bulk delete"))
         })
         .await;
     assert!(result.is_err());
     assert_eq!(
         model.original_value("name").unwrap(),
-        Some(Some(json!("before")))
+        Some(Some(DbValue::from("before")))
     );
     assert!(
         Snapshot::query_with(&db)
@@ -136,11 +121,9 @@ async fn bulk_rollback_restores_dirty_tracking_baselines() {
             .await
             .unwrap()
     );
-    db.transaction(|_| {
-        Box::pin(async {
-            Snapshot::query().where_eq("id", 1).delete().await?;
-            Ok(())
-        })
+    db.transaction(async |_| {
+        Snapshot::query().where_eq("id", 1).delete().await?;
+        Ok(())
     })
     .await
     .unwrap();
@@ -164,45 +147,36 @@ async fn sqlite_aborted_transactions_block_writes_and_recover_the_pool() {
     for nested in [false, true] {
         let handle = db.clone();
         let result = db
-            .transaction(|_| {
-                Box::pin(async move {
-                    handle.exec_raw(&set_rank(1, 7)).await?;
-                    if nested {
-                        let inner = handle.clone();
-                        let failure = handle
-                            .transaction(|_| {
-                                Box::pin(async move {
-                                    assert!(inner.exec_raw(&set_rank(2, 9)).await.is_err());
-                                    assert!(inner.exec_raw(&set_rank(3, 7)).await.is_err());
-                                    Ok(())
-                                })
-                            })
-                            .await;
-                        assert!(failure.is_err());
-                    } else {
-                        assert!(handle.exec_raw(&set_rank(2, 9)).await.is_err());
-                    }
-                    // A transaction error saying why, as the refused commit is; it
-                    // used to be an internal one.
-                    let refused = handle.exec_raw(&set_rank(4, 7)).await.unwrap_err();
-                    assert!(
-                        matches!(refused, tideorm::Error::Transaction { .. }),
-                        "{refused:?}"
-                    );
-                    assert!(
-                        refused
-                            .to_string()
-                            .contains("SQLite roll the whole transaction back"),
-                        "{refused}"
-                    );
-                    assert!(
-                        handle
-                            .transaction(|_| Box::pin(async { Ok(()) }))
-                            .await
-                            .is_err()
-                    );
-                    Ok(())
-                })
+            .transaction(async move |_| {
+                handle.exec_raw(&set_rank(1, 7)).await?;
+                if nested {
+                    let inner = handle.clone();
+                    let failure = handle
+                        .transaction(async move |_| {
+                            assert!(inner.exec_raw(&set_rank(2, 9)).await.is_err());
+                            assert!(inner.exec_raw(&set_rank(3, 7)).await.is_err());
+                            Ok(())
+                        })
+                        .await;
+                    assert!(failure.is_err());
+                } else {
+                    assert!(handle.exec_raw(&set_rank(2, 9)).await.is_err());
+                }
+                // A transaction error saying why, as the refused commit is; it
+                // used to be an internal one.
+                let refused = handle.exec_raw(&set_rank(4, 7)).await.unwrap_err();
+                assert!(
+                    matches!(refused, tideorm::Error::Transaction { .. }),
+                    "{refused:?}"
+                );
+                assert!(
+                    refused
+                        .to_string()
+                        .contains("SQLite roll the whole transaction back"),
+                    "{refused}"
+                );
+                assert!(handle.transaction(async |_| { Ok(()) }).await.is_err());
+                Ok(())
             })
             .await;
         assert!(result.is_err());
@@ -215,18 +189,16 @@ async fn sqlite_aborted_transactions_block_writes_and_recover_the_pool() {
             80
         );
         let fresh = db.clone();
-        db.transaction(|_| {
-            Box::pin(async move {
-                // ABORT, unlike ROLLBACK, leaves the surrounding transaction usable.
-                assert!(
-                    fresh
-                        .exec_raw("INSERT INTO review_chunk_projection VALUES(7,0)")
-                        .await
-                        .is_err()
-                );
-                fresh.exec_raw(&set_rank(81, 7)).await?;
-                Ok(())
-            })
+        db.transaction(async move |_| {
+            // ABORT, unlike ROLLBACK, leaves the surrounding transaction usable.
+            assert!(
+                fresh
+                    .exec_raw("INSERT INTO review_chunk_projection VALUES(7,0)")
+                    .await
+                    .is_err()
+            );
+            fresh.exec_raw(&set_rank(81, 7)).await?;
+            Ok(())
         })
         .await
         .unwrap();
@@ -244,32 +216,30 @@ async fn sqlite_aborted_transactions_block_writes_and_recover_the_pool() {
 
 /// Once a savepoint has finished its statement and is idle, cancelling its
 /// closure rolls back only its own work. Wait for that boundary explicitly:
-/// cancelling after an arbitrary poll can instead hit begin or commit, where
-/// the enclosing transaction must abort (covered by the other cancellation tests).
+/// cancelling after an arbitrary poll can instead hit begin or commit, whose
+/// outcomes the other cancellation tests cover.
 #[tokio::test]
 async fn a_cancelled_idle_savepoint_rolls_back_only_its_own_work() {
     let db = memory_database("CREATE TABLE cancel_rows(id INTEGER PRIMARY KEY)").await;
     let handle = db.clone();
-    db.transaction(move |_| {
-        Box::pin(async move {
-            handle.exec_raw("INSERT INTO cancel_rows VALUES (1)").await?;
-            let inner_handle = handle.clone();
-            let (ready, idle) = tokio::sync::oneshot::channel();
-            let mut inner = Box::pin(handle.transaction(move |_| {
-                Box::pin(async move {
-                    inner_handle.exec_raw("INSERT INTO cancel_rows VALUES (2)").await?;
-                    ready.send(()).unwrap();
-                    std::future::pending::<tideorm::Result<()>>().await
-                })
-            }));
-            tokio::select! {
-                outcome = &mut inner => panic!("the nested transaction ended before cancellation: {outcome:?}"),
-                ready = idle => ready.unwrap(),
-            }
-            drop(inner);
-            handle.exec_raw("INSERT INTO cancel_rows VALUES (3)").await?;
-            Ok(())
-        })
+    db.transaction(async move |_| {
+        handle.exec_raw("INSERT INTO cancel_rows VALUES (1)").await?;
+        let inner_handle = handle.clone();
+        let (ready, idle) = tokio::sync::oneshot::channel();
+        let mut inner = Box::pin(handle.transaction(async move |_| {
+            inner_handle
+                .exec_raw("INSERT INTO cancel_rows VALUES (2)")
+                .await?;
+            ready.send(()).unwrap();
+            std::future::pending::<tideorm::Result<()>>().await
+        }));
+        tokio::select! {
+            outcome = &mut inner => panic!("the nested transaction ended before cancellation: {outcome:?}"),
+            ready = idle => ready.unwrap(),
+        }
+        drop(inner);
+        handle.exec_raw("INSERT INTO cancel_rows VALUES (3)").await?;
+        Ok(())
     })
     .await
     .unwrap();
@@ -292,21 +262,17 @@ async fn outer_database_handle_joins_its_transaction_inside_another_database() {
         .unwrap();
     let (a_handle, b_handle) = (a.clone(), b.clone());
     let result: tideorm::Result<()> = a
-        .transaction(move |_| {
-            Box::pin(async move {
-                let a_inner = a_handle.clone();
-                b_handle
-                    .transaction(move |_| {
-                        Box::pin(async move {
-                            a_inner
-                                .exec_raw("INSERT INTO outer_rows VALUES (1)")
-                                .await?;
-                            Ok(())
-                        })
-                    })
-                    .await?;
-                Err(tideorm::Error::query("roll A back"))
-            })
+        .transaction(async move |_| {
+            let a_inner = a_handle.clone();
+            b_handle
+                .transaction(async move |_| {
+                    a_inner
+                        .exec_raw("INSERT INTO outer_rows VALUES (1)")
+                        .await?;
+                    Ok(())
+                })
+                .await?;
+            Err(tideorm::Error::query("roll A back"))
         })
         .await;
     assert!(result.is_err());
@@ -328,23 +294,17 @@ async fn a_savepoint_opened_inside_another_databases_transaction_keeps_its_datab
         .await
         .unwrap();
     let (a_handle, b_handle) = (a.clone(), b.clone());
-    a.transaction(move |_| {
-        Box::pin(async move {
-            let (a_inner, b_inner) = (a_handle.clone(), b_handle.clone());
-            b_handle
-                .transaction(move |_| {
-                    Box::pin(async move {
-                        a_inner
-                            .transaction(move |_| {
-                                Box::pin(async move {
-                                    b_inner.exec_raw("INSERT INTO inner_rows VALUES (1)").await
-                                })
-                            })
-                            .await
+    a.transaction(async move |_| {
+        let (a_inner, b_inner) = (a_handle.clone(), b_handle.clone());
+        b_handle
+            .transaction(async move |_| {
+                a_inner
+                    .transaction(async move |_| {
+                        b_inner.exec_raw("INSERT INTO inner_rows VALUES (1)").await
                     })
-                })
-                .await
-        })
+                    .await
+            })
+            .await
     })
     .await
     .unwrap();
@@ -354,81 +314,78 @@ async fn a_savepoint_opened_inside_another_databases_transaction_keeps_its_datab
 }
 
 /// A nested transaction cancelled while another statement of its connection
-/// runs cannot be rolled back at that moment, and the driver used to panic
-/// trying. The enclosing transaction instead refuses to commit, so it keeps
-/// nothing of either.
+/// runs is rolled back once that statement ends, before anything else runs
+/// there, and the enclosing transaction goes on. The driver used to panic
+/// trying to roll it back at once.
 #[tokio::test]
-async fn a_nested_transaction_cancelled_mid_statement_aborts_the_enclosing_one() {
+async fn a_nested_transaction_cancelled_mid_statement_rolls_back_after_it() {
     use std::time::Duration;
     let (db, _file) = file_database("cancelled-mid-statement").await;
     db.exec_raw("CREATE TABLE mid_rows(id INTEGER PRIMARY KEY)")
         .await
         .unwrap();
     let handle = db.clone();
-    let result: tideorm::Result<()> = db
-        .transaction(move |_| {
-            Box::pin(async move {
-                handle.exec_raw("INSERT INTO mid_rows VALUES (1)").await?;
-                let nested = tokio::time::timeout(
-                    Duration::from_millis(150),
-                    handle.transaction(|_| {
-                        Box::pin(async {
-                            tokio::time::sleep(Duration::from_secs(10)).await;
-                            Ok(())
-                        })
-                    }),
-                );
-                let slow = async {
-                    tokio::time::sleep(Duration::from_millis(30)).await;
-                    handle
-                        .query_raw_json(&format!("SELECT {} AS n", slow_count(20_000_000)))
-                        .await
-                };
-                let (nested, slow) = tokio::join!(nested, slow);
-                assert!(nested.is_err(), "the nested transaction was not cancelled");
-                slow?;
+    db.transaction(async move |_| {
+        handle.exec_raw("INSERT INTO mid_rows VALUES (1)").await?;
+        let inner = handle.clone();
+        let nested = tokio::time::timeout(
+            Duration::from_millis(150),
+            handle.transaction(async move |_| {
+                inner.exec_raw("INSERT INTO mid_rows VALUES (2)").await?;
+                tokio::time::sleep(Duration::from_secs(10)).await;
                 Ok(())
-            })
-        })
-        .await;
-    let error = result.unwrap_err().to_string();
-    assert!(error.contains("cancelled"), "{error}");
-    let rows = db.query_raw_json("SELECT id FROM mid_rows").await.unwrap();
-    assert!(rows.is_empty(), "{rows:?}");
+            }),
+        );
+        let slow = async {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            handle
+                .query_raw_json(&format!("SELECT {} AS n", slow_count(20_000_000)))
+                .await
+        };
+        let (nested, slow) = tokio::join!(nested, slow);
+        assert!(nested.is_err(), "the nested transaction was not cancelled");
+        slow?;
+        handle.exec_raw("INSERT INTO mid_rows VALUES (3)").await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let rows = db
+        .query_raw_json("SELECT id FROM mid_rows ORDER BY id")
+        .await
+        .unwrap();
+    let ids: Vec<i64> = rows.iter().map(|row| row["id"].as_i64().unwrap()).collect();
+    assert_eq!(ids, [1, 3]);
     drop(db);
 }
 
-/// A nested transaction whose handle leaked outside its closure leaves its
-/// savepoint open. The enclosing transaction used to release that savepoint
-/// as if it were its own and report a commit, while the transaction stayed
-/// open until the stray handle dropped and rolled everything back; it now
-/// refuses to commit.
+/// A nested transaction whose handle leaked outside its closure is rolled
+/// back, and the enclosing transaction refuses to go on. It used to release
+/// the open savepoint as if it were its own and report a commit, while the
+/// transaction stayed open until the stray handle dropped and rolled
+/// everything back.
 #[tokio::test]
 async fn a_leaked_savepoint_aborts_the_enclosing_transaction() {
     let db = memory_database("CREATE TABLE leak_rows(id INTEGER PRIMARY KEY)").await;
     let stray = std::sync::Arc::new(std::sync::Mutex::new(None));
     let (handle, keep) = (db.clone(), stray.clone());
     let result: tideorm::Result<()> = db
-        .transaction(move |_| {
-            Box::pin(async move {
-                handle.exec_raw("INSERT INTO leak_rows VALUES (1)").await?;
-                let leaked = handle
-                    .transaction(move |_| {
-                        Box::pin(async move {
-                            *keep.lock().unwrap() = Some(tideorm::database::__current_db()?);
-                            Ok(())
-                        })
-                    })
-                    .await;
-                assert!(leaked.is_err(), "the leak was not reported");
-                assert!(
-                    handle
-                        .exec_raw("INSERT INTO leak_rows VALUES (2)")
-                        .await
-                        .is_err()
-                );
-                Ok(())
-            })
+        .transaction(async move |_| {
+            handle.exec_raw("INSERT INTO leak_rows VALUES (1)").await?;
+            let leaked = handle
+                .transaction(async move |_| {
+                    *keep.lock().unwrap() = Some(tideorm::database::__current_db()?);
+                    Ok(())
+                })
+                .await;
+            assert!(leaked.is_err(), "the leak was not reported");
+            assert!(
+                handle
+                    .exec_raw("INSERT INTO leak_rows VALUES (2)")
+                    .await
+                    .is_err()
+            );
+            Ok(())
         })
         .await;
     let error = result.unwrap_err().to_string();
@@ -458,34 +415,29 @@ async fn a_savepoint_cancelled_while_it_waits_for_the_connection_never_starts() 
             .unwrap();
         let handle = db.clone();
         let result: tideorm::Result<()> = db
-            .transaction(move |_| {
-                Box::pin(async move {
-                    handle
-                        .exec_raw("INSERT INTO waiting_rows VALUES (1)")
-                        .await?;
-                    let slow_sql = format!("SELECT {} AS n", slow_count(20_000_000));
-                    let slow = handle.query_raw_json(&slow_sql);
-                    let waiting = async {
-                        tokio::time::sleep(Duration::from_millis(30)).await;
-                        let savepoint = async {
-                            if batch {
-                                WaitingRow::insert_all(vec![
-                                    WaitingRow { id: 2 },
-                                    WaitingRow { id: 3 },
-                                ])
+            .transaction(async move |_| {
+                handle
+                    .exec_raw("INSERT INTO waiting_rows VALUES (1)")
+                    .await?;
+                let slow_sql = format!("SELECT {} AS n", slow_count(20_000_000));
+                let slow = handle.query_raw_json(&slow_sql);
+                let waiting = async {
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    let savepoint = async {
+                        if batch {
+                            WaitingRow::insert_all(vec![WaitingRow { id: 2 }, WaitingRow { id: 3 }])
                                 .await
                                 .map(drop)
-                            } else {
-                                handle.transaction(|_| Box::pin(async { Ok(()) })).await
-                            }
-                        };
-                        tokio::time::timeout(Duration::from_millis(100), savepoint).await
+                        } else {
+                            handle.transaction(async |_| Ok(())).await
+                        }
                     };
-                    let (slow, waiting) = tokio::join!(slow, waiting);
-                    assert!(waiting.is_err(), "the savepoint did not wait");
-                    slow?;
-                    Ok(())
-                })
+                    tokio::time::timeout(Duration::from_millis(100), savepoint).await
+                };
+                let (slow, waiting) = tokio::join!(slow, waiting);
+                assert!(waiting.is_err(), "the savepoint did not wait");
+                slow?;
+                Ok(())
             })
             .await;
         result.unwrap();
@@ -498,8 +450,8 @@ async fn a_savepoint_cancelled_while_it_waits_for_the_connection_never_starts() 
     }
 }
 
-/// Two savepoints opened side by side in one transaction take turns. sqlx
-/// names a savepoint by how many are open on its connection, so one that
+/// Two savepoints opened side by side in one transaction take turns. The
+/// driver names a savepoint by how many are open on its connection, so one that
 /// ended while a later one was still open ended that one in its place, and
 /// the later one's rollback then undid the rows the first had committed.
 #[tokio::test]
@@ -524,34 +476,28 @@ async fn side_by_side_savepoints_in_one_transaction_take_turns() {
     .await;
     let handle = db.clone();
     let result: tideorm::Result<()> = db
-        .transaction(move |_| {
-            Box::pin(async move {
-                // The first opens, writes, and waits while the second opens;
-                // it commits while the second, which then fails, is open.
-                let first = handle.transaction(move |_| {
-                    Box::pin(async move {
-                        SideRow::create(row("a@x")).await?;
-                        tokio::time::sleep(Duration::from_millis(20)).await;
-                        SideRow::create(row("b@x")).await.map(drop)
+        .transaction(async move |_| {
+            // The first opens, writes, and waits while the second opens;
+            // it commits while the second, which then fails, is open.
+            let first = handle.transaction(async move |_| {
+                SideRow::create(row("a@x")).await?;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                SideRow::create(row("b@x")).await.map(drop)
+            });
+            let second = async {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                handle
+                    .transaction(async move |_| {
+                        SideRow::create(row("c@x")).await?;
+                        tokio::time::sleep(Duration::from_millis(40)).await;
+                        SideRow::create(row("c@x")).await.map(drop)
                     })
-                });
-                let second = async {
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                    handle
-                        .transaction(move |_| {
-                            Box::pin(async move {
-                                SideRow::create(row("c@x")).await?;
-                                tokio::time::sleep(Duration::from_millis(40)).await;
-                                SideRow::create(row("c@x")).await.map(drop)
-                            })
-                        })
-                        .await
-                };
-                let (written, refused) = tokio::join!(first, second);
-                written?;
-                assert!(refused.is_err(), "the duplicate was written");
-                Ok(())
-            })
+                    .await
+            };
+            let (written, refused) = tokio::join!(first, second);
+            written?;
+            assert!(refused.is_err(), "the duplicate was written");
+            Ok(())
         })
         .await;
     result.unwrap();
@@ -616,7 +562,7 @@ async fn batch_snapshots_are_undone_when_commit_fails() {
     .unwrap();
     assert_eq!(
         saved[0].original_value("name").unwrap(),
-        Some(Some(json!("first")))
+        Some(Some(DbValue::from("first")))
     );
 }
 
@@ -638,25 +584,23 @@ async fn batch_snapshots_are_undone_before_the_enclosing_transaction_commits() {
         name: "first".into(),
     };
     let checked = first.clone();
-    db.transaction(move |_| {
-        Box::pin(async move {
-            // A batch mixing a held auto-increment key with an unset one
-            // inserts row by row, so the first row is written, and its
-            // baseline recorded, before the second fails. The failed batch
-            // must undo that baseline, though its parent commits.
-            let error = Row::insert_all(vec![
-                first,
-                Row {
-                    id: 0,
-                    name: "taken".into(),
-                },
-            ])
-            .await
-            .unwrap_err();
-            assert!(error.to_string().contains("UNIQUE"), "{error}");
-            assert_eq!(checked.original_value("name")?, None);
-            Ok(())
-        })
+    db.transaction(async move |_| {
+        // A batch mixing a held auto-increment key with an unset one
+        // inserts row by row, so the first row is written, and its
+        // baseline recorded, before the second fails. The failed batch
+        // must undo that baseline, though its parent commits.
+        let error = Row::insert_all(vec![
+            first,
+            Row {
+                id: 0,
+                name: "taken".into(),
+            },
+        ])
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("UNIQUE"), "{error}");
+        assert_eq!(checked.original_value("name")?, None);
+        Ok(())
     })
     .await
     .unwrap();
@@ -680,11 +624,9 @@ async fn a_leaked_handle_is_reported_even_when_the_closure_fails() {
     let stray = std::sync::Arc::new(std::sync::Mutex::new(None));
     let keep = stray.clone();
     let error = db
-        .transaction(move |_| {
-            Box::pin(async move {
-                *keep.lock().unwrap() = Some(tideorm::database::__current_db()?);
-                Err::<(), _>(tideorm::Error::query("rollback with a leaked handle"))
-            })
+        .transaction(async move |_| {
+            *keep.lock().unwrap() = Some(tideorm::database::__current_db()?);
+            Err::<(), _>(tideorm::Error::query("rollback with a leaked handle"))
         })
         .await
         .unwrap_err()
@@ -694,4 +636,196 @@ async fn a_leaked_handle_is_reported_even_when_the_closure_fails() {
         "{error}"
     );
     drop(stray.lock().unwrap().take());
+}
+
+/// A batch of rows that all take their defaults is one `INSERT .. DEFAULT
+/// VALUES` per row on SQLite, run as one statement: a row that fails leaves
+/// none of the batch behind, and the trigger's own error is what the caller
+/// sees, also when it rolls the whole transaction back.
+#[tokio::test]
+async fn a_failing_default_only_batch_leaves_no_rows_and_keeps_its_error() {
+    #[tideorm::model(table = "review_default_rows")]
+    struct DefaultRow {
+        #[tideorm(primary_key, auto_increment)]
+        id: i64,
+    }
+    let db = global_memory_database(
+        "CREATE TABLE review_default_rows(id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT NOT NULL DEFAULT 'x'); \
+         CREATE TABLE review_default_marks(id INTEGER PRIMARY KEY)",
+    )
+    .await;
+    let rows = || (0..3).map(|_| DefaultRow { id: 0 }).collect::<Vec<_>>();
+    let count = |table: &'static str| {
+        let db = db.clone();
+        async move {
+            db.query_raw_json(&format!("SELECT COUNT(*) AS n FROM {table}"))
+                .await
+                .unwrap()[0]["n"]
+                .as_i64()
+                .unwrap()
+        }
+    };
+    for action in ["ABORT", "ROLLBACK"] {
+        db.exec_raw(&format!(
+            "CREATE TRIGGER stop_third BEFORE INSERT ON review_default_rows \
+             WHEN (SELECT COUNT(*) FROM review_default_rows) >= 2 \
+             BEGIN SELECT RAISE({action}, 'stop fixture'); END"
+        ))
+        .await
+        .unwrap();
+
+        let failure = DefaultRow::insert_all(rows()).await.unwrap_err();
+        assert!(failure.to_string().contains("stop fixture"), "{failure}");
+        assert_eq!(count("review_default_rows").await, 0, "{action} on its own");
+
+        let handle = db.clone();
+        let outcome = db
+            .transaction(async move |_| {
+                handle
+                    .exec_raw("INSERT INTO review_default_marks VALUES(1)")
+                    .await?;
+                let failure = DefaultRow::insert_all(rows()).await.unwrap_err();
+                assert!(failure.to_string().contains("stop fixture"), "{failure}");
+                handle
+                    .exec_raw("INSERT INTO review_default_marks VALUES(2)")
+                    .await?;
+                Ok(())
+            })
+            .await;
+        if action == "ABORT" {
+            outcome.unwrap();
+            assert_eq!(count("review_default_marks").await, 2);
+        } else {
+            assert!(outcome.is_err(), "SQLite rolled the transaction back");
+            assert_eq!(count("review_default_marks").await, 0);
+        }
+        assert_eq!(
+            count("review_default_rows").await,
+            0,
+            "{action} in a transaction"
+        );
+
+        db.exec_raw("DROP TRIGGER stop_third; DELETE FROM review_default_marks")
+            .await
+            .unwrap();
+        assert_eq!(DefaultRow::insert_all(rows()).await.unwrap().len(), 3);
+        db.exec_raw("DELETE FROM review_default_rows")
+            .await
+            .unwrap();
+    }
+}
+
+/// `Database::scope` runs calls that name no handle on its database, and
+/// `Database::atomically` commits or rolls back a future borrowing locals.
+#[tokio::test]
+async fn scope_and_atomically_run_handle_less_calls_on_their_database() {
+    let tenant = crate::fixtures::users_and_posts("tenant", 10).await;
+    let other = crate::fixtures::users_and_posts("other", 20).await;
+    let name = String::from("borrowed");
+    let user = |id| crate::fixtures::User {
+        id,
+        name: name.clone(),
+        active: true,
+        posts: Default::default(),
+    };
+    type User = crate::fixtures::User;
+
+    let found = tenant.scope(async { User::find(1).await }).await.unwrap();
+    assert_eq!(found.unwrap().name, "tenant");
+    let found = other.scope(async { User::find(1).await }).await.unwrap();
+    assert_eq!(found.unwrap().name, "other");
+
+    tenant
+        .atomically(async { User::create(user(2)).await })
+        .await
+        .unwrap();
+    let failed: tideorm::Result<()> = tenant
+        .atomically(async {
+            User::create(user(3)).await?;
+            Err(tideorm::Error::query("stop after the insert"))
+        })
+        .await;
+    assert!(failed.is_err());
+
+    let ids = User::query_with(&tenant)
+        .order_asc("id")
+        .pluck::<i64>("id")
+        .await
+        .unwrap();
+    assert_eq!(ids, vec![1, 2]);
+    assert_eq!(User::query_with(&other).count().await.unwrap(), 1);
+}
+
+/// `is_dirty` and `is_field_dirty` compare with the row as loaded, and know
+/// nothing of a model built by hand.
+#[cfg(feature = "dirty-tracking")]
+#[tokio::test]
+async fn is_dirty_compares_with_the_loaded_row() {
+    let db = users_and_posts("tenant", 10).await;
+    db.exec_raw("INSERT INTO review_users VALUES(7341, 'loaded', 1)")
+        .await
+        .unwrap();
+    let mut user = User::query_with(&db)
+        .where_eq(User::columns.id, 7341)
+        .first()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(user.is_dirty().unwrap(), Some(false));
+    assert_eq!(
+        user.is_field_dirty(User::columns.name).unwrap(),
+        Some(false)
+    );
+
+    user.name = "renamed".into();
+    assert_eq!(user.is_dirty().unwrap(), Some(true));
+    assert_eq!(user.is_field_dirty("name").unwrap(), Some(true));
+    assert_eq!(
+        user.is_field_dirty(User::columns.active).unwrap(),
+        Some(false)
+    );
+    assert!(user.is_field_dirty("missing").is_err());
+
+    let built = User {
+        id: 7342,
+        name: "built".into(),
+        active: true,
+        posts: Default::default(),
+    };
+    assert_eq!(built.is_dirty().unwrap(), None);
+    assert_eq!(built.is_field_dirty("name").unwrap(), None);
+}
+
+/// The closure is an async closure that may hold its `&Transaction` across an
+/// `.await`, and the transaction's future is `Send`, so it can be spawned on a
+/// multi-threaded runtime.
+#[tokio::test]
+async fn a_transaction_closure_holds_its_handle_and_can_be_spawned() {
+    use tideorm::orm::ConnectionTrait;
+
+    let db = memory_database("CREATE TABLE spawned_rows(id INTEGER PRIMARY KEY)").await;
+    let handle = db.clone();
+    tokio::spawn(async move {
+        handle
+            .transaction(async |tx| {
+                let connection = tx.connection();
+                for sql in [
+                    "INSERT INTO spawned_rows VALUES (1)",
+                    "INSERT INTO spawned_rows VALUES (2)",
+                ] {
+                    connection.execute_unprepared(sql).await.unwrap();
+                    tokio::task::yield_now().await;
+                }
+                Ok(())
+            })
+            .await
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let rows = db
+        .query_raw_json("SELECT COUNT(*) AS n FROM spawned_rows")
+        .await
+        .unwrap();
+    assert_eq!(rows[0]["n"], 2);
 }

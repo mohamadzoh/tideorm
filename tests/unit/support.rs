@@ -36,20 +36,35 @@ pub(crate) fn reset_globals_and_cache() {
     reset_globals();
 }
 
+/// Run each of `statements` on `db`, panicking at the first that fails.
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+pub(crate) async fn sqlite_execute(db: &crate::database::Database, statements: &[impl AsRef<str>]) {
+    for statement in statements {
+        let statement = statement.as_ref();
+        db.__execute_with_params(statement, vec![])
+            .await
+            .unwrap_or_else(|error| panic!("{statement}: {error}"));
+    }
+}
+
+/// An in-memory SQLite database, not installed globally, with each
+/// statement of `schema` run on it.
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+pub(crate) async fn sqlite_memory(schema: &[impl AsRef<str>]) -> crate::database::Database {
+    let db = crate::database::Database::connect("sqlite::memory:")
+        .await
+        .expect("an in-memory SQLite database");
+    sqlite_execute(&db, schema).await;
+    db
+}
+
 /// Forget the globals, then install an in-memory SQLite database as the
 /// global one, with each statement of `schema` run on it.
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 pub(crate) async fn install_sqlite_global(schema: &[&str]) -> crate::database::Database {
     reset_globals();
-    let db = crate::database::Database::connect("sqlite::memory:")
-        .await
-        .expect("an in-memory SQLite database");
+    let db = sqlite_memory(schema).await;
     crate::database::Database::set_global(db.clone()).expect("installing the global database");
-    for statement in schema {
-        db.__execute_with_params(statement, vec![])
-            .await
-            .unwrap_or_else(|error| panic!("{statement}: {error}"));
-    }
     db
 }
 
@@ -85,7 +100,7 @@ pub(crate) async fn fresh_postgres_tables(
         crate::database::Database::connect(crate::postgres_test_config::test_database_url())
             .await?,
     );
-    crate::database::__in_db_scope(db.as_ref(), async {
+    db.scope(async {
         for (table, _) in tables.iter().rev() {
             crate::database::Database::execute(&format!("DROP TABLE IF EXISTS {table} CASCADE"))
                 .await?;

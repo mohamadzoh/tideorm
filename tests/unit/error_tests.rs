@@ -1,30 +1,18 @@
 use super::*;
 use std::error::Error as StdError;
 
-/// Without a driver classification, the suggestion is read from the message.
+/// Without a classified failure, the suggestion is the variant's own advice,
+/// whatever the message says.
 #[test]
-fn test_error_suggestions() {
+fn unclassified_errors_get_their_variants_advice() {
     for (err, expected) in [
-        (
-            Error::not_found("User with ID 123 not found"),
-            "hasn't been soft-deleted",
-        ),
-        (
-            Error::not_found("find user 123"),
-            "`Model::exists(id).await?`",
-        ),
-        (
-            Error::connection("Connection refused"),
-            "Database server is not running",
-        ),
+        (Error::not_found("find user 123"), "`.with_trashed()`"),
+        (Error::connection("Connection refused"), "connection URL"),
         (
             Error::query("duplicate key value violates unique constraint"),
-            "Duplicate key violation",
+            "Check the SQL query",
         ),
-        (
-            Error::query("violates foreign key constraint"),
-            "Foreign key constraint violation",
-        ),
+        (Error::transaction("deadlock"), "run the transaction again"),
     ] {
         let suggestion = err.suggestion();
         assert!(suggestion.contains(expected), "{err}: {suggestion}");
@@ -92,35 +80,39 @@ fn the_driver_classification_beats_the_message_for_retries() {
     assert!(err.is_retryable());
 }
 
+/// The message of an unclassified failure is never read: one that reads
+/// like a syntax error or a deadlock is neither advised nor retried as one.
 #[test]
-fn an_unclassified_failure_still_falls_back_to_the_message() {
+fn an_unclassified_failure_is_not_judged_by_its_message() {
     let err = Error::query("syntax error at or near \"slect\"")
         .with_db_failure(Some(DbFailure::new(DbFailureKind::Unclassified)));
 
     assert_eq!(err.failure_kind(), DbFailureKind::Unclassified);
-    assert!(err.suggestion().contains("SQL syntax error"));
+    assert!(!err.suggestion().contains("SQL syntax error"));
     assert!(!err.is_retryable());
+    assert!(!Error::query("deadlock detected").is_retryable());
+    assert!(!Error::connection("connection refused").is_retryable());
 }
 
 #[test]
-fn the_message_fallback_and_the_driver_classification_give_the_same_advice() {
-    let from_message = Error::query("duplicate key value violates unique constraint");
-    let from_driver = Error::query("constraint failed")
-        .with_db_failure(Some(DbFailure::new(DbFailureKind::UniqueViolation)));
-    assert_eq!(from_message.suggestion(), from_driver.suggestion());
-
-    let pool_exhausted = Error::connection("connection pool exhausted").suggestion();
-    let acquire_timeout = Error::connection("timed out")
-        .with_db_failure(Some(DbFailure::new(DbFailureKind::ConnectionTimeout)))
-        .suggestion();
-    assert!(
-        pool_exhausted.contains("`max_connections`"),
-        "{pool_exhausted}"
-    );
-    assert!(
-        acquire_timeout.contains("`max_connections`"),
-        "{acquire_timeout}"
-    );
+fn connection_failures_are_advised_and_retried_by_their_classification() {
+    for (kind, expected, retryable) in [
+        (DbFailureKind::ConnectionTimeout, "`max_connections`", true),
+        (DbFailureKind::ConnectionRefused, "server is running", true),
+        (
+            DbFailureKind::AuthenticationFailed,
+            "user name and password",
+            false,
+        ),
+        (DbFailureKind::UnknownDatabase, "CREATE DATABASE", false),
+        (DbFailureKind::TlsFailed, "certificate", false),
+        (DbFailureKind::InvalidConfiguration, "database URL", false),
+    ] {
+        let err = Error::connection("failed").with_db_failure(Some(DbFailure::new(kind)));
+        let suggestion = err.suggestion();
+        assert!(suggestion.contains(expected), "{kind}: {suggestion}");
+        assert_eq!(err.is_retryable(), retryable, "{kind}");
+    }
 }
 
 #[test]
@@ -131,6 +123,8 @@ fn the_not_initialized_error_says_to_connect_first() {
         .expect("a disconnected handle has no connection to hand out");
 
     assert!(matches!(err, Error::Connection { .. }), "{err:?}");
+    assert_eq!(err.failure_kind(), DbFailureKind::NotConnected);
+    assert!(!err.is_retryable());
     let suggestion = err.suggestion();
     assert!(suggestion.contains("TideConfig::init()"), "{suggestion}");
     assert!(suggestion.contains("Database::init(url)"), "{suggestion}");
@@ -148,76 +142,9 @@ fn errors_that_never_reached_a_driver_report_no_failure() {
 }
 
 #[test]
-fn sqlstate_classification_covers_what_the_driver_kind_does_not() {
-    for (sqlstate, kind) in [
-        ("40P01", DbFailureKind::Deadlock),
-        ("42P01", DbFailureKind::UndefinedTable),
-        ("42501", DbFailureKind::InsufficientPrivilege),
-        // A value that does not fit its column (too long, out of range, a bad
-        // datetime, invalid text for the type) is the caller's input to fix.
-        ("22001", DbFailureKind::InvalidValue),
-        ("22003", DbFailureKind::InvalidValue),
-        ("22007", DbFailureKind::InvalidValue),
-        ("22P02", DbFailureKind::InvalidValue),
-        // SQLite reports a native code, not a SQLSTATE; it stays unclassified
-        // here and is classified from the driver's own kind instead.
-        ("2067", DbFailureKind::Unclassified),
-    ] {
-        assert_eq!(DbFailureKind::from_sqlstate(sqlstate), kind, "{sqlstate}");
-    }
+fn bad_input_is_not_retried_and_lock_contention_is() {
+    // A value that does not fit its column is the caller's input to fix.
     assert!(!DbFailureKind::InvalidValue.is_retryable());
-}
-
-#[test]
-fn mysql_error_numbers_classify_what_their_sqlstate_does_not() {
-    for (number, kind) in [
-        (1205, DbFailureKind::LockNotAvailable),
-        (1213, DbFailureKind::Deadlock),
-        (3024, DbFailureKind::StatementTimeout),
-        (1969, DbFailureKind::StatementTimeout),
-        (1142, DbFailureKind::InsufficientPrivilege),
-        (1053, DbFailureKind::ConnectionClosed),
-        (1366, DbFailureKind::InvalidValue),
-        (1064, DbFailureKind::Unclassified),
-    ] {
-        assert_eq!(DbFailureKind::from_mysql_code(number), kind, "{number}");
-    }
-    assert!(DbFailureKind::from_mysql_code(1205).is_retryable());
-    assert_eq!(
-        DbFailureKind::from_sqlstate("08S01"),
-        DbFailureKind::ConnectionClosed
-    );
-}
-
-#[test]
-fn sqlite_codes_classify_missing_objects_and_lock_contention() {
-    for (code, message, kind) in [
-        ("1", "no such table: users", DbFailureKind::UndefinedTable),
-        ("1", "no such column: nme", DbFailureKind::UndefinedColumn),
-        (
-            "1",
-            "table users has no column named nme",
-            DbFailureKind::UndefinedColumn,
-        ),
-        (
-            "1",
-            "near \"SELEC\": syntax error",
-            DbFailureKind::SyntaxError,
-        ),
-        ("5", "database is locked", DbFailureKind::LockNotAvailable),
-        ("517", "database is locked", DbFailureKind::LockNotAvailable),
-        (
-            "6",
-            "database table is locked",
-            DbFailureKind::LockNotAvailable,
-        ),
-        ("1", "some other failure", DbFailureKind::Unclassified),
-    ] {
-        assert_eq!(
-            DbFailureKind::from_sqlite_code(code, message),
-            kind,
-            "{code} {message}"
-        );
-    }
-    assert!(DbFailureKind::from_sqlite_code("5", "database is locked").is_retryable());
+    assert!(DbFailureKind::LockNotAvailable.is_retryable());
+    assert!(DbFailureKind::Deadlock.is_retryable());
 }

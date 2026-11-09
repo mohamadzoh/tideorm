@@ -2,9 +2,13 @@ use super::*;
 
 /// A group of conditions combined with a logical operator
 #[derive(Debug, Clone)]
+#[must_use = "an OR group filters nothing until a query takes it"]
 pub struct OrGroup {
+    /// The group's own conditions.
     pub conditions: Vec<WhereCondition>,
+    /// Groups nested in this one, each one member of it.
     pub nested_groups: Vec<OrGroup>,
+    /// How the members combine.
     pub combine_with: LogicalOp,
 }
 
@@ -17,7 +21,6 @@ impl crate::columns::ConditionOwner for OrGroup {
 }
 
 impl OrGroup {
-    #[must_use]
     ///
     /// ```
     /// use tideorm::prelude::*;
@@ -40,7 +43,6 @@ impl OrGroup {
         }
     }
 
-    #[must_use]
     ///
     /// ```
     /// use tideorm::prelude::*;
@@ -55,7 +57,6 @@ impl OrGroup {
         self
     }
 
-    #[must_use]
     ///
     /// ```
     /// use tideorm::prelude::*;

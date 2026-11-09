@@ -68,9 +68,7 @@ async fn joined_wildcards_decrypt_and_reject_distinct() {
             )
         };
         let columns = ["id", "group_id", "secret", "plain"].map(|c| format!("{qualifier}.{c}"));
-        let explicit = query
-            .clone()
-            .select(columns.iter().map(String::as_str).collect());
+        let explicit = query.clone().select(&columns);
         let expected = explicit.clone().get_json().await.unwrap();
         encrypted_error(explicit.distinct().get_json().await);
         for wildcard in [

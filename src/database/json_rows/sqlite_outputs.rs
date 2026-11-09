@@ -1,12 +1,23 @@
 //! Which result columns of a SQLite statement hold JSON documents.
 //!
-//! SQLite hands a JSON function's result over as plain text: the JSON subtype
-//! it carries inside a statement never reaches the client. So the statement
-//! is read instead, lexically, for select items that are such a call, and so
-//! are the definitions of the views it reads, which SQLite treats as named
-//! subqueries.
+//! SQLite hands a JSON function's result over as text. Its JSON subtype
+//! reaches the result row only when the call is computed in that row: a
+//! sorter (`ORDER BY` another column), a view, a `FROM` subquery, a CTE, a
+//! `UNION` or `RETURNING` drops it (measured on SQLite 3.51). So the
+//! statement is read instead, lexically, for select items that are such a
+//! call, and so are the definitions of the views it reads, which SQLite
+//! treats as named subqueries.
 
 use crate::internal::sql_lexer::{Kind, Token, sqlite_significant};
+
+mod tokens;
+mod views;
+
+use tokens::{
+    closing_parenthesis, column_list, ends_select_item, is_symbol, is_word, json_expression_end,
+    top_level, unquoted,
+};
+use views::{Views, view_sources};
 
 /// Whether each result column holds a JSON document, and whether that is
 /// unknown because the column is read from a source the statement does not
@@ -106,70 +117,6 @@ pub(super) struct CatalogObject {
     pub sql: Option<String>,
 }
 
-struct ViewSource<'a> {
-    object: &'a CatalogObject,
-    outputs: Vec<Output>,
-}
-
-#[derive(Clone, Copy)]
-struct Views<'a> {
-    sources: &'a [ViewSource<'a>],
-    /// Persistent views resolve unqualified names in their own schema. TEMP
-    /// views and top-level queries use the connection's normal lookup order.
-    schema: Option<&'a str>,
-}
-
-impl Views<'_> {
-    fn lookup(self, schema: Option<&str>, name: &str) -> Option<Vec<Output>> {
-        let schema = schema.or(self.schema);
-        self.sources
-            .iter()
-            .find(|source| {
-                source.object.name.eq_ignore_ascii_case(name)
-                    && schema.is_none_or(|schema| source.object.schema.eq_ignore_ascii_case(schema))
-            })
-            .map(|source| source.outputs.clone())
-    }
-}
-
-/// Resolve dependent views by their catalog identity, never by bare name.
-fn view_sources(catalog: &[CatalogObject]) -> Vec<ViewSource<'_>> {
-    let lexed: Vec<Vec<Token<'_>>> = catalog
-        .iter()
-        .map(|object| sqlite_significant(object.sql.as_deref().unwrap_or("")).collect())
-        .collect();
-    let mut sources: Vec<_> = catalog
-        .iter()
-        .map(|object| ViewSource {
-            object,
-            outputs: Vec::new(),
-        })
-        .collect();
-    for _ in 0..catalog.len() {
-        let mut changed = false;
-        for (index, (object, tokens)) in catalog.iter().zip(&lexed).enumerate() {
-            let Some((names, body)) = view_definition(tokens) else {
-                continue;
-            };
-            let views = Views {
-                sources: &sources,
-                schema: (!object.schema.eq_ignore_ascii_case("temp"))
-                    .then_some(object.schema.as_str()),
-            };
-            let outputs = named_outputs(
-                query_outputs(object.sql.as_deref().unwrap_or(""), body, &[], views),
-                &names,
-            );
-            changed |= sources[index].outputs != outputs;
-            sources[index].outputs = outputs;
-        }
-        if !changed {
-            break;
-        }
-    }
-    sources
-}
-
 /// Resolve CTEs that may read each other into `sources`: each pass can
 /// resolve one more link of a chain, and
 /// a cycle stays unknown rather than taking an unrelated declaration's
@@ -200,42 +147,6 @@ fn resolve_definitions<D>(
     }
 }
 
-/// The column names and the query of a `CREATE [TEMP] VIEW [IF NOT EXISTS]
-/// [schema.]name [(columns)] AS query` statement.
-fn view_definition<'t, 'a>(tokens: &'t [Token<'a>]) -> Option<(Vec<String>, &'t [Token<'a>])> {
-    let mut at = usize::from(is_word(tokens, 0, &["create"]));
-    at += usize::from(is_word(tokens, at, &["temp", "temporary"]));
-    if !is_word(tokens, at, &["view"]) {
-        return None;
-    }
-    at += 1;
-    if is_word(tokens, at, &["if"]) {
-        at += 3;
-    }
-    at += if is_symbol(tokens, at + 1, &["."]) {
-        3
-    } else {
-        1
-    };
-    let (names, at) = column_list(tokens, at)?;
-    is_word(tokens, at, &["as"]).then(|| (names, &tokens[at + 1..]))
-}
-
-/// The names of the parenthesized column list at `at`, none when there is no
-/// list, and where the statement goes on after it.
-fn column_list(tokens: &[Token<'_>], at: usize) -> Option<(Vec<String>, usize)> {
-    if !is_symbol(tokens, at, &["("]) {
-        return Some((Vec::new(), at));
-    }
-    let close = closing_parenthesis(tokens, at)?;
-    let names = tokens[at + 1..close]
-        .iter()
-        .filter(|token| token.text != ",")
-        .map(unquoted)
-        .collect();
-    Some((names, close + 1))
-}
-
 /// `outputs` under the column names a CTE or view gives them, if any. Without
 /// the table schema, a wildcard's width is unknown, so a later expression is
 /// not bound to an earlier alias then.
@@ -256,22 +167,6 @@ fn named_outputs(mut outputs: Vec<Output>, names: &[String]) -> Vec<Output> {
         output.name.clone_from(name);
     }
     outputs
-}
-
-/// Indices outside parentheses, including each opening parenthesis. Quoted
-/// tokens stay intact because all inspection uses the shared SQL lexer.
-fn top_level<'a>(tokens: &'a [Token<'a>]) -> impl Iterator<Item = usize> + 'a {
-    let mut at = 0;
-    std::iter::from_fn(move || {
-        let current = at;
-        tokens.get(current)?;
-        at = if is_symbol(tokens, current, &["("]) {
-            closing_parenthesis(tokens, current).map_or(tokens.len(), |close| close + 1)
-        } else {
-            current + 1
-        };
-        Some(current)
-    })
 }
 
 fn query_outputs(
@@ -567,170 +462,6 @@ fn select_item(
         }
     }
     vec![Output::known(name, false)]
-}
-
-/// Where a JSON expression starting at `start` ends: the index of the token
-/// after it. That is a call of one of SQLite's functions returning a document,
-/// alone or in parentheses, or any operand read with `->` (not `->>`), once or
-/// more.
-fn json_expression_end(tokens: &[Token<'_>], start: usize) -> Option<usize> {
-    let (mut at, mut document) = json_operand(tokens, start)?;
-    while is_symbol(tokens, at, &["-"])
-        && is_symbol(tokens, at + 1, &[">"])
-        && !is_symbol(tokens, at + 2, &[">"])
-    {
-        at = json_path_end(tokens, at + 2)?;
-        document = true;
-    }
-    document.then_some(at)
-}
-
-/// Where the operand of `->` starting at `start` ends, and whether it is a
-/// document by itself: a call of a function returning one, or such a call in
-/// parentheses. A column, a literal, a parameter and any other call or
-/// parenthesized expression are documents only once `->` reads them.
-fn json_operand(tokens: &[Token<'_>], start: usize) -> Option<(usize, bool)> {
-    let first = tokens.get(start)?;
-    if is_symbol(tokens, start, &["("]) {
-        let close = closing_parenthesis(tokens, start)?;
-        let inner = &tokens[start + 1..close];
-        return Some((
-            close + 1,
-            json_expression_end(inner, 0) == Some(inner.len()),
-        ));
-    }
-    if first.kind == Kind::Word && is_symbol(tokens, start + 1, &["("]) {
-        let close = closing_parenthesis(tokens, start + 1)?;
-        let arguments = &tokens[start + 2..close];
-        let name = first.text.to_ascii_lowercase();
-        // Single-path json_extract returns SQL scalars as well as JSON
-        // containers. Its text cannot distinguish "[2]" from [2]. With
-        // multiple paths it always returns a JSON array instead.
-        let document = matches!(
-            name.as_str(),
-            "json"
-                | "json_array"
-                | "json_object"
-                | "json_quote"
-                | "json_group_array"
-                | "json_group_object"
-                | "json_insert"
-                | "json_replace"
-                | "json_set"
-                | "json_remove"
-                | "json_patch"
-                | "json_pretty"
-        ) || (name == "json_extract"
-            && top_level(arguments)
-                .filter(|&at| is_symbol(arguments, at, &[","]))
-                .count()
-                >= 2);
-        // An aggregate's `FILTER (WHERE ..)` and `OVER` its window.
-        let mut at = close + 1;
-        if is_word(tokens, at, &["filter"]) && is_symbol(tokens, at + 1, &["("]) {
-            at = closing_parenthesis(tokens, at + 1)? + 1;
-        }
-        if is_word(tokens, at, &["over"]) {
-            at = if is_symbol(tokens, at + 1, &["("]) {
-                closing_parenthesis(tokens, at + 1)? + 1
-            } else {
-                at + 2
-            };
-        }
-        return Some((at, document));
-    }
-    let reference = |at: usize| {
-        tokens
-            .get(at)
-            .is_some_and(|token| matches!(token.kind, Kind::Word | Kind::Identifier))
-    };
-    if matches!(first.kind, Kind::Literal | Kind::Parameter) {
-        return Some((start + 1, false));
-    }
-    if !reference(start) {
-        return None;
-    }
-    let mut at = start + 1;
-    while is_symbol(tokens, at, &["."]) && reference(at + 1) {
-        at += 2;
-    }
-    Some((at, false))
-}
-
-/// Where the path of `->` starting at `at` ends: a string, a parameter (`?`,
-/// `?1`, `:name`) or an array index.
-fn json_path_end(tokens: &[Token<'_>], at: usize) -> Option<usize> {
-    let path = tokens.get(at)?;
-    let digit = |token: &Token<'_>| {
-        token.kind == Kind::Symbol && token.text.bytes().all(|byte| byte.is_ascii_digit())
-    };
-    let digits = |from: usize| {
-        tokens.get(from..).map_or(0, |rest| {
-            rest.iter().take_while(|token| digit(token)).count()
-        })
-    };
-    match path.kind {
-        Kind::Literal | Kind::Parameter => Some(at + 1),
-        Kind::Symbol if path.text == "?" => Some(at + 1 + digits(at + 1)),
-        _ if digit(path) => Some(at + digits(at)),
-        _ => None,
-    }
-}
-
-/// The index of the `)` closing the `(` at `open`.
-fn closing_parenthesis(tokens: &[Token<'_>], open: usize) -> Option<usize> {
-    let mut depth = 0_usize;
-    for (at, token) in tokens.iter().enumerate().skip(open) {
-        if token.kind != Kind::Symbol {
-            continue;
-        }
-        match token.text {
-            "(" => depth += 1,
-            ")" => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    return Some(at);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Whether what is at `at` can follow a whole select item.
-fn ends_select_item(tokens: &[Token<'_>], at: usize) -> bool {
-    at == tokens.len()
-        || is_symbol(tokens, at, &[",", ")", ";"])
-        || is_word(
-            tokens,
-            at,
-            &[
-                "from",
-                "where",
-                "group",
-                "having",
-                "window",
-                "order",
-                "limit",
-                "union",
-                "intersect",
-                "except",
-            ],
-        )
-}
-
-fn is_word(tokens: &[Token<'_>], at: usize, words: &[&str]) -> bool {
-    tokens.get(at).is_some_and(|token| token.is_word(words))
-}
-
-fn is_symbol(tokens: &[Token<'_>], at: usize, symbols: &[&str]) -> bool {
-    tokens.get(at).is_some_and(|token| token.is_symbol(symbols))
-}
-
-/// The name `token` gives a column; see [`Token::unquoted`].
-fn unquoted(token: &Token<'_>) -> String {
-    token.unquoted().unwrap_or_default()
 }
 
 #[cfg(test)]

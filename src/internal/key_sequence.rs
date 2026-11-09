@@ -1,8 +1,7 @@
 //! Moving a PostgreSQL key sequence past auto-increment keys a write supplied.
 
 use super::{
-    ActiveModelTrait, Backend, ConnectionTrait, Executor, InternalModel,
-    build_statement_with_values, translate_error,
+    ActiveModelTrait, ConnectionTrait, InternalModel, build_statement_with_values, translate_error,
 };
 use crate::config::DatabaseType;
 use crate::error::Result;
@@ -38,14 +37,13 @@ pub(crate) fn holds_auto_increment_key<M: crate::model::Model>(active: &M::Activ
 /// explicit key by themselves; a sequence does not, so the next key it
 /// numbered would collide with one of the rows.
 pub(crate) async fn advance_key_sequence<M: crate::model::Model>(
-    executor: &Executor<'_>,
+    executor: &crate::orm::DatabaseExecutor<'_>,
     keys: impl IntoIterator<Item = M::PrimaryKey>,
 ) -> Result<()> {
     let [column] = M::primary_key_names() else {
         return Ok(());
     };
-    if !M::primary_key_auto_increment()
-        || Backend::from(executor.get_database_backend()) != Backend::Postgres
+    if !M::primary_key_auto_increment() || executor.get_database_backend() != DatabaseType::Postgres
     {
         return Ok(());
     }
@@ -58,7 +56,7 @@ pub(crate) async fn advance_key_sequence<M: crate::model::Model>(
     };
     let table = crate::query::db_sql::quote_table::<M>(DatabaseType::Postgres);
     let statement = build_statement_with_values(
-        Backend::Postgres,
+        DatabaseType::Postgres,
         ADVANCE,
         vec![largest.into(), table.into(), (*column).into()],
     );

@@ -70,6 +70,21 @@ impl ProfiledQuery {
         self.cached = true;
         self
     }
+
+    /// The [`operation`](Self::operation) label as a [`QueryOperation`];
+    /// `Unknown` for a label that names none.
+    pub fn operation_kind(&self) -> QueryOperation {
+        [
+            QueryOperation::Select,
+            QueryOperation::Insert,
+            QueryOperation::Update,
+            QueryOperation::Delete,
+            QueryOperation::Transaction,
+        ]
+        .into_iter()
+        .find(|operation| self.operation.eq_ignore_ascii_case(operation.as_str()))
+        .unwrap_or(QueryOperation::Unknown)
+    }
 }
 
 impl Profiler {
@@ -190,19 +205,31 @@ impl ProfileReport {
             .collect()
     }
 
-    /// Return simple heuristics that highlight likely hotspots in the report.
+    /// Return simple heuristics that highlight likely hotspots in the report,
+    /// counting a query slow at [`GlobalProfiler::slow_threshold`].
     pub fn suggestions(&self) -> Vec<String> {
+        self.suggestions_with(GlobalProfiler::slow_threshold())
+    }
+
+    /// [`suggestions`](Self::suggestions), counting a query slow at
+    /// `slow_threshold`. The same report gives the same list, in the same
+    /// order: the most-read table first.
+    pub fn suggestions_with(&self, slow_threshold: Duration) -> Vec<String> {
         let mut suggestions = Vec::new();
 
         let mut reads = HashMap::new();
         for query in &self.queries {
             if !query.cached
-                && query.operation.eq_ignore_ascii_case("SELECT")
+                && query.operation_kind() == QueryOperation::Select
                 && let Some(table) = &query.table
             {
                 *reads.entry(table).or_insert(0_u64) += 1;
             }
         }
+        let mut reads: Vec<_> = reads.into_iter().collect();
+        reads.sort_unstable_by(|(a_table, a_count), (b_table, b_count)| {
+            b_count.cmp(a_count).then_with(|| a_table.cmp(b_table))
+        });
         for (table, count) in reads {
             if count > 10 {
                 suggestions.push(format!(
@@ -212,14 +239,12 @@ impl ProfileReport {
             }
         }
 
-        let threshold = GlobalProfiler::slow_threshold();
-        let slow_count = self.queries_slower_than(threshold).len();
+        let slow_count = self.queries_slower_than(slow_threshold).len();
 
         if slow_count > 0 {
             suggestions.push(format!(
-                "{} slow queries detected (>= {}ms). Review these queries and consider adding indexes.",
-                slow_count,
-                threshold.as_millis()
+                "{} slow queries detected (>= {:?}). Review these queries and consider adding indexes.",
+                slow_count, slow_threshold
             ));
         }
 

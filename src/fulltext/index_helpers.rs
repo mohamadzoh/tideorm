@@ -35,12 +35,17 @@ pub enum PgFullTextIndexType {
 }
 
 impl FullTextIndex {
-    /// Create a new full-text index
-    pub fn new(name: impl Into<String>, table: impl Into<String>, columns: Vec<String>) -> Self {
+    /// Create a full-text index over `columns`, given as names or typed
+    /// columns like a search's.
+    pub fn new(
+        name: impl Into<String>,
+        table: impl Into<String>,
+        columns: impl crate::columns::IntoColumnNames,
+    ) -> Self {
         Self {
             name: name.into(),
             table: table.into(),
-            columns,
+            columns: crate::columns::column_names(&columns),
             config: FullTextIndexConfig::default(),
         }
     }
@@ -64,39 +69,31 @@ impl FullTextIndex {
             PgFullTextIndexType::GiST => "GiST",
         };
 
-        let mut params = Vec::new();
-        SqlBuilder::new(DatabaseType::Postgres, &mut params)
-            .raw("CREATE INDEX ")
-            .ident(&self.name)
-            .raw(" ON ")
-            .table(&self.table)
-            .raw(" USING ")
-            .raw(index_type)
-            .raw(" ((")
-            .raw(&pg_tsvector(self.config.language.as_deref(), &self.columns))
-            .raw("))")
-            .into_sql()
+        format!(
+            "CREATE INDEX {} ON {} USING {index_type} (({}))",
+            quote_ident(DatabaseType::Postgres, &self.name),
+            crate::query::db_sql::format_column(DatabaseType::Postgres, &self.table),
+            pg_tsvector(self.config.language.as_deref(), &self.columns)
+        )
     }
 
     /// Generate CREATE FULLTEXT INDEX statement for MySQL
     pub fn to_mysql_sql(&self) -> String {
-        let mut params = Vec::new();
-        let mut builder = SqlBuilder::new(DatabaseType::MySQL, &mut params)
-            .raw("CREATE FULLTEXT INDEX ")
-            .ident(&self.name)
-            .raw(" ON ")
-            .table(&self.table)
-            .raw("(")
-            .raw(&column_list(DatabaseType::MySQL, &self.columns, ""))
-            .raw(")");
+        let mut sql = format!(
+            "CREATE FULLTEXT INDEX {} ON {}({})",
+            quote_ident(DatabaseType::MySQL, &self.name),
+            crate::query::db_sql::format_column(DatabaseType::MySQL, &self.table),
+            column_list(DatabaseType::MySQL, &self.columns, "")
+        );
         // `WITH PARSER` takes an identifier, so it goes through the same quoting
         // path as every other identifier in this module rather than being pasted
         // in raw. A name that is not a real parser plugin then fails loudly on
         // the server instead of silently extending the statement.
         if let Some(parser) = &self.config.mysql_parser {
-            builder = builder.raw(" WITH PARSER ").ident(parser);
+            sql.push_str(" WITH PARSER ");
+            sql.push_str(&quote_ident(DatabaseType::MySQL, parser));
         }
-        builder.into_sql()
+        sql
     }
 
     /// Generate CREATE VIRTUAL TABLE statement for SQLite FTS5, the statement
@@ -106,6 +103,8 @@ impl FullTextIndex {
     /// A declared `rowid` column is supported only when it aliases SQLite's
     /// row identity (`INTEGER PRIMARY KEY`). Other shadowing columns are
     /// rejected before index installation or rebuild, and before searches.
+    /// The checks raise their errors through `tideorm_raise`, a function
+    /// TideORM's SQLite connections define, so run the statements through one.
     ///
     /// The index follows the table's rowid. SQLite keeps rowids through a
     /// `VACUUM` only for a table with an `INTEGER PRIMARY KEY`; after
@@ -124,32 +123,21 @@ impl FullTextIndex {
     /// created in that database. Its content table and its triggers' tables
     /// are named without it, as FTS5 and SQLite's triggers require.
     pub fn to_sqlite_sql(&self) -> Vec<String> {
-        let mut params = Vec::new();
         let (schema, table) = self.sqlite_table_parts();
-        let rowid_guard = sqlite_rowid_guard(table, schema);
+        let rowid_guard = sqlite_rowid_guard(table, schema, 1);
         let fts_table = format!("{table}_fts");
+        let fts_ident = quote_ident(DatabaseType::SQLite, &fts_table);
+        let fts_qualified = self.sqlite_qualified(&fts_table);
         let columns = column_list(DatabaseType::SQLite, &self.columns, "");
 
-        let insert_new = SqlBuilder::new(DatabaseType::SQLite, &mut params)
-            .raw("INSERT INTO ")
-            .ident(&fts_table)
-            .raw("(rowid, ")
-            .raw(&columns)
-            .raw(") VALUES (new.rowid, ")
-            .raw(&column_list(DatabaseType::SQLite, &self.columns, "new."))
-            .raw(");")
-            .into_sql();
-        let delete_old = SqlBuilder::new(DatabaseType::SQLite, &mut params)
-            .raw("INSERT INTO ")
-            .ident(&fts_table)
-            .raw("(")
-            .ident(&fts_table)
-            .raw(", rowid, ")
-            .raw(&columns)
-            .raw(") VALUES('delete', old.rowid, ")
-            .raw(&column_list(DatabaseType::SQLite, &self.columns, "old."))
-            .raw(");")
-            .into_sql();
+        let insert_new = format!(
+            "INSERT INTO {fts_ident}(rowid, {columns}) VALUES (new.rowid, {});",
+            column_list(DatabaseType::SQLite, &self.columns, "new.")
+        );
+        let delete_old = format!(
+            "INSERT INTO {fts_ident}({fts_ident}, rowid, {columns}) VALUES('delete', old.rowid, {});",
+            column_list(DatabaseType::SQLite, &self.columns, "old.")
+        );
 
         let update = format!("{delete_old} {insert_new}");
         let conflicts = [
@@ -163,31 +151,22 @@ impl FullTextIndex {
                 "SELECT {rowid_guard}, CASE WHEN {conflicts} THEN {} ELSE 1 END",
                 sqlite_fail("TideORM full-text trigger name conflict")
             ),
-            SqlBuilder::new(DatabaseType::SQLite, &mut params)
-                .raw("CREATE VIRTUAL TABLE IF NOT EXISTS ")
-                .raw(&self.sqlite_qualified(&fts_table))
-                .raw(" USING fts5(")
-                .raw(&columns)
-                .raw(", content=")
-                .ident(table)
-                .raw(", content_rowid=")
-                .ident("rowid")
-                .raw(")")
-                .into_sql(),
+            format!(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS {fts_qualified} USING fts5({columns}, content={}, content_rowid={})",
+                quote_ident(DatabaseType::SQLite, table),
+                quote_ident(DatabaseType::SQLite, "rowid")
+            ),
             // An index already there, which the statement above kept, has to
             // hold these columns. They are qualified: SQLite reads an unknown
             // bare `"column"` as a string.
-            SqlBuilder::new(DatabaseType::SQLite, &mut params)
-                .raw("SELECT ")
-                .raw(&column_list(
+            format!(
+                "SELECT {} FROM {fts_qualified} LIMIT 0",
+                column_list(
                     DatabaseType::SQLite,
                     &self.columns,
-                    &format!("{}.", self.sqlite_qualified(&fts_table)),
-                ))
-                .raw(" FROM ")
-                .raw(&self.sqlite_qualified(&fts_table))
-                .raw(" LIMIT 0")
-                .into_sql(),
+                    &format!("{fts_qualified}.")
+                )
+            ),
             self.sqlite_trigger("ai", "INSERT", &insert_new),
             self.sqlite_trigger("ad", "DELETE", &delete_old),
             self.sqlite_trigger("au", "UPDATE", &update),
@@ -202,17 +181,13 @@ impl FullTextIndex {
     /// `INTEGER PRIMARY KEY` calls for (see [`to_sqlite_sql`](Self::to_sqlite_sql)).
     pub fn sqlite_rebuild_sql(&self) -> String {
         let (schema, table) = self.sqlite_table_parts();
-        let rowid_guard = sqlite_rowid_guard(table, schema);
+        let rowid_guard = sqlite_rowid_guard(table, schema, 1);
         let fts_table = format!("{table}_fts");
-        SqlBuilder::new(DatabaseType::SQLite, &mut Vec::new())
-            .raw("INSERT INTO ")
-            .raw(&self.sqlite_qualified(&fts_table))
-            .raw("(")
-            .ident(&fts_table)
-            .raw(") SELECT CASE WHEN ")
-            .raw(&rowid_guard)
-            .raw(" THEN 'rebuild' END")
-            .into_sql()
+        format!(
+            "INSERT INTO {}({}) SELECT CASE WHEN {rowid_guard} THEN 'rebuild' END",
+            self.sqlite_qualified(&fts_table),
+            quote_ident(DatabaseType::SQLite, &fts_table)
+        )
     }
 
     /// Refuse a user trigger (or an obsolete definition) under a maintenance
@@ -233,28 +208,22 @@ impl FullTextIndex {
             ),
             None => String::from("main.sqlite_schema"),
         };
-        let name = escape_sql_literal_for_db(DatabaseType::SQLite, &name);
-        let expected = escape_sql_literal_for_db(DatabaseType::SQLite, &expected);
+        let dialect = DatabaseType::SQLite.dialect();
+        let name = dialect.string_literal(&name);
+        let expected = dialect.string_literal(&expected);
         format!(
-            "EXISTS (SELECT 1 FROM {catalog} WHERE type = 'trigger' AND name = '{name}' COLLATE NOCASE AND sql IS NOT '{expected}')"
+            "EXISTS (SELECT 1 FROM {catalog} WHERE type = 'trigger' AND name = {name} COLLATE NOCASE AND sql IS NOT {expected})"
         )
     }
 
     /// Render the `AFTER <event>` trigger named `<table>_<suffix>`.
     fn sqlite_trigger(&self, suffix: &str, event: &str, body: &str) -> String {
         let (_, table) = self.sqlite_table_parts();
-        let mut params = Vec::new();
-        SqlBuilder::new(DatabaseType::SQLite, &mut params)
-            .raw("CREATE TRIGGER IF NOT EXISTS ")
-            .raw(&self.sqlite_qualified(&format!("{table}_{suffix}")))
-            .raw(" AFTER ")
-            .raw(event)
-            .raw(" ON ")
-            .ident(table)
-            .raw(" BEGIN ")
-            .raw(body)
-            .raw(" END")
-            .into_sql()
+        format!(
+            "CREATE TRIGGER IF NOT EXISTS {} AFTER {event} ON {} BEGIN {body} END",
+            self.sqlite_qualified(&format!("{table}_{suffix}")),
+            quote_ident(DatabaseType::SQLite, table)
+        )
     }
 
     /// The attached database the table is named in, if any, and its name.
@@ -271,11 +240,7 @@ impl FullTextIndex {
 
     /// `name` quoted, in the table's attached database when it has one.
     fn sqlite_qualified(&self, name: &str) -> String {
-        let quoted = quote_ident(DatabaseType::SQLite, name);
-        match self.sqlite_table_parts() {
-            (Some(schema), _) => format!("{}.{quoted}", quote_ident(DatabaseType::SQLite, schema)),
-            (None, _) => quoted,
-        }
+        quote_qualified(DatabaseType::SQLite, self.sqlite_table_parts().0, name)
     }
 
     /// Generate CREATE INDEX for the current database type
@@ -293,37 +258,35 @@ impl FullTextIndex {
 /// shadowed, so switching blindly to `_rowid_` or `oid` is not safe.
 /// An INTEGER PRIMARY KEY alias has no separate primary-key index; checking
 /// that distinguishes it from composite keys and INTEGER PRIMARY KEY DESC.
-pub(super) fn sqlite_rowid_guard(table: &str, schema: Option<&str>) -> String {
-    let table = escape_sql_literal_for_db(DatabaseType::SQLite, table);
+/// The expression is `otherwise` when the rowid is the row's identity.
+pub(super) fn sqlite_rowid_guard(table: &str, schema: Option<&str>, otherwise: i64) -> String {
+    let dialect = DatabaseType::SQLite.dialect();
+    let table = dialect.string_literal(table);
     let schema = schema
-        .map(|schema| {
-            format!(
-                ", '{}'",
-                escape_sql_literal_for_db(DatabaseType::SQLite, schema)
-            )
-        })
+        .map(|schema| format!(", {}", dialect.string_literal(schema)))
         .unwrap_or_default();
     format!(
-        "CASE WHEN EXISTS (SELECT 1 FROM pragma_table_xinfo('{table}'{schema}) AS c \
+        "CASE WHEN EXISTS (SELECT 1 FROM pragma_table_xinfo({table}{schema}) AS c \
          WHERE c.name = 'rowid' COLLATE NOCASE AND NOT \
          (upper(c.type) = 'INTEGER' AND c.pk = 1 AND NOT EXISTS \
-         (SELECT 1 FROM pragma_index_list('{table}'{schema}) WHERE origin = 'pk'))) \
-         THEN {} ELSE 1 END",
+         (SELECT 1 FROM pragma_index_list({table}{schema}) WHERE origin = 'pk'))) \
+         THEN {} ELSE {otherwise} END",
         sqlite_fail("TideORM full-text rowid is shadowed by a non-identity column")
     )
 }
 
-/// An SQLite expression that fails, when evaluated, with an error naming
-/// `message`: `json_extract` reports a malformed path with the path in it.
+/// An SQLite expression that fails, when evaluated, with `message`, through
+/// the `tideorm_raise` function TideORM's SQLite connections define.
 /// `message` is a constant of ours, never caller text.
 fn sqlite_fail(message: &str) -> String {
-    format!("json_extract('{{}}', '{message}')")
+    format!("tideorm_raise('{message}')")
 }
 
 /// Highlight search terms in text
 ///
 /// Each whole word of `query` is marked, regardless of case. `text` is not
-/// HTML-escaped; [`HighlightConfig`] escapes it around the tags it inserts.
+/// HTML-escaped: for text bound for a page, use
+/// [`HighlightConfig::highlight`], which escapes it around the tags.
 pub fn highlight_text(text: &str, query: &str, start_tag: &str, end_tag: &str) -> String {
     match term_pattern(query) {
         Some(pattern) => mark_matches(text, &pattern, start_tag, end_tag, false).0,
@@ -445,7 +408,8 @@ pub(crate) fn snippet_around_first_match(
 /// The `fragment_words` words either side of the first whole-word match of
 /// `query`, with each whole-word match between the tags as [`highlight_text`]
 /// marks it; the first words of `text` when nothing matches. `text` is not
-/// HTML-escaped.
+/// HTML-escaped: for text bound for a page, use
+/// [`HighlightConfig::highlight`], which escapes it around the tags.
 pub fn generate_snippet(
     text: &str,
     query: &str,
@@ -461,7 +425,8 @@ pub fn generate_snippet(
     }
 }
 
-/// PostgreSQL-specific highlighting using ts_headline
+/// PostgreSQL-specific highlighting using `ts_headline`: the expression,
+/// and the language, search text and options it binds as `$1` to `$3`.
 ///
 /// `start_tag` and `end_tag` end up inside `ts_headline`'s comma-separated
 /// option string, so they are double-quoted there (with embedded `"` doubled)
@@ -473,27 +438,19 @@ pub fn pg_headline_sql(
     language: &str,
     start_tag: &str,
     end_tag: &str,
-) -> String {
-    let column = format_identifier_reference(DatabaseType::Postgres, column)
-        .unwrap_or_else(|| quote_ident(DatabaseType::Postgres, column));
+) -> (String, Vec<Value>) {
+    let column = crate::query::db_sql::format_column(DatabaseType::Postgres, column);
     let options = format!(
         "StartSel={}, StopSel={}, MaxWords=35, MinWords=15",
         double_quoted(start_tag),
         double_quoted(end_tag),
     );
-
-    let mut params = Vec::new();
-    SqlBuilder::new(DatabaseType::Postgres, &mut params)
-        .raw("ts_headline('")
-        .raw(&escape_sql_literal_for_db(DatabaseType::Postgres, language))
-        .raw("', ")
-        .raw(&column)
-        .raw(", plainto_tsquery('")
-        .raw(&escape_sql_literal_for_db(DatabaseType::Postgres, language))
-        .raw("', '")
-        .raw(&escape_sql_literal_for_db(DatabaseType::Postgres, query))
-        .raw("'), '")
-        .raw(&escape_sql_literal_for_db(DatabaseType::Postgres, &options))
-        .raw("')")
-        .into_sql()
+    (
+        format!("ts_headline($1::regconfig, {column}, plainto_tsquery($1::regconfig, $2), $3)"),
+        vec![
+            Value::from(language),
+            Value::from(query),
+            Value::from(options),
+        ],
+    )
 }

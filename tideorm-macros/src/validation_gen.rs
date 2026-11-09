@@ -19,7 +19,7 @@ pub(crate) fn generate_validation_impl(ctx: &BuildContext) -> TokenStream2 {
     let validation_checks = ctx.validation_rules.iter().map(|(field_ident, rules)| {
         let field_name = unraw_ident(field_ident);
         quote! {
-            errors.__check(#field_name, &self.#field_ident, &[#(#rules),*]);
+            errors.check(#field_name, &self.#field_ident, &[#(#rules),*]);
         }
     });
 

@@ -1025,16 +1025,15 @@ async fn transactions_commit_and_roll_back() {
         return;
     }
 
-    TestUser::transaction(|_tx| {
-        Box::pin(async move {
+    tideorm::db()
+        .transaction(async move |_tx| {
             let saved = user("tx_commit@example.com", "Transaction User", 25, true)
                 .save()
                 .await?;
             Ok(saved.id)
         })
-    })
-    .await
-    .expect("Transaction should succeed");
+        .await
+        .expect("Transaction should succeed");
     let committed = TestUser::query()
         .where_eq("email", "tx_commit@example.com")
         .first()
@@ -1044,17 +1043,15 @@ async fn transactions_commit_and_roll_back() {
 
     let db = tideorm::require_db().expect("global database should be installed");
     let raw_insert: tideorm::Result<()> = db
-        .transaction(|tx| {
-            Box::pin(async move {
-                tx.connection()
-                    .execute_unprepared(
-                        "INSERT INTO test_users (email, name, age, active) \
+        .transaction(async move |tx| {
+            tx.connection()
+                .execute_unprepared(
+                    "INSERT INTO test_users (email, name, age, active) \
                          VALUES ('tx_test@example.com', 'TX User', 30, true)",
-                    )
-                    .await
-                    .map_err(Error::from)?;
-                Err(Error::query("Intentional rollback"))
-            })
+                )
+                .await
+                .map_err(Error::from)?;
+            Err(Error::query("Intentional rollback"))
         })
         .await;
     assert!(raw_insert.is_err(), "Transaction should fail");
@@ -1070,15 +1067,14 @@ async fn transactions_commit_and_roll_back() {
         .await
         .expect("Failed to save baseline transaction user");
 
-    let save_result: tideorm::Result<()> = TestUser::transaction(|_tx| {
-        Box::pin(async move {
+    let save_result: tideorm::Result<()> = tideorm::db()
+        .transaction(async move |_tx| {
             user("tx_model_save@example.com", "Transaction Save", 22, true)
                 .save()
                 .await?;
             Err(Error::query("Intentional rollback after save"))
         })
-    })
-    .await;
+        .await;
     assert!(save_result.is_err(), "save transaction should roll back");
     let rolled_back_save = TestUser::query()
         .where_eq("email", "tx_model_save@example.com")
@@ -1087,20 +1083,18 @@ async fn transactions_commit_and_roll_back() {
         .expect("Failed to query rolled back save");
     assert!(rolled_back_save.is_none(), "saved row should not persist");
 
-    let update_result: tideorm::Result<()> = TestUser::transaction(|_tx| {
-        let baseline = baseline.clone();
-        Box::pin(async move {
+    let update_result: tideorm::Result<()> = tideorm::db()
+        .transaction(async |_tx| {
             TestUser {
                 name: "Updated In Transaction".to_string(),
                 age: 99,
-                ..baseline
+                ..baseline.clone()
             }
             .update()
             .await?;
             Err(Error::query("Intentional rollback after update"))
         })
-    })
-    .await;
+        .await;
     assert!(
         update_result.is_err(),
         "update transaction should roll back"
@@ -1112,14 +1106,12 @@ async fn transactions_commit_and_roll_back() {
     assert_eq!(unchanged.name, "Baseline User");
     assert_eq!(unchanged.age, 41);
 
-    let delete_result: tideorm::Result<()> = TestUser::transaction(|_tx| {
-        let baseline = unchanged.clone();
-        Box::pin(async move {
-            baseline.delete().await?;
+    let delete_result: tideorm::Result<()> = tideorm::db()
+        .transaction(async |_tx| {
+            unchanged.clone().delete().await?;
             Err(Error::query("Intentional rollback after delete"))
         })
-    })
-    .await;
+        .await;
     assert!(
         delete_result.is_err(),
         "delete transaction should roll back"
@@ -1129,6 +1121,100 @@ async fn transactions_commit_and_roll_back() {
         .expect("Failed to reload baseline user after delete rollback")
         .expect("Baseline user should remain after delete rollback");
     assert_eq!(still_present.email, "tx_baseline@example.com");
+}
+
+/// `transaction_with` begins with its options: an isolation level and access
+/// mode on the server backends, where a read-only transaction refuses a write,
+/// and SQLite's `BEGIN` mode. A nested one, a savepoint, refuses any before it
+/// reaches the server, and the enclosing transaction goes on.
+#[tokio::test]
+async fn transactions_begin_with_their_options() {
+    if !setup().await {
+        return;
+    }
+    let sqlite = backend::DATABASE_TYPE == DatabaseType::SQLite;
+    let options = if sqlite {
+        TransactionOptions {
+            sqlite_transaction_mode: Some(SqliteTransactionMode::Immediate),
+            ..TransactionOptions::default()
+        }
+    } else {
+        TransactionOptions {
+            isolation_level: Some(IsolationLevel::Serializable),
+            access_mode: Some(AccessMode::ReadOnly),
+            ..TransactionOptions::default()
+        }
+    };
+    let db = tideorm::require_db().expect("global database should be installed");
+
+    // MySQL reports the open transaction's level and mode only through
+    // performance_schema, which MariaDB leaves off.
+    let probe = match backend::DATABASE_TYPE {
+        DatabaseType::Postgres => Some(
+            "SELECT current_setting('transaction_isolation') AS isolation, \
+             current_setting('transaction_read_only') AS access",
+        ),
+        DatabaseType::MySQL => Some(
+            "SELECT ISOLATION_LEVEL AS isolation, ACCESS_MODE AS access \
+             FROM performance_schema.events_transactions_current \
+             WHERE THREAD_ID = PS_CURRENT_THREAD_ID()",
+        ),
+        _ => None,
+    };
+    if let Some(probe) = probe {
+        let reader = db.clone();
+        let rows = db
+            .transaction_with(options, async move |_| reader.query_raw_json(probe).await)
+            .await
+            .expect("the probe runs in the transaction");
+        let expected = if backend::DATABASE_TYPE == DatabaseType::Postgres {
+            serde_json::json!({"isolation": "serializable", "access": "on"})
+        } else {
+            serde_json::json!({"isolation": "SERIALIZABLE", "access": "READ ONLY"})
+        };
+        match rows.first() {
+            Some(row) => assert_eq!(row, &expected),
+            None => println!("SKIP transaction options probe: performance_schema is off"),
+        }
+    }
+
+    let write = db
+        .transaction_with(options, async move |_| {
+            user("tx_options@example.com", "Options", 30, true)
+                .save()
+                .await?;
+            Ok(())
+        })
+        .await;
+    assert_eq!(write.is_ok(), sqlite, "a write in it: {write:?}");
+
+    let inner = db.clone();
+    db.transaction(async move |_| {
+        user("tx_outer_a@example.com", "Outer", 30, true)
+            .save()
+            .await?;
+        let nested = inner.transaction_with(options, async |_| Ok(())).await;
+        assert!(nested.is_err(), "a savepoint took options");
+        user("tx_outer_b@example.com", "Outer", 31, true)
+            .save()
+            .await?;
+        Ok(())
+    })
+    .await
+    .expect("the enclosing transaction goes on");
+    let saved = TestUser::query()
+        .where_in(
+            "email",
+            [
+                "tx_options@example.com",
+                "tx_outer_a@example.com",
+                "tx_outer_b@example.com",
+            ],
+        )
+        .count()
+        .await
+        .unwrap();
+    assert_eq!(saved, if sqlite { 3 } else { 2 });
 }
 
 #[tokio::test]
@@ -1201,8 +1287,8 @@ async fn explicit_keys_are_written_and_numbering_continues_past_them() {
 
     QueryLogger::clear_history();
     QueryLogger::global()
-        .set_level(LogLevel::Error)
-        .set_history_limit(100)
+        .level(LogLevel::Error)
+        .history_limit(100)
         .enable();
     let batch = TestUser::insert_all(
         [52, 50, 51]
@@ -1382,8 +1468,22 @@ async fn lag_and_lead_defaults_apply_only_past_the_partition_edge() {
     }
 
     let rows = WindowReading::query()
-        .lag("prev", "value", 1, Some("0"), "sensor", "id", Order::Asc)
-        .lead("next", "value", 1, Some("0"), "sensor", "id", Order::Asc)
+        .window(
+            WindowFunction::new(
+                WindowFunctionType::lag_with_raw_default("value", 1, "0"),
+                "prev",
+            )
+            .partition_by("sensor")
+            .order_by("id", Order::Asc),
+        )
+        .window(
+            WindowFunction::new(
+                WindowFunctionType::lead_with_raw_default("value", 1, "0"),
+                "next",
+            )
+            .partition_by("sensor")
+            .order_by("id", Order::Asc),
+        )
         .order_asc("id")
         .get_json()
         .await
@@ -2068,7 +2168,7 @@ async fn model_paginate_orders_by_primary_key() {
     }
 
     seed_users(10).await;
-    let first = TestUser::paginate(1, 5).await.expect("page 1 failed");
+    let first = TestUser::paginate(1, 5).await.expect("page 1 failed").items;
     // PostgreSQL moves a rewritten row to the end of its heap.
     TestUser::update_all()
         .set("name", "moved")
@@ -2076,7 +2176,7 @@ async fn model_paginate_orders_by_primary_key() {
         .execute()
         .await
         .expect("update failed");
-    let second = TestUser::paginate(2, 5).await.expect("page 2 failed");
+    let second = TestUser::paginate(2, 5).await.expect("page 2 failed").items;
     let ids: Vec<i64> = first.iter().chain(&second).map(|user| user.id).collect();
     assert_eq!(ids, (1..=10).collect::<Vec<_>>());
 }
@@ -2114,6 +2214,60 @@ async fn constraint_failures_keep_their_kind() {
         tideorm::error::DbFailureKind::CheckViolation
     );
     Database::execute("DROP TABLE constraint_children")
+        .await
+        .expect("drop failed");
+}
+
+/// Each driver classifies its own server's report of a failed statement.
+#[tokio::test]
+async fn statement_failures_keep_their_kind() {
+    if !setup().await {
+        return;
+    }
+
+    use tideorm::error::DbFailureKind;
+    Database::execute("DROP TABLE IF EXISTS failure_kinds")
+        .await
+        .expect("drop failed");
+    Database::execute(
+        "CREATE TABLE failure_kinds (id INTEGER PRIMARY KEY, code VARCHAR(2) NOT NULL)",
+    )
+    .await
+    .expect("create failed");
+    Database::execute("INSERT INTO failure_kinds (id, code) VALUES (1, 'a')")
+        .await
+        .expect("insert failed");
+    let mut cases = vec![
+        (
+            "INSERT INTO failure_kinds (id, code) VALUES (1, 'b')",
+            DbFailureKind::UniqueViolation,
+        ),
+        (
+            "INSERT INTO failure_kinds (id, code) VALUES (2, NULL)",
+            DbFailureKind::NotNullViolation,
+        ),
+        (
+            "SELECT missing_column FROM failure_kinds",
+            DbFailureKind::UndefinedColumn,
+        ),
+        (
+            "SELECT * FROM failure_kinds_missing",
+            DbFailureKind::UndefinedTable,
+        ),
+        ("SELEC 1", DbFailureKind::SyntaxError),
+    ];
+    // SQLite keeps a value of any length in any column.
+    if backend::DATABASE_TYPE != DatabaseType::SQLite {
+        cases.push((
+            "INSERT INTO failure_kinds (id, code) VALUES (2, 'abc')",
+            DbFailureKind::InvalidValue,
+        ));
+    }
+    for (sql, kind) in cases {
+        let error = Database::execute(sql).await.expect_err(sql);
+        assert_eq!(error.failure_kind(), kind, "{sql}: {error}");
+    }
+    Database::execute("DROP TABLE failure_kinds")
         .await
         .expect("drop failed");
 }
@@ -2215,21 +2369,19 @@ async fn a_locked_read_check_write_does_not_oversell() {
     // Two requests each take 3 of the 4 at once. Unlocked, both read 4 and
     // both succeed; locked, the second waits for the first to commit.
     let take = move || {
-        TestUser::transaction(move |_tx| {
-            Box::pin(async move {
-                let mut row = TestUser::query()
-                    .where_eq("id", id)
-                    .lock_for_update()
-                    .first_or_fail()
-                    .await?;
-                if row.age < 3 {
-                    return Ok(false);
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                row.age -= 3;
-                row.update().await?;
-                Ok(true)
-            })
+        tideorm::db().transaction(async move |_tx| {
+            let mut row = TestUser::query()
+                .where_eq("id", id)
+                .lock_for_update()
+                .first_or_fail()
+                .await?;
+            if row.age < 3 {
+                return Ok(false);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            row.age -= 3;
+            row.update().await?;
+            Ok(true)
         })
     };
     let (a, b) = tokio::join!(tokio::spawn(take()), tokio::spawn(take()));
@@ -2363,10 +2515,7 @@ async fn a_cached_read_does_not_outlive_a_commit() {
         .expect("save failed")
         .id;
     let previous = QueryCache::global().config();
-    QueryCache::init_global(CacheConfig {
-        enabled: true,
-        ..CacheConfig::default()
-    });
+    QueryCache::init_global(CacheConfig::default().enabled(true));
     let cached_name = move || async move {
         TestUser::query()
             .where_eq("id", id)
@@ -2379,15 +2528,13 @@ async fn a_cached_read_does_not_outlive_a_commit() {
     };
     assert_eq!(cached_name().await, "Before");
 
-    let writer = tokio::spawn(TestUser::transaction(move |_tx| {
-        Box::pin(async move {
-            let mut row = TestUser::find(id).await?.expect("row should exist");
-            row.name = "After".into();
-            row.update().await?;
-            // Meanwhile other requests read, and cache, the row as last committed.
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            Ok(())
-        })
+    let writer = tokio::spawn(tideorm::db().transaction(async move |_tx| {
+        let mut row = TestUser::find(id).await?.expect("row should exist");
+        row.name = "After".into();
+        row.update().await?;
+        // Meanwhile other requests read, and cache, the row as last committed.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        Ok(())
     }));
     tokio::time::sleep(Duration::from_millis(100)).await;
     let during = cached_name().await;
@@ -2702,7 +2849,7 @@ pub struct UnsignedKeyedRow {
 }
 
 /// A `u64` past `i64::MAX`, such as a key or filter read from a request,
-/// matches nothing instead of panicking the SQLite and PostgreSQL drivers.
+/// matches nothing instead of failing on the SQLite and PostgreSQL drivers.
 #[tokio::test]
 async fn unsigned_values_past_i64_max_match_nothing() {
     if !setup().await {
@@ -2710,8 +2857,6 @@ async fn unsigned_values_past_i64_max_match_nothing() {
     }
 
     seed_users(3).await;
-    // Empty: only MySQL's driver reads a `u64` column back, but every backend
-    // must look one up.
     fresh_table("unsigned_keyed_rows", |t| {
         t.big_integer("id").primary_key();
         t.string("label").not_null();
@@ -2739,38 +2884,75 @@ async fn unsigned_values_past_i64_max_match_nothing() {
         .expect_err("a page size past i64::MAX must be rejected");
     assert!(matches!(error, Error::Validation { .. }), "{error:?}");
     let page = TestUser::paginate(2, 2).await.expect("paginate failed");
-    assert_eq!(page.len(), 1);
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.total, 3);
 }
 
 #[tideorm::model(table = "unsigned_counters")]
 pub struct UnsignedCounter {
     #[tideorm(primary_key, auto_increment)]
     pub id: i64,
+    pub tiny: i8,
+    pub byte: u8,
+    pub short: u16,
+    pub word: u32,
     pub hits: u64,
 }
 
-/// Where the driver cannot read a `u64` back, the write is refused before it
-/// starts, instead of being stored and then reported as a failure.
+/// Every integer width round-trips at its extremes on every backend, through
+/// the columns migrations create for it; a `u64` past `i64::MAX` is stored
+/// only by MySQL's unsigned column and refused, with nothing written, where
+/// the column is signed.
 #[tokio::test]
-async fn an_integer_type_the_driver_cannot_read_back_is_refused_before_the_write() {
+async fn integers_of_every_width_round_trip() {
     if !setup().await {
         return;
     }
 
+    use tideorm::migration::ColumnType;
     fresh_table("unsigned_counters", |t| {
         t.id();
-        t.column("hits", tideorm::migration::ColumnType::BigUnsigned)
-            .not_null();
+        t.column("tiny", ColumnType::SmallInteger).not_null();
+        t.column("byte", ColumnType::TinyUnsigned).not_null();
+        t.column("short", ColumnType::SmallUnsigned).not_null();
+        t.column("word", ColumnType::Unsigned).not_null();
+        t.column("hits", ColumnType::BigUnsigned).not_null();
     })
     .await;
-    let counter = || UnsignedCounter {
+    let counter = |hits| UnsignedCounter {
         id: 0,
-        hits: u64::MAX,
+        tiny: i8::MIN,
+        byte: u8::MAX,
+        short: u16::MAX,
+        word: u32::MAX,
+        hits,
     };
+    let largest_signed = i64::MAX as u64;
 
-    let saved = counter().save().await;
-    let batch = UnsignedCounter::insert_all(vec![counter(), counter()]).await;
+    let saved = counter(largest_signed).save().await.expect("save failed");
+    let found = UnsignedCounter::find(saved.id)
+        .await
+        .expect("find failed")
+        .expect("the row was stored");
+    assert_eq!(
+        (found.tiny, found.byte, found.short, found.word, found.hits),
+        (i8::MIN, u8::MAX, u16::MAX, u32::MAX, largest_signed)
+    );
+    let batch = UnsignedCounter::insert_all(vec![counter(1), counter(2)])
+        .await
+        .expect("insert_all failed");
+    assert_eq!(batch.iter().map(|row| row.hits).collect::<Vec<_>>(), [1, 2]);
+    let matching = UnsignedCounter::query()
+        .where_eq("word", u32::MAX)
+        .where_eq("byte", u8::MAX)
+        .count()
+        .await
+        .expect("count failed");
+    assert_eq!(matching, 3);
+
+    let past_signed = counter(u64::MAX).save().await;
     let stored = UnsignedCounter::query()
+        .where_eq("hits", u64::MAX)
         .count()
         .await
         .expect("count failed");
@@ -2778,12 +2960,10 @@ async fn an_integer_type_the_driver_cannot_read_back_is_refused_before_the_write
         backend::DATABASE_TYPE,
         DatabaseType::MySQL | DatabaseType::MariaDB
     ) {
-        assert_eq!(saved.expect("MySQL stores a u64").hits, u64::MAX);
-        assert_eq!(batch.expect("MySQL stores u64s").len(), 2);
-        assert_eq!(stored, 3);
+        assert_eq!(past_signed.expect("MySQL stores a u64").hits, u64::MAX);
+        assert_eq!(stored, 1);
     } else {
-        assert!(matches!(saved, Err(Error::Conversion { .. })), "{saved:?}");
-        assert!(matches!(batch, Err(Error::Conversion { .. })), "{batch:?}");
+        assert!(past_signed.is_err(), "{past_signed:?}");
         assert_eq!(stored, 0, "nothing may be written");
     }
 }
@@ -2901,9 +3081,10 @@ async fn attach_stores_one_pivot_row_even_when_calls_race() {
 }
 
 /// `attach` fails when another unique key of the pivot keeps the pair out,
-/// here a label that may belong to one article only: the conflict clause
-/// that makes a lost race a no-op swallowed that conflict, and the attach
-/// reported success without linking anything. `sync` fails the same way.
+/// here a label that may belong to one article only, instead of reporting
+/// success without linking anything: neither PostgreSQL's and SQLite's
+/// conflict clause nor MySQL's refused duplicate may pass for a lost race.
+/// `sync` fails the same way.
 #[tokio::test]
 async fn attach_fails_when_another_unique_key_refuses_the_pair() {
     if !setup().await {
@@ -3376,8 +3557,8 @@ async fn the_query_logger_sees_typed_crud_and_logs_each_statement_once() {
 
     QueryLogger::clear_history();
     QueryLogger::global()
-        .set_level(LogLevel::Error)
-        .set_history_limit(100)
+        .level(LogLevel::Error)
+        .history_limit(100)
         .enable();
     let saved = user("logged@example.com", "Logged", 30, true)
         .save()
@@ -3394,7 +3575,7 @@ async fn the_query_logger_sees_typed_crud_and_logs_each_statement_once() {
         .expect("query failed");
     let builder = QueryLogger::history();
 
-    // The engine reports no unprepared statement, so `execute` logs its own.
+    // Sent unprepared, and reported by the engine all the same.
     QueryLogger::clear_history();
     Database::execute("UPDATE test_users SET age = age WHERE 1 = 0")
         .await
@@ -4125,7 +4306,7 @@ pub struct CodedTag {
 }
 
 /// `save()` over a trashed row of a model keyed by the client updates it: the
-/// probe for the row counts the trash, so it no longer inserts into a conflict.
+/// `UPDATE` by the key reaches the trash, so it does not insert into a conflict.
 #[tokio::test]
 async fn saving_a_trashed_row_of_a_client_keyed_model_updates_it() {
     if !setup().await {
@@ -4183,6 +4364,113 @@ async fn saving_a_trashed_row_of_a_client_keyed_model_updates_it() {
     );
 }
 
+/// Without callbacks, `save()` of a key the client sets sends the `UPDATE`
+/// first and inserts only when it matched no row: nothing asks for the row
+/// beforehand. A row saved unchanged is still a match, on MySQL too.
+#[tokio::test]
+async fn saving_a_client_keyed_model_updates_first_and_inserts_on_a_miss() {
+    use tideorm::logging::{LogLevel, QueryLogEntry, QueryLogger};
+
+    fn count(history: &[QueryLogEntry], verb: &str) -> usize {
+        history
+            .iter()
+            .filter(|entry| entry.sql.starts_with(verb))
+            .count()
+    }
+
+    if !setup().await {
+        return;
+    }
+    fresh_table("coded_tags", |t| {
+        t.string("code").primary_key();
+        t.string("name").not_null();
+        t.soft_deletes();
+    })
+    .await;
+
+    QueryLogger::clear_history();
+    QueryLogger::global()
+        .level(LogLevel::Error)
+        .history_limit(100)
+        .enable();
+    let saved = CodedTag {
+        code: "a".into(),
+        name: "first".into(),
+        deleted_at: None,
+    }
+    .save()
+    .await
+    .expect("saving a new key failed");
+    let inserted = QueryLogger::history();
+    QueryLogger::clear_history();
+    saved.save().await.expect("saving it unchanged failed");
+    let unchanged = QueryLogger::history();
+    QueryLogger::clear_history();
+    QueryLogger::disable();
+
+    for history in [&inserted, &unchanged] {
+        assert!(history[0].sql.starts_with("UPDATE"), "{history:#?}");
+        assert_eq!(count(history, "UPDATE"), 1, "{history:#?}");
+    }
+    assert_eq!(count(&inserted, "INSERT"), 1, "{inserted:#?}");
+    assert_eq!(count(&unchanged, "INSERT"), 0, "{unchanged:#?}");
+    assert_eq!(CodedTag::query().count().await.expect("count failed"), 1);
+}
+
+#[tideorm::model(table = "hooked_tags")]
+pub struct HookedTag {
+    #[tideorm(primary_key)]
+    pub code: String,
+    pub name: String,
+}
+
+static HOOKED_TAG_EVENTS: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+
+impl Callbacks for HookedTag {
+    fn before_create(&mut self) -> tideorm::Result<()> {
+        HOOKED_TAG_EVENTS.lock().unwrap().push("before_create");
+        Ok(())
+    }
+
+    fn before_update(&mut self) -> tideorm::Result<()> {
+        HOOKED_TAG_EVENTS.lock().unwrap().push("before_update");
+        Ok(())
+    }
+}
+
+/// With callbacks, `save()` of a key the client sets runs the hooks of the
+/// write it makes: a key no row holds runs the create hooks alone, and a
+/// stored one the update hooks alone.
+#[tokio::test]
+async fn saving_a_client_keyed_model_runs_the_hooks_of_its_write() {
+    if !setup().await {
+        return;
+    }
+    fresh_table("hooked_tags", |t| {
+        t.string("code").primary_key();
+        t.string("name").not_null();
+    })
+    .await;
+    HOOKED_TAG_EVENTS.lock().unwrap().clear();
+
+    let saved = HookedTag {
+        code: "a".into(),
+        name: "first".into(),
+    }
+    .save()
+    .await
+    .expect("saving a new key failed");
+    assert_eq!(
+        std::mem::take(&mut *HOOKED_TAG_EVENTS.lock().unwrap()),
+        ["before_create"]
+    );
+    saved.save().await.expect("saving the stored key failed");
+    assert_eq!(
+        std::mem::take(&mut *HOOKED_TAG_EVENTS.lock().unwrap()),
+        ["before_update"]
+    );
+}
+
 #[tideorm::model(table = "group_members")]
 pub struct GroupMember {
     #[tideorm(primary_key)]
@@ -4222,7 +4510,7 @@ async fn an_upsert_with_nothing_to_update_keeps_the_stored_row() {
     let email = "kept@example.com";
     for name in ["first", "second"] {
         TimestampUser::on_conflict(vec!["email"])
-            .update_columns(vec![])
+            .do_nothing()
             .insert(TimestampUser {
                 id: 0,
                 email: email.into(),
@@ -4595,7 +4883,7 @@ async fn where_has_over_the_same_table_keeps_each_level_apart() {
     assert_eq!(
         ids(
             TreeNode::query().where_has::<TreeNode>("parent_id", "id", |children| {
-                children.or_where(|group| group.where_eq(TreeNode::columns.name, "leaf"))
+                children.where_any(|group| group.where_eq(TreeNode::columns.name, "leaf"))
             })
         )
         .await,
@@ -4838,15 +5126,14 @@ async fn a_transaction_a_failed_statement_aborted_does_not_report_a_commit() {
         updated_at: chrono::Utc::now(),
     };
     let (first, duplicate) = (user("first"), user("duplicate"));
-    let result: tideorm::Result<()> = TimestampUser::transaction(|_tx| {
-        Box::pin(async move {
+    let result: tideorm::Result<()> = tideorm::db()
+        .transaction(async move |_tx| {
             TimestampUser::create(first).await?;
             let refused = TimestampUser::create(duplicate).await;
             assert!(refused.is_err(), "the email is unique");
             Ok(())
         })
-    })
-    .await;
+        .await;
     let stored = TimestampUser::query().count().await.expect("count failed");
 
     if backend::DATABASE_TYPE == DatabaseType::Postgres {
@@ -4860,11 +5147,12 @@ async fn a_transaction_a_failed_statement_aborted_does_not_report_a_commit() {
 }
 
 /// Wherever a nested transaction is cancelled, the enclosing one ends
-/// consistently: with the nested work (it had committed), with neither (it
-/// was starting, mid-statement or committing, which aborts the enclosing
-/// transaction rather than letting it run on in autocommit mode), or with the
-/// nested work alone rolled back. Never a panic, and never part of the nested
-/// work.
+/// consistently: with the nested work (it had committed), with the nested
+/// work alone rolled back (it was starting, idle or mid-statement), or with
+/// neither (it was committing or rolling back, which leaves the enclosing
+/// transaction unable to go on). SQLite's driver knows how such an end came
+/// out, so there the enclosing transaction goes on, with the nested work when
+/// its commit ran. Never a panic, and never part of the nested work.
 #[tokio::test]
 async fn a_nested_transaction_cancelled_anywhere_leaves_a_consistent_outcome() {
     use std::future::Future;
@@ -4890,41 +5178,37 @@ async fn a_nested_transaction_cancelled_anywhere_leaves_a_consistent_outcome() {
         db.exec_raw(&format!("DELETE FROM {table}")).await.unwrap();
         let (handle, name) = (db.clone(), table.clone());
         let result: tideorm::Result<bool> = db
-            .transaction(move |_| {
-                Box::pin(async move {
-                    handle
-                        .exec_raw(&format!("INSERT INTO {name} VALUES (1)"))
+            .transaction(async move |_| {
+                handle
+                    .exec_raw(&format!("INSERT INTO {name} VALUES (1)"))
+                    .await?;
+                let (inner_handle, inner_name) = (handle.clone(), name.clone());
+                let mut inner = Box::pin(handle.transaction(async move |_| {
+                    inner_handle
+                        .exec_raw(&format!("INSERT INTO {inner_name} VALUES (2)"))
                         .await?;
-                    let (inner_handle, inner_name) = (handle.clone(), name.clone());
-                    let mut inner = Box::pin(handle.transaction(move |_| {
-                        Box::pin(async move {
-                            inner_handle
-                                .exec_raw(&format!("INSERT INTO {inner_name} VALUES (2)"))
-                                .await?;
-                            tokio::task::yield_now().await;
-                            inner_handle
-                                .exec_raw(&format!("INSERT INTO {inner_name} VALUES (4)"))
-                                .await?;
-                            Ok(())
-                        })
-                    }));
-                    let mut finished = false;
-                    for _ in 0..polls {
-                        let polled =
-                            std::future::poll_fn(|cx| Poll::Ready(inner.as_mut().poll(cx))).await;
-                        if let Poll::Ready(outcome) = polled {
-                            outcome?;
-                            finished = true;
-                            break;
-                        }
-                        tokio::task::yield_now().await;
+                    tokio::task::yield_now().await;
+                    inner_handle
+                        .exec_raw(&format!("INSERT INTO {inner_name} VALUES (4)"))
+                        .await?;
+                    Ok(())
+                }));
+                let mut finished = false;
+                for _ in 0..polls {
+                    let polled =
+                        std::future::poll_fn(|cx| Poll::Ready(inner.as_mut().poll(cx))).await;
+                    if let Poll::Ready(outcome) = polled {
+                        outcome?;
+                        finished = true;
+                        break;
                     }
-                    drop(inner);
-                    handle
-                        .exec_raw(&format!("INSERT INTO {name} VALUES (3)"))
-                        .await?;
-                    Ok(finished)
-                })
+                    tokio::task::yield_now().await;
+                }
+                drop(inner);
+                handle
+                    .exec_raw(&format!("INSERT INTO {name} VALUES (3)"))
+                    .await?;
+                Ok(finished)
             })
             .await;
         let rows: Vec<i64> = db
@@ -4938,7 +5222,8 @@ async fn a_nested_transaction_cancelled_anywhere_leaves_a_consistent_outcome() {
             Ok(true) => assert_eq!(rows, [1, 2, 3, 4], "after {polls} polls"),
             Ok(false) => {
                 cancelled += 1;
-                assert_eq!(rows, [1, 3], "after {polls} polls");
+                let kept = backend::DATABASE_TYPE == DatabaseType::SQLite && rows == [1, 2, 3, 4];
+                assert!(kept || rows == [1, 3], "after {polls} polls: {rows:?}");
             }
             Err(error) => {
                 cancelled += 1;
@@ -5106,6 +5391,102 @@ async fn sync_adds_a_current_time_column_to_a_table_with_rows() {
 
     let rows = StampedEntry::query().get().await.expect("read failed");
     assert_eq!(rows.len(), 1);
+}
+
+/// A sync schema `name` with a `BIGINT` primary key `id`.
+fn sync_table(name: &str) -> tideorm::sync::ModelSchema {
+    use tideorm::sync::{ColumnDef, ModelSchema};
+    ModelSchema::new(name).column(ColumnDef::new("id", ColumnType::BigInteger).primary_key())
+}
+
+/// Drop `tables` in order and run `statements`.
+async fn fresh_tables(tables: &[&str], statements: &[&str]) {
+    let mut schema = Schema::new(backend::DATABASE_TYPE);
+    for table in tables {
+        schema
+            .drop_table_if_exists(table)
+            .await
+            .expect("drop failed");
+    }
+    for sql in statements {
+        Database::execute(sql).await.expect(sql);
+    }
+}
+
+/// `Recreate` drops a referencing table before the table it references,
+/// whatever order the models registered in. Dropping `sync_parents` first
+/// failed on MySQL and MariaDB, and on SQLite while `sync_children` had rows.
+#[tokio::test]
+async fn recreate_sync_drops_a_referencing_table_first() {
+    use tideorm::sync::{ColumnDef, SyncMode, SyncRegistry, sync_database_with};
+    if !setup().await {
+        return;
+    }
+    fresh_tables(
+        &["sync_children", "sync_parents"],
+        &[
+            "CREATE TABLE sync_parents (id BIGINT PRIMARY KEY)",
+            "CREATE TABLE sync_children (id BIGINT PRIMARY KEY, parent_id BIGINT, \
+             FOREIGN KEY (parent_id) REFERENCES sync_parents (id))",
+            "INSERT INTO sync_parents (id) VALUES (1)",
+            "INSERT INTO sync_children (id, parent_id) VALUES (1, 1)",
+        ],
+    )
+    .await;
+    let db = tideorm::require_db().expect("global database should be installed");
+    SyncRegistry::clear();
+    SyncRegistry::register_schema(sync_table("sync_parents"));
+    SyncRegistry::register_schema(
+        sync_table("sync_children").column(ColumnDef::new("parent_id", ColumnType::BigInteger)),
+    );
+    let result = sync_database_with(&db, SyncMode::Recreate).await;
+    SyncRegistry::clear();
+    result.expect("recreate failed");
+    for name in ["sync_parents", "sync_children"] {
+        let rows = db
+            .query_raw_json(&format!("SELECT count(*) AS n FROM {name}"))
+            .await
+            .expect("count failed");
+        assert_eq!(rows[0]["n"], 0, "{name}");
+    }
+}
+
+/// `Additive` refuses a `NOT NULL` column without a default on a table with
+/// rows, which it added as nullable, leaving rows the model cannot read; an
+/// empty table takes the column.
+#[tokio::test]
+async fn additive_sync_refuses_a_required_column_on_a_table_with_rows() {
+    use tideorm::sync::{ColumnDef, SyncMode, SyncRegistry, sync_database_with};
+    if !setup().await {
+        return;
+    }
+    fresh_tables(
+        &["sync_filled", "sync_empty"],
+        &[
+            "CREATE TABLE sync_filled (id BIGINT PRIMARY KEY)",
+            "INSERT INTO sync_filled (id) VALUES (1)",
+            "CREATE TABLE sync_empty (id BIGINT PRIMARY KEY)",
+        ],
+    )
+    .await;
+    let db = tideorm::require_db().expect("global database should be installed");
+    let code = || ColumnDef::new("code", ColumnType::Text).not_null();
+    SyncRegistry::clear();
+    SyncRegistry::register_schema(sync_table("sync_empty").column(code()));
+    SyncRegistry::register_schema(sync_table("sync_filled").column(code()));
+    let result = sync_database_with(&db, SyncMode::Additive).await;
+    SyncRegistry::clear();
+    let message = result.expect_err("sync should refuse").to_string();
+    assert!(
+        message.contains("'code'") && message.contains("sync_filled"),
+        "{message}"
+    );
+    let has_code = async |table: &str| {
+        let columns = db.catalog().columns(table).await.expect("columns failed");
+        columns.iter().any(|column| column.name == "code")
+    };
+    assert!(has_code("sync_empty").await);
+    assert!(!has_code("sync_filled").await);
 }
 
 /// Re-running `create_table_if_not_exists`, as after a half-applied
@@ -6551,9 +6932,10 @@ async fn product_document(name: &str) -> Option<serde_json::Value> {
 }
 
 /// `json_set` writes the same document on every backend: a path whose parent
-/// is missing changes nothing, an index past the end appends, and an existing
-/// member or element is replaced. `array_append` wraps a JSON document that
-/// is no array (PostgreSQL appends to native arrays only).
+/// is missing or of the wrong type changes nothing, an index past the end
+/// appends, and an existing member or element is replaced. `array_append`
+/// wraps a JSON document that is no array (PostgreSQL appends to native
+/// arrays only).
 #[tokio::test]
 async fn json_mutations_write_the_same_document_everywhere() {
     if !setup().await {
@@ -6577,6 +6959,18 @@ async fn json_mutations_write_the_same_document_everywhere() {
     set("$.missing.child", serde_json::json!(1)).await;
     // An index step under a missing member, which SQLite created.
     set("$.tags[0]", serde_json::json!("x")).await;
+    // Index steps under a scalar (MySQL wrapped it in an array, or replaced
+    // it) and under an object (PostgreSQL read the index as a key), and a
+    // member step under an array (PostgreSQL failed the statement).
+    set("$.k[1]", serde_json::json!(5)).await;
+    set("$.k[0]", serde_json::json!(5)).await;
+    set("$.a[1]", serde_json::json!(5)).await;
+    set("$.a[0].list", serde_json::json!(5)).await;
+    set("$.a.list.x", serde_json::json!(5)).await;
+    assert_eq!(
+        product_document("doc").await,
+        Some(serde_json::json!({"a": {"list": [1, 2]}, "k": 1}))
+    );
     set("$.a.list[5]", serde_json::json!(3)).await;
     set("$.a.list[0]", serde_json::json!(0)).await;
     set("$.k", serde_json::json!({"replaced": true})).await;

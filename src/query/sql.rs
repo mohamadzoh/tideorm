@@ -1,13 +1,12 @@
 use super::*;
 use crate::config::DatabaseType;
 use crate::error::{Error, Result};
-use crate::internal::{
-    Alias, Condition, Expr, ExprTrait, MysqlQueryBuilder, PostgresQueryBuilder, Query, SimpleExpr,
-    SqliteQueryBuilder, Value,
-};
+use crate::internal::{Alias, Condition, Expr, ExprTrait, SimpleExpr, Value};
 use crate::model::Model;
+use crate::orm::sql_builder::{
+    ArrayOperator, BoundSql, JsonContainment, JsonExistence, error::RenderError,
+};
 use crate::soft_delete::{SoftDeleteScope, query_scope_for};
-use db_sql::JsonExistence;
 
 pub(crate) mod condition_builders;
 pub(crate) mod debugging;
@@ -66,21 +65,13 @@ impl ListOperator {
     }
 }
 
-#[derive(Clone, Copy)]
-enum ArrayOperator {
-    Contains,
-    ContainedBy,
-    Overlaps,
-}
-
-impl ArrayOperator {
-    fn of(operator: &Operator) -> Option<Self> {
-        match operator {
-            Operator::ArrayContains => Some(Self::Contains),
-            Operator::ArrayContainedBy => Some(Self::ContainedBy),
-            Operator::ArrayOverlaps => Some(Self::Overlaps),
-            _ => None,
-        }
+/// The array predicate `operator` names, if it names one.
+fn array_operator(operator: &Operator) -> Option<ArrayOperator> {
+    match operator {
+        Operator::ArrayContains => Some(ArrayOperator::Contains),
+        Operator::ArrayContainedBy => Some(ArrayOperator::ContainedBy),
+        Operator::ArrayOverlaps => Some(ArrayOperator::Overlaps),
+        _ => None,
     }
 }
 
@@ -89,16 +80,16 @@ impl ArrayOperator {
 /// `condition_spec` returns `None` for a pair with no rendering, which is what
 /// lets execution reject such a condition instead of silently dropping it.
 enum ConditionSpec<'a> {
+    /// Trusted SQL, whose `?` placeholders bind `values` when it has any.
     Raw {
         raw_sql: &'a str,
         values: &'a [Value],
-        /// Whether `raw_sql` is a caller's template, whose `?`s become the
-        /// backend's markers at rendering.
-        template: bool,
     },
+    /// A query the condition embeds.
+    Subquery(&'a crate::query::Subquery),
     Compare {
         operator: ComparisonOperator,
-        value: &'a serde_json::Value,
+        value: &'a Value,
     },
     /// The column compared with another column of the same row.
     CompareColumns {
@@ -107,28 +98,30 @@ enum ConditionSpec<'a> {
     },
     Pattern {
         negated: bool,
-        escaped: bool,
-        value: &'a serde_json::Value,
+        value: &'a Value,
+    },
+    /// The text holds `value` literally, anything before it when `leading`
+    /// and after it when `trailing`.
+    Literal {
+        leading: bool,
+        trailing: bool,
+        value: &'a Value,
     },
     List {
         operator: ListOperator,
-        values: &'a [serde_json::Value],
-        /// For a [`DocumentList`](crate::query::ConditionValue::DocumentList),
-        /// whether SQL NULL is among the members; `None` for a plain list,
-        /// whose nulls are SQL NULL.
-        documents: Option<bool>,
+        values: &'a [Value],
     },
     NullCheck {
         negated: bool,
     },
     Between {
-        low: &'a serde_json::Value,
-        high: &'a serde_json::Value,
+        low: &'a Value,
+        high: &'a Value,
         negated: bool,
     },
     JsonValue {
-        containment: db_sql::JsonContainment,
-        value: &'a serde_json::Value,
+        containment: JsonContainment,
+        value: &'a Value,
     },
     JsonExists {
         existence: JsonExistence,
@@ -137,7 +130,7 @@ enum ConditionSpec<'a> {
     },
     Array {
         operator: ArrayOperator,
-        values: &'a [serde_json::Value],
+        values: &'a [Value],
     },
 }
 

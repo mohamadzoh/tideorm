@@ -41,7 +41,6 @@ async fn main() -> tideorm::Result<()> {
     .save()
     .await?;
     let author = Author::query().with(Author::POSTS).first().await?.unwrap();
-    let posts: Vec<Post> = author.get_relation(Author::POSTS).unwrap();
-    assert_eq!(posts.len(), 1);
+    assert_eq!(author.posts.get_cached().map(<[Post]>::len), Some(1));
     Ok(())
 }

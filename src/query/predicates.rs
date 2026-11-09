@@ -1,7 +1,6 @@
 use super::structure::SubquerySelect;
-use super::{ConditionValue, Operator, QueryBuilder, WhereCondition};
+use super::{ConditionValue, Correlation, Operator, QueryBuilder, Subquery, WhereCondition};
 use crate::columns::IntoColumnName;
-use crate::config::DatabaseType;
 use crate::model::Model;
 use crate::query::db_sql;
 
@@ -20,77 +19,38 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
 
-    /// Push `<keyword> (subquery)` as a parameterized condition on `column`
-    /// (empty for `EXISTS`).
-    ///
-    /// The subquery is rendered with its values bound rather than inlined, so
-    /// the fragment the crate executes never contains hand-escaped user data.
-    /// Validation deliberately runs against that parameterized rendering: the
-    /// operand handed to the raw-SQL scanner then holds placeholders only, which
-    /// is why a legitimate value containing `--`, `;` or `#` cannot reject the
-    /// whole query.
+    /// Push `<keyword> (subquery)` as a condition on `column` (empty for
+    /// `EXISTS`), the subquery rendered with the statement.
     fn push_subquery_condition<N: Model>(
         mut self,
         method: &str,
         column: &str,
-        keyword: &str,
-        subquery: &QueryBuilder<N>,
+        keyword: &'static str,
+        subquery: QueryBuilder<N>,
     ) -> Self {
-        self.absorb_operand_error("subquery", method, subquery);
-
-        let db_type = self.db_type_for_sql();
-        let (mut sql, values) = subquery.build_select_sql_with_params_for_db(db_type);
-        // MySQL and MariaDB take no LIMIT in an IN subquery, but do one level
-        // further down.
-        if keyword.ends_with("IN")
-            && matches!(db_type, DatabaseType::MySQL | DatabaseType::MariaDB)
-            && (subquery.clauses.limit_value.is_some() || subquery.clauses.offset_value.is_some())
-        {
-            sql = db_sql::select_from_derived(db_type, "*", &sql, "tideorm_in_subquery");
-        }
-        if let Err(reason) = db_sql::validate_compound_subquery_sql(&sql) {
-            self.invalidate_query(format!("invalid subquery for {}(): {}", method, reason));
-        }
-
-        self.push_bound_raw(column, format!("{} ({})", keyword, sql), values)
+        self.absorb_operand_error("subquery", method, &subquery);
+        self.push_embedded(column, Subquery::select(keyword, subquery))
     }
 
-    /// Push `sql`, a builder-rendered fragment with its bound `values`, as a
-    /// condition on `column` (empty for a whole predicate).
-    fn push_bound_raw(
-        self,
-        column: &str,
-        sql: String,
-        values: Vec<crate::internal::Value>,
-    ) -> Self {
+    /// Push `subquery` as a condition on `column` (empty for a whole
+    /// predicate).
+    fn push_embedded(self, column: &str, subquery: Subquery) -> Self {
         self.push_condition(WhereCondition {
             column: column.to_string(),
             operator: Operator::Raw,
-            value: ConditionValue::RawExprWithValues { sql, values },
+            value: ConditionValue::Subquery(subquery),
         })
     }
 
-    /// `[NOT ]EXISTS (SELECT 1 FROM <from> WHERE <related>.<fk> = <own>.<lk>`,
-    /// correlating the related rows with this query's row; the caller adds
-    /// its conditions and closes the parenthesis.
-    fn correlated_exists_head(
-        &self,
-        db_type: DatabaseType,
-        negated: bool,
-        from: &str,
-        related: &str,
-        foreign_key: &str,
-        local_key: &str,
-    ) -> String {
-        format!(
-            "{}EXISTS (SELECT 1 FROM {} WHERE {}.{} = {}.{}",
-            if negated { "NOT " } else { "" },
-            from,
-            related,
-            db_sql::quote_ident(db_type, foreign_key),
-            db_sql::quote_ident(db_type, &self.own_table_ref()),
-            db_sql::quote_ident(db_type, local_key),
-        )
+    /// How a correlated `EXISTS` ties the related rows' `foreign_key` to this
+    /// query's row.
+    fn correlation(&self, negated: bool, foreign_key: &str, local_key: &str) -> Correlation {
+        Correlation {
+            negated,
+            foreign_key: foreign_key.to_string(),
+            outer: self.own_table_ref().into_owned(),
+            local_key: local_key.to_string(),
+        }
     }
 
     /// Add a WHERE IN (subquery) condition.
@@ -101,14 +61,13 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().where_in_subquery(User::ID, User::query().select(vec!["id"])).validate().unwrap();
     /// ```
-    #[must_use]
     pub fn where_in_subquery<N: Model>(
         self,
         column: impl IntoColumnName,
         subquery: QueryBuilder<N>,
     ) -> Self {
         let column = Self::own_column(&column);
-        self.push_subquery_condition("where_in_subquery", &column, "IN", &subquery)
+        self.push_subquery_condition("where_in_subquery", &column, "IN", subquery)
     }
 
     /// Add a WHERE NOT IN (subquery) condition.
@@ -119,14 +78,13 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().where_not_in_subquery(User::ID, User::query().select(vec!["id"])).validate().unwrap();
     /// ```
-    #[must_use]
     pub fn where_not_in_subquery<N: Model>(
         self,
         column: impl IntoColumnName,
         subquery: QueryBuilder<N>,
     ) -> Self {
         let column = Self::own_column(&column);
-        self.push_subquery_condition("where_not_in_subquery", &column, "NOT IN", &subquery)
+        self.push_subquery_condition("where_not_in_subquery", &column, "NOT IN", subquery)
     }
 
     /// Add a WHERE EXISTS (subquery) condition.
@@ -137,9 +95,8 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().where_exists(User::query().where_eq(User::ACTIVE, true)).validate().unwrap();
     /// ```
-    #[must_use]
     pub fn where_exists<N: Model>(self, subquery: QueryBuilder<N>) -> Self {
-        self.push_subquery_condition("where_exists", "", "EXISTS", &subquery)
+        self.push_subquery_condition("where_exists", "", "EXISTS", subquery)
     }
 
     /// Add a WHERE NOT EXISTS (subquery) condition.
@@ -150,9 +107,8 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().where_not_exists(User::query().where_eq(User::ACTIVE, true)).validate().unwrap();
     /// ```
-    #[must_use]
     pub fn where_not_exists<N: Model>(self, subquery: QueryBuilder<N>) -> Self {
-        self.push_subquery_condition("where_not_exists", "", "NOT EXISTS", &subquery)
+        self.push_subquery_condition("where_not_exists", "", "NOT EXISTS", subquery)
     }
 
     /// Build and push the correlated `EXISTS` / `NOT EXISTS` condition shared by
@@ -167,9 +123,8 @@ impl<M: Model> QueryBuilder<M> {
         related_table: &str,
         foreign_key: &str,
         local_key: &str,
-        condition: Option<(&str, std::result::Result<serde_json::Value, String>)>,
+        condition: Option<(&str, std::result::Result<crate::DbValue, String>)>,
     ) -> Self {
-        let db_type = self.db_type_for_sql();
         let condition = match condition {
             Some((column, Ok(value))) => Some((column, value)),
             Some((_, Err(reason))) => {
@@ -198,47 +153,26 @@ impl<M: Model> QueryBuilder<M> {
 
         // The model's own table is read under an alias, so the key on the
         // outer row stays reachable.
-        let table = db_sql::quote_ident(db_type, related_table);
-        let (from, related) = if related_table == M::table_name() {
-            let alias = db_sql::quote_ident(db_type, &related_alias(self.self_join_depth + 1));
-            (format!("{} AS {}", table, alias), alias)
-        } else {
-            (table.clone(), table)
-        };
-        let mut sql =
-            self.correlated_exists_head(db_type, negated, &from, &related, foreign_key, local_key);
-        let mut values = Vec::new();
-
-        if let Some((condition_column, value)) = condition {
-            let column = format!(
-                "{}.{}",
-                related,
-                db_sql::quote_ident(db_type, condition_column)
-            );
+        let alias =
+            (related_table == M::table_name()).then(|| related_alias(self.self_join_depth + 1));
+        let condition = condition.map(|(column, value)| {
             // A NULL condition means a NULL column, as for `where_eq`: `= NULL`
             // is never true, which would turn `has_no_related` into a filter
-            // that every row passes.
-            if value.is_null() {
-                sql.push_str(&format!(" AND {} IS NULL", column));
-            } else {
-                sql.push_str(&format!(
-                    " AND {} = {}",
-                    column,
-                    db_sql::placeholder(db_type, 1)
-                ));
-                // Bound as the column's type when a model maps the table, so a
-                // UUID or a timestamp is not compared as text.
-                let column_type =
-                    crate::sync::registered_column_type(related_table, condition_column);
-                values.push(crate::internal::json_to_column_value(
-                    &value,
-                    column_type.as_ref(),
-                ));
-            }
-        }
-
-        sql.push(')');
-        self.push_bound_raw("", sql, values)
+            // that every row passes. Any other value is bound as the column's
+            // type when a model maps the table, so a UUID or a timestamp is not
+            // compared as text.
+            let value = (!crate::query::is_sql_null(&value) && !crate::query::is_json_null(&value))
+                .then(|| {
+                    let column_type = crate::sync::registered_column_type(related_table, column);
+                    crate::internal::column_value(&value, column_type.as_ref())
+                });
+            (column.to_string(), value)
+        });
+        let correlation = self.correlation(negated, foreign_key, local_key);
+        self.push_embedded(
+            "",
+            Subquery::table(correlation, related_table.to_string(), alias, condition),
+        )
     }
 
     /// Check if related records exist matching a condition.
@@ -257,14 +191,13 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().has_related("posts", "user_id", "id", "title", "Hello").validate().unwrap();
     /// ```
-    #[must_use]
     pub fn has_related(
         self,
         related_table: &str,
         foreign_key: &str,
         local_key: &str,
         condition_column: &str,
-        condition_value: impl serde::Serialize,
+        condition_value: impl Into<crate::DbValue>,
     ) -> Self {
         self.push_related_exists_condition(
             "has_related",
@@ -274,7 +207,7 @@ impl<M: Model> QueryBuilder<M> {
             local_key,
             Some((
                 condition_column,
-                crate::query::checked_filter_value(condition_value),
+                crate::query::comparable_value(condition_value),
             )),
         )
     }
@@ -296,14 +229,13 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().has_no_related("posts", "user_id", "id", "title", "Hello").validate().unwrap();
     /// ```
-    #[must_use]
     pub fn has_no_related(
         self,
         related_table: &str,
         foreign_key: &str,
         local_key: &str,
         condition_column: &str,
-        condition_value: impl serde::Serialize,
+        condition_value: impl Into<crate::DbValue>,
     ) -> Self {
         self.push_related_exists_condition(
             "has_no_related",
@@ -313,7 +245,7 @@ impl<M: Model> QueryBuilder<M> {
             local_key,
             Some((
                 condition_column,
-                crate::query::checked_filter_value(condition_value),
+                crate::query::comparable_value(condition_value),
             )),
         )
     }
@@ -348,7 +280,6 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().where_has(User::ID, User::ID, |q: QueryBuilder<User>| q.where_eq(User::ACTIVE, true)).validate().unwrap();
     /// ```
-    #[must_use]
     pub fn where_has<R: Model>(
         self,
         foreign_key: impl IntoColumnName,
@@ -361,7 +292,7 @@ impl<M: Model> QueryBuilder<M> {
             false,
             foreign_key.column_name(),
             local_key.column_name(),
-            &related,
+            related,
         )
     }
 
@@ -375,7 +306,6 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().where_doesnt_have(User::ID, User::ID, |q: QueryBuilder<User>| q.where_eq(User::ACTIVE, true)).validate().unwrap();
     /// ```
-    #[must_use]
     pub fn where_doesnt_have<R: Model>(
         self,
         foreign_key: impl IntoColumnName,
@@ -388,7 +318,7 @@ impl<M: Model> QueryBuilder<M> {
             true,
             foreign_key.column_name(),
             local_key.column_name(),
-            &related,
+            related,
         )
     }
 
@@ -400,9 +330,9 @@ impl<M: Model> QueryBuilder<M> {
         negated: bool,
         foreign_key: &str,
         local_key: &str,
-        related: &QueryBuilder<R>,
+        related: QueryBuilder<R>,
     ) -> Self {
-        self.absorb_operand_error("related query", method, related);
+        self.absorb_operand_error("related query", method, &related);
         if let Some(part) = related.update_blocker() {
             self.invalidate_query(format!(
                 "{}() correlates the related rows through their filters only; the related query cannot hold {}",
@@ -425,30 +355,8 @@ impl<M: Model> QueryBuilder<M> {
             return self;
         };
 
-        let db_type = self.db_type_for_sql();
-        let (where_sql, values) = related.build_where_clause_with_condition_for_db(db_type);
-        // A model related to itself reads the related rows under an alias of
-        // their own (see `related_query`), so the key on the outer row stays
-        // reachable.
-        let related_ref = db_sql::quote_ident(db_type, &related.own_table_ref());
-        let from = if related.self_join_depth > 0 {
-            format!("{} AS {}", db_sql::quote_table::<R>(db_type), related_ref)
-        } else {
-            db_sql::quote_table::<R>(db_type)
-        };
-        let mut sql = self.correlated_exists_head(
-            db_type,
-            negated,
-            &from,
-            &related_ref,
-            foreign_key,
-            local_key,
-        );
-        if !where_sql.is_empty() {
-            sql.push_str(&format!(" AND ({})", where_sql));
-        }
-        sql.push(')');
-        self.push_bound_raw("", sql, values)
+        let correlation = self.correlation(negated, foreign_key, local_key);
+        self.push_embedded("", Subquery::related(correlation, related))
     }
 
     /// The query `where_has` hands its closure. Over this query's own table
@@ -457,9 +365,6 @@ impl<M: Model> QueryBuilder<M> {
     /// related row, and the correlation names this one.
     fn related_query<R: Model>(&self) -> QueryBuilder<R> {
         let mut related = QueryBuilder::<R>::new();
-        // The closure may render nested subqueries immediately. Give those
-        // builders the outer connection before they choose a SQL dialect.
-        related.database = self.database.clone();
         if R::table_name() == M::table_name() {
             related.self_join_depth = self.self_join_depth + 1;
         }
@@ -479,7 +384,6 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().has_any_related("posts", "user_id", "id").validate().unwrap();
     /// ```
-    #[must_use]
     pub fn has_any_related(self, related_table: &str, foreign_key: &str, local_key: &str) -> Self {
         self.push_related_exists_condition(
             "has_any_related",
@@ -505,7 +409,6 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().has_no_related_at_all("posts", "user_id", "id").validate().unwrap();
     /// ```
-    #[must_use]
     pub fn has_no_related_at_all(
         self,
         related_table: &str,
@@ -522,22 +425,6 @@ impl<M: Model> QueryBuilder<M> {
         )
     }
 
-    /// Render this query with its bound values inlined, for display only.
-    ///
-    /// This is the statement [`build_sql_preview()`](Self::build_sql_preview)
-    /// shows, without the banner, for display only.
-    ///
-    /// ```
-    /// use tideorm::prelude::*;
-    /// # #[tideorm::model(table = "users", soft_delete)]
-    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
-    /// let sql = User::query().select(vec!["id"]).to_subquery_sql();
-    /// assert!(sql.contains("SELECT"));
-    /// ```
-    pub fn to_subquery_sql(&self) -> String {
-        self.build_select_sql_for_db(self.db_type_for_sql())
-    }
-
     /// Add a raw SELECT expression.
     ///
     /// ```
@@ -546,7 +433,6 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().select_raw("COUNT(*) AS total").validate().unwrap();
     /// ```
-    #[must_use]
     pub fn select_raw(mut self, raw_select: &str) -> Self {
         if let Err(reason) = db_sql::validate_raw_sql_fragment("SELECT raw SQL", raw_select) {
             self.invalidate_query(reason);
@@ -560,8 +446,8 @@ impl<M: Model> QueryBuilder<M> {
 
     /// Add a scalar subquery as a SELECT expression.
     ///
-    /// The subquery keeps its values as bound parameters, rendered for this
-    /// query's backend.
+    /// The subquery keeps its values as bound parameters, rendered with this
+    /// query for the backend it runs on.
     ///
     /// ```
     /// use tideorm::prelude::*;
@@ -569,7 +455,6 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().select_subquery(User::query().select(vec!["id"]).limit(1), "first_id").validate().unwrap();
     /// ```
-    #[must_use]
     pub fn select_subquery<N: Model>(mut self, subquery: QueryBuilder<N>, alias: &str) -> Self {
         self.absorb_operand_error("subquery", "select_subquery", &subquery);
 
@@ -577,20 +462,13 @@ impl<M: Model> QueryBuilder<M> {
             self.invalidate_query(reason);
         }
 
-        let (query_sql, params) =
-            subquery.build_select_sql_with_params_for_db(self.db_type_for_sql());
         // What the one column it selects reads, captured while the subquery
         // still knows its model and joins: the outer query decodes and
         // decrypts the output, and checks comparisons of it, by these.
         let (source, column_type, encrypted_column) = match subquery.projection_outputs().as_slice()
         {
             [(output, source)] => {
-                let encrypted = subquery
-                    .projected_encrypted_column(output, source.as_ref())
-                    .unwrap_or_else(|error| {
-                        self.invalidate_query(error.to_string());
-                        None
-                    });
+                let encrypted = subquery.projected_encrypted_column(output, source.as_ref());
                 (
                     source.clone(),
                     subquery.projected_column_type(output),
@@ -602,33 +480,13 @@ impl<M: Model> QueryBuilder<M> {
         self.clauses
             .subquery_select_expressions
             .push(SubquerySelect {
-                query_sql,
+                query: std::sync::Arc::new(subquery),
                 alias: alias.to_string(),
-                params,
                 source,
                 column_type,
                 encrypted_column,
             });
         self
-    }
-
-    /// Add a WHERE condition using a strongly-typed column.
-    ///
-    /// ```
-    /// use tideorm::prelude::*;
-    /// # #[tideorm::model(table = "users", soft_delete)]
-    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
-    /// User::query().where_col(User::ID.gt(1)).validate().unwrap();
-    /// ```
-    #[must_use]
-    pub fn where_col(self, mut condition: crate::columns::ColumnCondition) -> Self {
-        // A column of this query's own model needs no qualifier.
-        if let Some((table, name)) = condition.column.rsplit_once('.')
-            && M::owns_table_reference(table)
-        {
-            condition.column = name.to_string();
-        }
-        self.push_condition(condition)
     }
 }
 

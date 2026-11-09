@@ -39,7 +39,7 @@ async fn insert_all_rejects_an_invalid_model_before_touching_the_database() {
     // The table exists nowhere, so reaching the database would fail with a
     // connection or query error instead.
     match insert_all::<ValidatedUser>(batch).await {
-        Err(Error::Validation { field, message }) => {
+        Err(Error::Validation { field, message, .. }) => {
             assert_eq!(field, "email");
             assert!(message.contains("model at index 1"), "{message}");
         }
@@ -70,7 +70,7 @@ async fn paginate_rejects_a_page_no_backend_can_read() {
         assert!(
             matches!(
                 &error,
-                Error::Validation { field: refused, message: why }
+                Error::Validation { field: refused, message: why, .. }
                     if refused == field && why.contains(message)
             ),
             "page {page} of {per_page}: {error:?}"

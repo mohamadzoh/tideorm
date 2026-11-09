@@ -30,28 +30,18 @@ mod raw;
 mod state;
 mod transaction;
 
-use std::future::Future;
-
+/// How [`Database::transaction_with`] begins its transaction.
+pub use crate::orm::{AccessMode, IsolationLevel, SqliteTransactionMode, TransactionOptions};
 pub use builder::DatabaseBuilder;
 pub use core::Database;
 #[cfg(feature = "dirty-tracking")]
-pub(crate) use state::__scope_origin;
-pub(crate) use state::connection_identity;
+pub(crate) use state::scope_origin;
 pub use state::{__current_connection, __current_db, db, has_global_db, require_db};
-pub(crate) use state::{loading_database, with_loading_connection};
 pub use transaction::Transaction;
-pub(crate) use transaction::{SavepointEnd, TransactionScope};
+pub(crate) use transaction::TransactionScope;
 
 #[doc(hidden)]
-pub use transaction::{ConnectionRef, TransactionSource};
-
-pub(crate) async fn __in_db_scope<F, T>(db: &Database, future: F) -> crate::error::Result<T>
-where
-    F: Future<Output = crate::error::Result<T>>,
-{
-    let connection = db.__get_connection()?;
-    state::with_connection_override(connection, future).await
-}
+pub use transaction::ConnectionRef;
 
 #[cfg(test)]
 #[path = "../../tests/unit/database_tests.rs"]

@@ -1,8 +1,7 @@
 use super::{BelongsTo, HasMany, HasOne};
-use crate::database::{__in_db_scope, Database};
+use crate::database::Database;
 use crate::entity_manager::EntityManager;
 use crate::model::Model as _;
-use serde_json::json;
 use std::sync::Arc;
 
 const USER_TABLE: &str = "direct_entity_manager_relation_test_users";
@@ -42,6 +41,32 @@ struct DirectEntityManagerRelationPost {
     user: tideorm::relations::BelongsTo<DirectEntityManagerRelationUser>,
 }
 
+#[test]
+fn the_derive_reports_the_tables_and_keys_its_relations_join() {
+    use crate::model::ModelMeta;
+
+    assert_eq!(
+        DirectEntityManagerRelationPost::__parent_tables(),
+        [USER_TABLE]
+    );
+    assert!(DirectEntityManagerRelationPost::__child_tables().is_empty());
+    assert_eq!(
+        DirectEntityManagerRelationPost::__row_references(),
+        [(USER_TABLE, "user_id", "id")]
+    );
+    assert!(DirectEntityManagerRelationUser::__parent_tables().is_empty());
+    assert_eq!(
+        DirectEntityManagerRelationUser::__child_tables(),
+        [PROFILE_TABLE]
+    );
+    assert_eq!(
+        DirectEntityManagerRelationUser::__row_references(),
+        [(PROFILE_TABLE, "user_id", "id")]
+    );
+    // A model without relations keeps the defaults.
+    assert!(DirectEntityManagerRelationProfile::__row_references().is_empty());
+}
+
 async fn setup_database() -> crate::error::Result<Option<Arc<Database>>> {
     crate::test_support::fresh_postgres_tables(&[
         (
@@ -67,7 +92,7 @@ async fn seed_relations(
     DirectEntityManagerRelationProfile,
     DirectEntityManagerRelationPost,
 )> {
-    __in_db_scope(db, async {
+    db.scope(async {
         let user = DirectEntityManagerRelationUser {
             id: 0,
             name: "Alice".to_string(),
@@ -157,12 +182,12 @@ async fn cached_loads_keep_the_tracked_instance() -> crate::error::Result<()> {
         name: name.to_string(),
         profile: Default::default(),
     };
-    entity_manager.register(profile("Edited in memory")).await;
-    entity_manager.register(user("Edited in memory")).await;
+    entity_manager.register(profile("Edited in memory"));
+    entity_manager.register(user("Edited in memory"));
 
     let mut has_one = HasOne::<DirectEntityManagerRelationProfile>::new("user_id", "id")
         .with_metadata("profile", USER_TABLE)
-        .with_parent_pk(json!(1));
+        .with_parent_pk(1, false);
     has_one.set_cached(Some(profile("Stale eager copy")));
     let loaded = entity_manager
         .load(&mut has_one)
@@ -171,7 +196,7 @@ async fn cached_loads_keep_the_tracked_instance() -> crate::error::Result<()> {
     assert_eq!(loaded.name, "Edited in memory", "has_one");
 
     let mut belongs_to =
-        BelongsTo::<DirectEntityManagerRelationUser>::new("user_id", "id").with_fk_value(json!(1));
+        BelongsTo::<DirectEntityManagerRelationUser>::new("user_id", "id").with_fk_value(1);
     belongs_to.set_cached(Some(user("Stale eager copy")));
     let loaded = entity_manager
         .load(&mut belongs_to)
@@ -181,7 +206,7 @@ async fn cached_loads_keep_the_tracked_instance() -> crate::error::Result<()> {
 
     let mut has_many = HasMany::<DirectEntityManagerRelationProfile>::new("user_id", "id")
         .with_metadata("profiles", USER_TABLE)
-        .with_parent_pk(json!(1));
+        .with_parent_pk(1, false);
     has_many.set_cached(vec![profile("Stale eager copy")]);
     let loaded = entity_manager.load(&mut has_many).await?;
     assert_eq!(loaded.len(), 1, "has_many");
@@ -207,7 +232,7 @@ async fn rows_edited_through_as_mut_are_the_rows_load_serves_without_a_connectio
     Database::reset_global();
 
     let mut relation = HasMany::<DirectEntityManagerRelationProfile>::new("user_id", "id")
-        .with_parent_pk(json!(1));
+        .with_parent_pk(1, false);
     relation.set_cached(vec![DirectEntityManagerRelationProfile {
         id: 7,
         user_id: 1,

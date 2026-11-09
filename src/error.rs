@@ -20,14 +20,14 @@
 //! [`source`](std::error::Error::source), so `{:#}`-style chains and `anyhow`
 //! interop reach the backend instead of stopping at TideORM's rendered message.
 
-use std::fmt;
-
 use thiserror::Error;
 
 mod context;
+mod db_failure;
 mod presentation;
 
 pub use context::ErrorContext;
+pub use db_failure::{DbFailure, DbFailureKind};
 
 impl From<crate::internal::OrmError> for Error {
     fn from(err: crate::internal::OrmError) -> Self {
@@ -35,318 +35,30 @@ impl From<crate::internal::OrmError> for Error {
     }
 }
 
+/// The `io::Error` stays reachable as the error's
+/// [`source`](std::error::Error::source).
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {
         Self::Internal {
             message: err.to_string(),
+            source: Some(Box::new(err)),
         }
     }
 }
 
+/// The `serde_json::Error`, with its line and column, stays reachable as the
+/// error's [`source`](std::error::Error::source).
 impl From<serde_json::Error> for Error {
     fn from(err: serde_json::Error) -> Self {
         Self::Conversion {
             message: err.to_string(),
+            source: Some(Box::new(err)),
         }
     }
 }
 
 /// Result alias for TideORM operations.
 pub type Result<T> = std::result::Result<T, Error>;
-
-/// How the database classified a failed statement.
-///
-/// Derived from the driver's own constraint-violation kind first, then from the
-/// SQLSTATE the backend reported. [`DbFailureKind::Unclassified`] means the
-/// driver gave TideORM nothing to go on; callers that need more should fall
-/// back to the error message.
-///
-/// Marked `#[non_exhaustive]`: classifications are added as drivers expose
-/// them, so match with a wildcard arm.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[non_exhaustive]
-pub enum DbFailureKind {
-    /// The driver reported no code TideORM recognizes.
-    #[default]
-    Unclassified,
-    /// Unique or primary-key constraint violation (SQLSTATE `23505`).
-    UniqueViolation,
-    /// Foreign-key constraint violation (SQLSTATE `23503`).
-    ForeignKeyViolation,
-    /// `NOT NULL` constraint violation (SQLSTATE `23502`).
-    NotNullViolation,
-    /// `CHECK` constraint violation (SQLSTATE `23514`).
-    CheckViolation,
-    /// A value does not fit its column: too long, out of range, or not valid
-    /// for the column's type (SQLSTATE class `22`, such as `22001`).
-    InvalidValue,
-    /// The statement did not parse (SQLSTATE `42601`, MySQL `42000`).
-    SyntaxError,
-    /// A referenced column does not exist (SQLSTATE `42703`, MySQL `42S22`).
-    UndefinedColumn,
-    /// A referenced table does not exist (SQLSTATE `42P01`, MySQL `42S02`).
-    UndefinedTable,
-    /// The database user lacks the required privilege (SQLSTATE `42501`, `28000`).
-    InsufficientPrivilege,
-    /// Deadlock detected (SQLSTATE `40P01`).
-    Deadlock,
-    /// Serialization failure; the transaction can be replayed (SQLSTATE `40001`).
-    SerializationFailure,
-    /// A lock could not be acquired (SQLSTATE `55P03`).
-    LockNotAvailable,
-    /// The statement was cancelled, usually by a timeout (SQLSTATE `57014`).
-    StatementTimeout,
-    /// No connection could be obtained in time (SQLSTATE `53300`, or a pool
-    /// acquire timeout reported by the driver itself).
-    ConnectionTimeout,
-    /// The connection was closed underneath the statement (SQLSTATE class `08`).
-    ConnectionClosed,
-}
-
-impl DbFailureKind {
-    /// Classify a SQLSTATE reported by the backend.
-    ///
-    /// Expects the five-character SQLSTATE that PostgreSQL and MySQL return.
-    /// SQLite reports a native numeric code with no SQLSTATE meaning, so it
-    /// classifies as [`DbFailureKind::Unclassified`] here — the driver's own
-    /// constraint-violation kind is consulted first and already covers SQLite's
-    /// unique, foreign-key and not-null cases.
-    pub fn from_sqlstate(sqlstate: &str) -> Self {
-        match sqlstate {
-            "23505" => Self::UniqueViolation,
-            "23503" => Self::ForeignKeyViolation,
-            "23502" => Self::NotNullViolation,
-            "23514" => Self::CheckViolation,
-            data_exception if data_exception.starts_with("22") => Self::InvalidValue,
-            "42601" | "42000" => Self::SyntaxError,
-            "42703" | "42S22" => Self::UndefinedColumn,
-            "42P01" | "42S02" => Self::UndefinedTable,
-            "42501" | "28000" => Self::InsufficientPrivilege,
-            "40P01" => Self::Deadlock,
-            "40001" => Self::SerializationFailure,
-            "55P03" => Self::LockNotAvailable,
-            "57014" => Self::StatementTimeout,
-            "53300" => Self::ConnectionTimeout,
-            "08000" | "08001" | "08003" | "08004" | "08006" | "08007" | "08S01" | "57P01"
-            | "57P02" | "57P03" => Self::ConnectionClosed,
-            _ => Self::Unclassified,
-        }
-    }
-
-    /// Classify a native SQLite result code and its message.
-    ///
-    /// SQLite reports a missing table or column and a syntax error all as the
-    /// generic `SQLITE_ERROR` (1), so the message is what tells them apart. A
-    /// busy or locked database (5, 6 and their extended codes) is the lock
-    /// contention a retry can clear.
-    pub fn from_sqlite_code(code: &str, message: &str) -> Self {
-        match code {
-            "5" | "6" | "261" | "262" | "517" => Self::LockNotAvailable,
-            "1" if message.starts_with("no such table") => Self::UndefinedTable,
-            "1" if message.starts_with("no such column")
-                || message.contains("has no column named") =>
-            {
-                Self::UndefinedColumn
-            }
-            "1" if message.contains("syntax error") => Self::SyntaxError,
-            _ => Self::Unclassified,
-        }
-    }
-
-    /// Classify a MySQL or MariaDB error number.
-    ///
-    /// Several failures a caller branches on share a catch-all SQLSTATE there:
-    /// a lock wait timeout is `HY000`, a missing privilege is `42000` like a
-    /// syntax error. The number tells them apart; anything not listed here is
-    /// left to the SQLSTATE.
-    pub fn from_mysql_code(number: u16) -> Self {
-        match number {
-            // ER_LOCK_WAIT_TIMEOUT, ER_LOCK_NOWAIT
-            1205 | 3572 => Self::LockNotAvailable,
-            // ER_TRUNCATED_WRONG_VALUE_FOR_FIELD ("Incorrect string value"), HY000
-            1366 => Self::InvalidValue,
-            // ER_LOCK_DEADLOCK
-            1213 => Self::Deadlock,
-            // ER_QUERY_INTERRUPTED, MariaDB's ER_STATEMENT_TIMEOUT, ER_QUERY_TIMEOUT
-            1317 | 1969 | 3024 => Self::StatementTimeout,
-            // ER_SERVER_SHUTDOWN, MariaDB's ER_CONNECTION_KILLED
-            1053 | 1927 => Self::ConnectionClosed,
-            // ER_DBACCESS_DENIED_ERROR, ER_TABLEACCESS_DENIED_ERROR,
-            // ER_COLUMNACCESS_DENIED_ERROR, ER_SPECIFIC_ACCESS_DENIED_ERROR
-            1044 | 1142 | 1143 | 1227 => Self::InsufficientPrivilege,
-            _ => Self::Unclassified,
-        }
-    }
-
-    /// Short human-readable name for the classification.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Unclassified => "database error",
-            Self::UniqueViolation => "unique constraint violation",
-            Self::ForeignKeyViolation => "foreign key constraint violation",
-            Self::NotNullViolation => "not-null constraint violation",
-            Self::CheckViolation => "check constraint violation",
-            Self::InvalidValue => "invalid value",
-            Self::SyntaxError => "SQL syntax error",
-            Self::UndefinedColumn => "undefined column",
-            Self::UndefinedTable => "undefined table",
-            Self::InsufficientPrivilege => "insufficient privilege",
-            Self::Deadlock => "deadlock",
-            Self::SerializationFailure => "serialization failure",
-            Self::LockNotAvailable => "lock not available",
-            Self::StatementTimeout => "statement timeout",
-            Self::ConnectionTimeout => "connection timeout",
-            Self::ConnectionClosed => "connection closed",
-        }
-    }
-
-    /// True when the failure is a constraint violation, which the caller fixes
-    /// by changing the data it is writing rather than by retrying.
-    pub fn is_constraint_violation(self) -> bool {
-        matches!(
-            self,
-            Self::UniqueViolation
-                | Self::ForeignKeyViolation
-                | Self::NotNullViolation
-                | Self::CheckViolation
-        )
-    }
-
-    /// True when replaying the statement can plausibly succeed.
-    pub fn is_retryable(self) -> bool {
-        matches!(
-            self,
-            Self::Deadlock
-                | Self::SerializationFailure
-                | Self::LockNotAvailable
-                | Self::StatementTimeout
-                | Self::ConnectionTimeout
-                | Self::ConnectionClosed
-        )
-    }
-}
-
-impl fmt::Display for DbFailureKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// The driver-level failure behind a database error.
-///
-/// What survives TideORM's error translation: the classification, the
-/// SQLSTATE, and the constraint and table names where the driver exposes them.
-///
-/// It is the [`source`](std::error::Error::source) of the [`Error`](enum@Error) it is
-/// attached to, and its own source is the originating driver error, so
-/// `{:#}`-style chains and `anyhow` interop walk all the way down to the
-/// backend. Reach it directly with [`Error::db_failure`].
-#[derive(Debug)]
-pub struct DbFailure {
-    kind: DbFailureKind,
-    code: Option<String>,
-    constraint: Option<String>,
-    table: Option<String>,
-    source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
-}
-
-impl DbFailure {
-    /// Start a failure carrying only its classification.
-    pub(crate) fn new(kind: DbFailureKind) -> Self {
-        Self {
-            kind,
-            code: None,
-            constraint: None,
-            table: None,
-            source: None,
-        }
-    }
-
-    /// Attach the SQLSTATE, or the driver-native code where there is none.
-    pub(crate) fn with_code(mut self, code: Option<String>) -> Self {
-        self.code = code;
-        self
-    }
-
-    /// Attach the name of the constraint the backend reported as violated.
-    pub(crate) fn with_constraint(mut self, constraint: Option<String>) -> Self {
-        self.constraint = constraint;
-        self
-    }
-
-    /// Attach the table the failing statement was operating on.
-    pub(crate) fn with_table(mut self, table: Option<String>) -> Self {
-        self.table = table;
-        self
-    }
-
-    /// Keep the originating driver error as this failure's own source.
-    pub(crate) fn with_source(
-        mut self,
-        source: Box<dyn std::error::Error + Send + Sync + 'static>,
-    ) -> Self {
-        self.source = Some(source);
-        self
-    }
-
-    /// How the database classified the failure.
-    pub fn kind(&self) -> DbFailureKind {
-        self.kind
-    }
-
-    /// SQLSTATE reported by the backend, or the driver's native code where the
-    /// backend has no SQLSTATE (SQLite).
-    pub fn code(&self) -> Option<&str> {
-        self.code.as_deref()
-    }
-
-    /// Name of the constraint the backend reported as violated.
-    ///
-    /// Only PostgreSQL populates this today; MySQL and SQLite name the
-    /// constraint inside the message instead.
-    pub fn constraint(&self) -> Option<&str> {
-        self.constraint.as_deref()
-    }
-
-    /// Table the failing statement was operating on, when the backend reports it.
-    pub fn table(&self) -> Option<&str> {
-        self.table.as_deref()
-    }
-}
-
-impl DbFailure {
-    /// The SQLSTATE and constraint the driver reported, for appending to a
-    /// description; empty when it exposed neither, the normal case on backends
-    /// that only report a message.
-    pub(crate) fn detail(&self) -> String {
-        let mut detail = String::new();
-        if let Some(ref code) = self.code {
-            detail.push_str(&format!(" (SQLSTATE {code})"));
-        }
-        if let Some(ref constraint) = self.constraint {
-            detail.push_str(&format!(" on constraint `{constraint}`"));
-        }
-        detail
-    }
-}
-
-impl fmt::Display for DbFailure {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}", self.kind, self.detail())?;
-        if let Some(ref table) = self.table {
-            write!(f, " in table `{}`", table)?;
-        }
-        Ok(())
-    }
-}
-
-impl std::error::Error for DbFailure {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source
-            .as_deref()
-            .map(|source| source as &(dyn std::error::Error + 'static))
-    }
-}
 
 /// The main error type for TideORM.
 ///
@@ -398,12 +110,18 @@ pub enum Error {
     },
 
     /// Validation failed before the write reached the database.
+    ///
+    /// `field` and `message` name the first failure; `errors` holds every
+    /// one, as [`Validate::validate`](crate::validation::Validate::validate)
+    /// collected them.
     #[error("Validation error: {field} - {message}")]
     Validation {
-        /// Field name.
+        /// The first failing field.
         field: String,
-        /// Validation message.
+        /// The first failure's message.
         message: String,
+        /// Every failure, the first one included.
+        errors: Box<crate::validation::ValidationErrors>,
     },
 
     /// Type conversion failed.
@@ -411,6 +129,10 @@ pub enum Error {
     Conversion {
         /// Conversion error text.
         message: String,
+        /// The error the conversion failed with, when it came from one: a
+        /// `serde_json::Error` turned into this with `?`.
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
 
     /// Transaction failed.
@@ -435,6 +157,10 @@ pub enum Error {
     Internal {
         /// Internal error text.
         message: String,
+        /// The error behind it, when it came from one: an `std::io::Error`
+        /// turned into this with `?`.
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
 
     /// An access-control check rejected the operation.
@@ -514,16 +240,16 @@ impl Error {
 
     /// Construct a validation error for one field.
     pub fn validation(field: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::Validation {
-            field: field.into(),
-            message: message.into(),
-        }
+        let mut errors = crate::validation::ValidationErrors::new();
+        errors.add(field, message);
+        errors.into()
     }
 
     /// Construct a conversion error.
     pub fn conversion(message: impl Into<String>) -> Self {
         Self::Conversion {
             message: message.into(),
+            source: None,
         }
     }
 
@@ -546,6 +272,7 @@ impl Error {
     pub fn internal(message: impl Into<String>) -> Self {
         Self::Internal {
             message: message.into(),
+            source: None,
         }
     }
 
@@ -597,8 +324,7 @@ impl Error {
     /// Return attached context for `NotFound` and `Query` errors.
     pub fn context(&self) -> Option<&ErrorContext> {
         match self {
-            Self::NotFound { context, .. } => context.as_deref(),
-            Self::Query { context, .. } => context.as_deref(),
+            Self::NotFound { context, .. } | Self::Query { context, .. } => context.as_deref(),
             _ => None,
         }
     }
@@ -710,6 +436,27 @@ impl Error {
     /// the wording of the backend's message.
     pub fn is_foreign_key_violation(&self) -> bool {
         self.failure_kind() == DbFailureKind::ForeignKeyViolation
+    }
+
+    /// True when the database reported a unique or primary-key violation,
+    /// classified as [`is_foreign_key_violation`](Self::is_foreign_key_violation) is.
+    pub fn is_unique_violation(&self) -> bool {
+        self.failure_kind() == DbFailureKind::UniqueViolation
+    }
+
+    /// True when the database reported a `NOT NULL` violation, classified as
+    /// [`is_foreign_key_violation`](Self::is_foreign_key_violation) is.
+    pub fn is_not_null_violation(&self) -> bool {
+        self.failure_kind() == DbFailureKind::NotNullViolation
+    }
+
+    /// Every failure behind an [`Error::Validation`], in the order the
+    /// fields failed; `None` for any other error.
+    pub fn validation_errors(&self) -> Option<&crate::validation::ValidationErrors> {
+        match self {
+            Self::Validation { errors, .. } => Some(errors),
+            _ => None,
+        }
     }
 }
 

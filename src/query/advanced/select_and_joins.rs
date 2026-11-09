@@ -1,4 +1,5 @@
 use super::*;
+use crate::columns::{IntoColumnName, IntoColumnNames, map_columns};
 
 impl<M: Model> QueryBuilder<M> {
     /// Select specific columns.
@@ -20,11 +21,38 @@ impl<M: Model> QueryBuilder<M> {
     /// use tideorm::prelude::*;
     /// # #[tideorm::model(table = "users", soft_delete)]
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
-    /// User::query().select(vec!["id", "name"]).validate().unwrap();
+    /// User::query().select(["id", "name"]).validate().unwrap();
+    /// User::query().select((User::ID, User::ACTIVE)).validate().unwrap();
     /// ```
-    #[must_use]
-    pub fn select(mut self, columns: Vec<&str>) -> Self {
-        self.clauses.select_columns = Some(columns.into_iter().map(|s| s.to_string()).collect());
+    ///
+    /// Columns are names, field names or typed columns, in an array, a `Vec`
+    /// or a slice, or a tuple of typed columns of different types (see
+    /// [`IntoColumnNames`]). Another model's typed column is written with its
+    /// table, for a joined query.
+    pub fn select(mut self, columns: impl IntoColumnNames) -> Self {
+        self.clauses.select_columns =
+            Some(map_columns(&columns, |column| Self::own_column(&column)));
+        self
+    }
+
+    /// Add one column to the typed projection.
+    ///
+    /// Unlike [`select()`](Self::select) it keeps the columns already
+    /// selected; on a query that selected none, the projection becomes this
+    /// one column rather than the model's own columns plus it.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().select([User::ID]).add_select(User::NAME).validate().unwrap();
+    /// ```
+    pub fn add_select(mut self, column: impl IntoColumnName) -> Self {
+        let column = Self::own_column(&column);
+        self.clauses
+            .select_columns
+            .get_or_insert_with(Vec::new)
+            .push(column);
         self
     }
 
@@ -61,7 +89,6 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().distinct().validate().unwrap();
     /// ```
-    #[must_use]
     pub fn distinct(mut self) -> Self {
         if !self.is_distinct() {
             self.clauses
@@ -81,20 +108,21 @@ impl<M: Model> QueryBuilder<M> {
     /// value and the last `update()` wins, silently undoing the other:
     ///
     /// ```rust,ignore
-    /// let shipped = Item::transaction(|_tx| Box::pin(async move {
-    ///     let mut item = Item::query()
-    ///         .where_eq("id", id)
-    ///         .lock_for_update()
-    ///         .first_or_fail()
-    ///         .await?;
-    ///     if item.stock < quantity {
-    ///         return Ok(false);
-    ///     }
-    ///     item.stock -= quantity;
-    ///     item.update().await?;
-    ///     Ok(true)
-    /// }))
-    /// .await?;
+    /// let shipped = Database::current()?
+    ///     .atomically(async {
+    ///         let mut item = Item::query()
+    ///             .where_eq("id", id)
+    ///             .lock_for_update()
+    ///             .first_or_fail()
+    ///             .await?;
+    ///         if item.stock < quantity {
+    ///             return Ok(false);
+    ///         }
+    ///         item.stock -= quantity;
+    ///         item.update().await?;
+    ///         Ok(true)
+    ///     })
+    ///     .await?;
     /// ```
     ///
     /// Outside a transaction the lock ends with the statement. `count()`,
@@ -114,7 +142,6 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().lock_for_update().validate().unwrap();
     /// ```
-    #[must_use]
     pub fn lock_for_update(mut self) -> Self {
         self.clauses.lock_for_update = true;
         self
@@ -133,33 +160,34 @@ impl<M: Model> QueryBuilder<M> {
     /// use tideorm::prelude::*;
     /// # #[tideorm::model(table = "users", soft_delete)]
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
-    /// User::query().select_with_linked(vec!["id"], "posts", "id", "user_id", vec!["title"]).validate().unwrap();
+    /// User::query().select_with_linked(["id"], "posts", "id", "user_id", ["title"]).validate().unwrap();
     /// ```
-    #[must_use]
+    ///
+    /// The join matches this table's `local_column` with the linked table's
+    /// `linked_column`: `users.id = posts.user_id` above. Columns are names
+    /// or typed columns; only their names are used, written with their table.
     pub fn select_with_linked(
         self,
-        local_columns: Vec<&str>,
+        local_columns: impl IntoColumnNames,
         linked_table: &str,
-        local_fk: &str,
-        remote_pk: &str,
-        linked_columns: Vec<&str>,
+        local_column: impl IntoColumnName,
+        linked_column: impl IntoColumnName,
+        linked_columns: impl IntoColumnNames,
     ) -> Self {
         let table_name = M::table_name();
-        let mut all_columns: Vec<String> = local_columns
-            .iter()
-            .map(|c| format!("{}.{}", table_name, c))
-            .collect();
+        let mut all_columns = map_columns(&local_columns, |c| {
+            format!("{}.{}", table_name, c.column_name())
+        });
+        all_columns.extend(map_columns(&linked_columns, |c| {
+            format!("{}.{}", linked_table, c.column_name())
+        }));
 
-        for col in linked_columns {
-            all_columns.push(format!("{}.{}", linked_table, col));
-        }
-
-        let mut query = self.join(
+        let mut query = self.push_join(
             JoinType::Left,
             linked_table,
             None,
-            &format!("{}.{}", table_name, local_fk),
-            &format!("{}.{}", linked_table, remote_pk),
+            format!("{}.{}", table_name, local_column.column_name()),
+            format!("{}.{}", linked_table, linked_column.column_name()),
         );
         query.clauses.select_columns = Some(all_columns);
         query
@@ -174,23 +202,68 @@ impl<M: Model> QueryBuilder<M> {
     /// use tideorm::prelude::*;
     /// # #[tideorm::model(table = "users", soft_delete)]
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
-    /// User::query().select_also_linked("posts", "id", "user_id", vec!["title"]).validate().unwrap();
+    /// User::query().select_also_linked("posts", "id", "user_id", ["title"]).validate().unwrap();
     /// ```
-    #[must_use]
     pub fn select_also_linked(
         self,
         linked_table: &str,
-        local_pk: &str,
-        remote_fk: &str,
-        linked_columns: Vec<&str>,
+        local_column: impl IntoColumnName,
+        linked_column: impl IntoColumnName,
+        linked_columns: impl IntoColumnNames,
     ) -> Self {
         self.select_with_linked(
-            M::column_names().to_vec(),
+            M::column_names(),
             linked_table,
-            local_pk,
-            remote_fk,
+            local_column,
+            linked_column,
             linked_columns,
         )
+    }
+
+    /// Join model `R`'s table, matching `left` with `right`.
+    ///
+    /// The typed form of [`inner_join`](Self::inner_join) and its siblings:
+    /// the table comes from `R`, and typed columns are written with their own
+    /// tables.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// # #[tideorm::model(table = "posts")]
+    /// # struct Post { #[tideorm(primary_key)] id: i64, user_id: i64 }
+    /// User::query().join::<Post>(JoinType::Left, User::ID, Post::USER_ID).validate().unwrap();
+    /// ```
+    pub fn join<R: Model>(
+        self,
+        join_type: JoinType,
+        left: impl IntoColumnName,
+        right: impl IntoColumnName,
+    ) -> Self {
+        self.join_columns(join_type, R::table_name(), None, left, right)
+    }
+
+    /// Join model `R`'s table under `alias`, matching `left` with `right`.
+    ///
+    /// A typed column of `R` is written with the alias, so a model can join
+    /// its own table.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// # #[tideorm::model(table = "posts")]
+    /// # struct Post { #[tideorm(primary_key)] id: i64, user_id: i64 }
+    /// User::query().join_as::<Post>(JoinType::Inner, "p", User::ID, Post::USER_ID).validate().unwrap();
+    /// ```
+    pub fn join_as<R: Model>(
+        self,
+        join_type: JoinType,
+        alias: &str,
+        left: impl IntoColumnName,
+        right: impl IntoColumnName,
+    ) -> Self {
+        self.join_columns(join_type, R::table_name(), Some(alias), left, right)
     }
 
     /// Add an INNER JOIN clause
@@ -206,9 +279,13 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().inner_join("posts", "users.id", "posts.user_id").validate().unwrap();
     /// ```
-    #[must_use]
-    pub fn inner_join(self, table: &str, left_column: &str, right_column: &str) -> Self {
-        self.join(JoinType::Inner, table, None, left_column, right_column)
+    pub fn inner_join(
+        self,
+        table: &str,
+        left_column: impl IntoColumnName,
+        right_column: impl IntoColumnName,
+    ) -> Self {
+        self.join_columns(JoinType::Inner, table, None, left_column, right_column)
     }
 
     /// Add an INNER JOIN clause with an alias
@@ -222,15 +299,14 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().inner_join_as("posts", "p", "users.id", "p.user_id").validate().unwrap();
     /// ```
-    #[must_use]
     pub fn inner_join_as(
         self,
         table: &str,
         alias: &str,
-        left_column: &str,
-        right_column: &str,
+        left_column: impl IntoColumnName,
+        right_column: impl IntoColumnName,
     ) -> Self {
-        self.join(
+        self.join_columns(
             JoinType::Inner,
             table,
             Some(alias),
@@ -250,9 +326,13 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().left_join("posts", "users.id", "posts.user_id").validate().unwrap();
     /// ```
-    #[must_use]
-    pub fn left_join(self, table: &str, left_column: &str, right_column: &str) -> Self {
-        self.join(JoinType::Left, table, None, left_column, right_column)
+    pub fn left_join(
+        self,
+        table: &str,
+        left_column: impl IntoColumnName,
+        right_column: impl IntoColumnName,
+    ) -> Self {
+        self.join_columns(JoinType::Left, table, None, left_column, right_column)
     }
 
     /// Add a LEFT JOIN clause with an alias
@@ -266,15 +346,14 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().left_join_as("posts", "p", "users.id", "p.user_id").validate().unwrap();
     /// ```
-    #[must_use]
     pub fn left_join_as(
         self,
         table: &str,
         alias: &str,
-        left_column: &str,
-        right_column: &str,
+        left_column: impl IntoColumnName,
+        right_column: impl IntoColumnName,
     ) -> Self {
-        self.join(
+        self.join_columns(
             JoinType::Left,
             table,
             Some(alias),
@@ -297,9 +376,13 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().right_join("posts", "users.id", "posts.user_id").validate().unwrap();
     /// ```
-    #[must_use]
-    pub fn right_join(self, table: &str, left_column: &str, right_column: &str) -> Self {
-        self.join(JoinType::Right, table, None, left_column, right_column)
+    pub fn right_join(
+        self,
+        table: &str,
+        left_column: impl IntoColumnName,
+        right_column: impl IntoColumnName,
+    ) -> Self {
+        self.join_columns(JoinType::Right, table, None, left_column, right_column)
     }
 
     /// Add a RIGHT JOIN clause with an alias
@@ -313,15 +396,14 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().right_join_as("posts", "p", "users.id", "p.user_id").validate().unwrap();
     /// ```
-    #[must_use]
     pub fn right_join_as(
         self,
         table: &str,
         alias: &str,
-        left_column: &str,
-        right_column: &str,
+        left_column: impl IntoColumnName,
+        right_column: impl IntoColumnName,
     ) -> Self {
-        self.join(
+        self.join_columns(
             JoinType::Right,
             table,
             Some(alias),
@@ -330,17 +412,37 @@ impl<M: Model> QueryBuilder<M> {
         )
     }
 
+    /// Register a join of columns named or typed: a typed column is written
+    /// with its table, or with `alias` when that is the joined table.
+    fn join_columns(
+        self,
+        join_type: JoinType,
+        table: &str,
+        alias: Option<&str>,
+        left_column: impl IntoColumnName,
+        right_column: impl IntoColumnName,
+    ) -> Self {
+        let reference = |column: &dyn IntoColumnName| match (alias, column.column_table()) {
+            (Some(alias), Some(own)) if own == table && column.column_schema().is_none() => {
+                format!("{alias}.{}", column.column_name())
+            }
+            _ => crate::columns::column_reference(&column, None),
+        };
+        let (left, right) = (reference(&left_column), reference(&right_column));
+        self.push_join(join_type, table, alias, left, right)
+    }
+
     /// Register a join, invalidating the query instead when any part of it is
     /// not a plain identifier.
-    fn join(
+    fn push_join(
         mut self,
         join_type: JoinType,
         table: &str,
         alias: Option<&str>,
-        left_column: &str,
-        right_column: &str,
+        left_column: String,
+        right_column: String,
     ) -> Self {
-        if let Err(reason) = Self::validate_join_clause(table, alias, left_column, right_column) {
+        if let Err(reason) = Self::validate_join_clause(table, alias, &left_column, &right_column) {
             self.invalidate_query(reason);
             return self;
         }
@@ -349,8 +451,8 @@ impl<M: Model> QueryBuilder<M> {
             join_type,
             table: table.to_string(),
             alias: alias.map(|s| s.to_string()),
-            left_column: left_column.to_string(),
-            right_column: right_column.to_string(),
+            left_column,
+            right_column,
         });
         self
     }

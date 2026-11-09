@@ -75,46 +75,44 @@ async fn generated_key_upserts_validate_update_and_exclusion_columns() {
         name: String,
     }
     let db = memory_database("CREATE TABLE audit_upsert_columns(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)").await;
-    db.transaction(|_| {
-        Box::pin(async {
-            for id in [0, 1] {
-                for exclusion in [false, true] {
-                    let builder = UpsertRow::on_conflict(vec!["id"]);
-                    let builder = if exclusion {
-                        builder.update_all_except(vec!["missing"])
-                    } else {
-                        builder.update_columns(vec!["missing"])
-                    };
-                    let error = builder
-                        .insert(UpsertRow {
-                            id,
-                            name: "invalid".into(),
-                        })
-                        .await
-                        .unwrap_err();
-                    assert!(error.to_string().contains("missing"), "{error}");
-                    assert_eq!(UpsertRow::query().count().await?, 0);
-                }
+    db.transaction(async |_| {
+        for id in [0, 1] {
+            for exclusion in [false, true] {
+                let builder = UpsertRow::on_conflict(vec!["id"]);
+                let builder = if exclusion {
+                    builder.update_all_except(vec!["missing"])
+                } else {
+                    builder.update_columns(vec!["missing"])
+                };
+                let error = builder
+                    .insert(UpsertRow {
+                        id,
+                        name: "invalid".into(),
+                    })
+                    .await
+                    .unwrap_err();
+                assert!(error.to_string().contains("missing"), "{error}");
+                assert_eq!(UpsertRow::query().count().await?, 0);
             }
-            let inserted = UpsertRow::on_conflict(vec!["id"])
-                .update_columns(vec!["name"])
-                .insert(UpsertRow {
-                    id: 0,
-                    name: "initial".into(),
-                })
-                .await?;
-            assert!(inserted.id > 0);
-            let updated = UpsertRow::on_conflict(vec!["id"])
-                .update_columns(vec!["name"])
-                .insert(UpsertRow {
-                    id: inserted.id,
-                    name: "updated".into(),
-                })
-                .await?;
-            assert_eq!(updated.name, "updated");
-            assert_eq!(UpsertRow::query().count().await?, 1);
-            Ok(())
-        })
+        }
+        let inserted = UpsertRow::on_conflict(vec!["id"])
+            .update_columns(vec!["name"])
+            .insert(UpsertRow {
+                id: 0,
+                name: "initial".into(),
+            })
+            .await?;
+        assert!(inserted.id > 0);
+        let updated = UpsertRow::on_conflict(vec!["id"])
+            .update_columns(vec!["name"])
+            .insert(UpsertRow {
+                id: inserted.id,
+                name: "updated".into(),
+            })
+            .await?;
+        assert_eq!(updated.name, "updated");
+        assert_eq!(UpsertRow::query().count().await?, 1);
+        Ok(())
     })
     .await
     .unwrap();
@@ -383,7 +381,7 @@ async fn null_related_keys_never_change_the_pivot() {
         "id",
         "review_nullable_pivot",
     )
-    .with_parent_pk(json!(1));
+    .with_parent_pk(1, false);
     assert!(relation.sync(vec![Some(10_i64), None]).await.is_err());
     assert!(relation.attach(None::<i64>).await.is_err());
     let rows = Pivot::all().await.unwrap();
@@ -486,50 +484,48 @@ async fn model_writes_refuse_a_nan_float() {
          INSERT INTO audit_values VALUES(1,X'00112233445566778899AABBCCDDEEFF',1)",
     )
     .await;
-    db.transaction(|_| {
-        Box::pin(async {
-            assert!(
-                Typed::create(Typed {
+    db.transaction(async |_| {
+        assert!(
+            Typed::create(Typed {
+                id: 2,
+                token: Uuid::nil(),
+                amount: Some(f64::NAN)
+            })
+            .await
+            .is_err()
+        );
+        let mut row = Typed::find(1).await?.unwrap();
+        row.amount = Some(f64::NAN);
+        assert!(row.update().await.is_err());
+        assert!(
+            Typed::insert_all(vec![
+                Typed {
                     id: 2,
                     token: Uuid::nil(),
+                    amount: Some(2.0)
+                },
+                Typed {
+                    id: 3,
+                    token: Uuid::nil(),
                     amount: Some(f64::NAN)
-                })
-                .await
-                .is_err()
-            );
-            let mut row = Typed::find(1).await?.unwrap();
-            row.amount = Some(f64::NAN);
-            assert!(row.update().await.is_err());
-            assert!(
-                Typed::insert_all(vec![
-                    Typed {
-                        id: 2,
-                        token: Uuid::nil(),
-                        amount: Some(2.0)
-                    },
-                    Typed {
-                        id: 3,
-                        token: Uuid::nil(),
-                        amount: Some(f64::NAN)
-                    },
-                ])
-                .await
-                .is_err()
-            );
-            assert!(
-                Typed::insert_or_update(
-                    Typed {
-                        id: 1,
-                        token: Uuid::nil(),
-                        amount: Some(f64::NAN)
-                    },
-                    vec!["id"]
-                )
-                .await
-                .is_err()
-            );
-            Ok(())
-        })
+                },
+            ])
+            .await
+            .is_err()
+        );
+        assert!(
+            Typed::insert_or_update(
+                Typed {
+                    id: 1,
+                    token: Uuid::nil(),
+                    amount: Some(f64::NAN)
+                },
+                vec!["id"]
+            )
+            .await
+            .is_err()
+        );
+        Ok(())
     })
     .await
     .unwrap();
@@ -538,4 +534,79 @@ async fn model_writes_refuse_a_nan_float() {
         Typed::find_with(1, &db).await.unwrap().unwrap().amount,
         Some(1.0)
     );
+}
+
+/// A raw parameter the driver cannot encode, here an unsigned value past
+/// SQLite's signed integer, fails its statement as a query error instead of
+/// panicking, and leaves the connection and the enclosing transaction usable.
+#[tokio::test]
+async fn raw_parameters_the_driver_cannot_encode_fail_their_statement() {
+    let db = memory_database("CREATE TABLE audit_raw_values(value INTEGER)").await;
+    let overflowing = || vec![DbValue::BigUnsigned(Some(u64::MAX))];
+    let error = db
+        .exec_raw_with_params("INSERT INTO audit_raw_values VALUES (?)", overflowing())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::Query { .. }), "{error:?}");
+    let error = db
+        .query_raw_json_with_params("SELECT ? AS value", overflowing())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::Query { .. }), "{error:?}");
+
+    let handle = db.clone();
+    db.transaction(async move |_| {
+        let error = handle
+            .exec_raw_with_params("INSERT INTO audit_raw_values VALUES (?)", overflowing())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::Query { .. }), "{error:?}");
+        handle
+            .exec_raw_with_params(
+                "INSERT INTO audit_raw_values VALUES (?)",
+                vec![DbValue::BigUnsigned(Some(i64::MAX as u64))],
+            )
+            .await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(row_count(&db, "audit_raw_values").await, 1);
+}
+
+/// Generic code inserts a batch with no engine bounds of its own.
+async fn insert_generically<M: Model>(models: Vec<M>) -> tideorm::Result<Vec<M>> {
+    M::insert_all(models).await
+}
+
+/// Upserts name their columns with typed columns or names, and `do_nothing`
+/// returns the stored row unchanged.
+#[tokio::test]
+async fn upserts_take_typed_columns_and_do_nothing_keeps_the_stored_row() {
+    let db = users_and_posts("tenant", 10).await;
+    let post = |id, title: &str| Post {
+        id,
+        user_id: 1,
+        title: title.into(),
+    };
+    db.scope(async {
+        let kept = Post::on_conflict([Post::columns.id])
+            .do_nothing()
+            .insert(post(10, "ignored"))
+            .await?;
+        assert_eq!(kept.title, "tenant");
+        let updated = Post::on_conflict([Post::columns.id])
+            .update_columns([Post::columns.title])
+            .insert(post(10, "updated"))
+            .await?;
+        assert_eq!(updated.title, "updated");
+        let inserted = Post::insert_or_update(post(11, "new"), ["id"]).await?;
+        assert_eq!(inserted.title, "new");
+        let batch = insert_generically(vec![post(12, "a"), post(13, "b")]).await?;
+        assert_eq!(batch.len(), 2);
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(Post::query_with(&db).count().await.unwrap(), 4);
 }

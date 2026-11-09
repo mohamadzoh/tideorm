@@ -1,8 +1,5 @@
 use super::db_sql;
-use super::{
-    CTE, FrameBound, FrameType, Order, QueryBuilder, UnionClause, UnionType, WindowFunction,
-    WindowFunctionType,
-};
+use super::{CTE, FrameBound, FrameType, Order, QueryBuilder, WindowFunction, WindowFunctionType};
 use crate::columns::ColumnLike;
 use crate::config::DatabaseType;
 use crate::internal::Value;
@@ -54,6 +51,9 @@ impl ScopedQueryTestUser {
 
 #[path = "query_tests/db_sql_and_safety_tests.rs"]
 mod db_sql_and_safety_tests;
+
+#[path = "query_tests/checked_fragment_tests.rs"]
+mod checked_fragment_tests;
 
 #[path = "query_tests/validation_and_async_tests.rs"]
 mod validation_and_async_tests;

@@ -1,6 +1,6 @@
 //! `UNION` and `UNION ALL` over encrypted projections.
 
-use crate::fixtures::global_memory_database;
+use crate::fixtures::{self, global_memory_database};
 use tideorm::prelude::*;
 
 #[tideorm::model(table = "union_plain")]
@@ -46,12 +46,10 @@ async fn database() -> Database {
     db
 }
 
+/// [`fixtures::encrypted_error`], refused by `operation`.
 fn encrypted_error<T: std::fmt::Debug>(result: tideorm::Result<T>, operation: &str) {
-    let error = result.unwrap_err().to_string();
-    assert!(
-        error.contains(operation) && error.contains("encrypted"),
-        "{error}"
-    );
+    let error = fixtures::encrypted_error(result);
+    assert!(error.contains(operation), "{error}");
 }
 
 #[tokio::test]

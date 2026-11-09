@@ -1,15 +1,10 @@
+use std::fmt::Write as _;
+
 use super::{DbFailure, DbFailureKind, Error};
 
-/// What to do about an exhausted pool, whether or not the driver classified it.
-const POOL_ADVICE: &str = "Consider:\n\
-     1. Increasing `max_connections` in TideConfig\n\
-     2. Reducing connection hold time\n\
-     3. Using `acquire_timeout` to wait for connections";
-
-/// The headline and next step for each classification.
-///
-/// Both the structured path and the message fallback render from this one
-/// table. `None` for [`DbFailureKind::Unclassified`], which has neither.
+/// The headline and next step for each classification, which every
+/// classified failure renders from. `None` for
+/// [`DbFailureKind::Unclassified`], which has neither.
 fn advice(kind: DbFailureKind) -> Option<(&'static str, &'static str)> {
     let advice = match kind {
         DbFailureKind::Unclassified => return None,
@@ -64,120 +59,83 @@ fn advice(kind: DbFailureKind) -> Option<(&'static str, &'static str)> {
             "Statement timed out",
             "Retry, add an index, or raise the statement timeout.",
         ),
-        DbFailureKind::ConnectionTimeout => ("Timed out waiting for a connection", POOL_ADVICE),
+        DbFailureKind::ConnectionTimeout => (
+            "Timed out waiting for a connection",
+            "Consider:\n\
+             1. Increasing `max_connections` in TideConfig\n\
+             2. Reducing connection hold time\n\
+             3. Using `acquire_timeout` to wait for connections",
+        ),
         DbFailureKind::ConnectionClosed => (
             "The connection was closed",
             "Retry; the pool opens a fresh connection.",
+        ),
+        DbFailureKind::ConnectionRefused => (
+            "The server refused the connection",
+            "Check that the database server is running, that the URL's host and port are \
+             right, and that a firewall allows the connection.",
+        ),
+        DbFailureKind::AuthenticationFailed => (
+            "Authentication failed",
+            "Check the user name and password in the connection URL.",
+        ),
+        DbFailureKind::UnknownDatabase => (
+            "The database doesn't exist",
+            "Create it first (`CREATE DATABASE ..`), or fix its name in the connection URL.",
+        ),
+        DbFailureKind::TlsFailed => (
+            "The TLS handshake failed",
+            "Check the server's certificate and the URL's TLS options.",
+        ),
+        DbFailureKind::InvalidConfiguration => (
+            "Invalid connection settings",
+            "Check the database URL and its options, such as \
+             postgres://user:pass@host:5432/database.",
+        ),
+        DbFailureKind::NotConnected => (
+            "No database connection",
+            "Connect first with `TideConfig::init().database(url).connect().await?` or \
+             `Database::init(url).await?`.",
         ),
     };
 
     Some(advice)
 }
 
-/// Render the table entry for `kind`, with `detail` right after the headline.
-fn render_advice(kind: DbFailureKind, detail: &str) -> Option<String> {
-    advice(kind).map(|(headline, next_step)| format!("{headline}{detail}. {next_step}"))
-}
-
-/// Derive the next debugging step from what the driver actually classified.
+/// Derive the next debugging step from how the failure was classified: the
+/// table entry for its kind, with its detail right after the headline.
 ///
-/// Returns `None` for [`DbFailureKind::Unclassified`] so the caller falls back
-/// to reading the message — the only place substring matching is still correct,
-/// because there is no structured data to consult.
+/// Returns `None` for [`DbFailureKind::Unclassified`], which leaves the
+/// caller's general advice for its variant.
 fn structured_suggestion(failure: &DbFailure) -> Option<String> {
-    render_advice(failure.kind(), &failure.detail())
-}
-
-/// Guess a query failure's classification from its message, for the
-/// suggestion only, when the driver classified nothing.
-fn classify_query_message(message: &str) -> DbFailureKind {
-    if message.contains("syntax") || message.contains("Syntax") {
-        DbFailureKind::SyntaxError
-    } else if message.contains("duplicate") || message.contains("unique") {
-        DbFailureKind::UniqueViolation
-    } else if message.contains("foreign key") {
-        DbFailureKind::ForeignKeyViolation
-    } else if message.contains("null") || message.contains("NOT NULL") {
-        DbFailureKind::NotNullViolation
-    } else if message.contains("column") && message.contains("does not exist") {
-        DbFailureKind::UndefinedColumn
-    } else if message.contains("table") && message.contains("does not exist") {
-        DbFailureKind::UndefinedTable
-    } else if message.contains("permission") || message.contains("denied") {
-        DbFailureKind::InsufficientPrivilege
-    } else if message.contains("deadlock") {
-        DbFailureKind::Deadlock
-    } else {
-        DbFailureKind::Unclassified
-    }
-}
-
-/// Fall back to reading the message for connection failures.
-fn connection_suggestion_from_message(message: &str) -> String {
-    if message.contains("not initialized") {
-        "No global database connection has been set up yet. Connect first with \
-         `TideConfig::init().database(url).connect().await?` or `Database::init(url).await?`."
-            .to_string()
-    } else if message.contains("refused") || message.contains("Refused") {
-        "Database server is not running or not accepting connections. Check that:\n\
-         1. The database server is running\n\
-         2. The host and port are correct\n\
-         3. Firewall allows the connection"
-            .to_string()
-    } else if message.contains("password") || message.contains("authentication") {
-        "Check your database credentials in the connection URL.".to_string()
-    } else if message.contains("does not exist") || message.contains("unknown database") {
-        "The database doesn't exist. Create it first: CREATE DATABASE dbname;".to_string()
-    } else if message.contains("timeout") || message.contains("Timeout") {
-        "Connection timed out. Check network connectivity and increase `connect_timeout` if needed."
-            .to_string()
-    } else if message.contains("pool") || message.contains("Pool") {
-        format!("Connection pool exhausted. {POOL_ADVICE}")
-    } else {
-        "Verify your database URL format: postgres://user:pass@host:5432/database".to_string()
-    }
-}
-
-/// Fall back to reading the message for transaction-control failures.
-fn transaction_suggestion_from_message(message: &str) -> &'static str {
-    if message.contains("timeout") {
-        "Transaction timed out. Split into smaller transactions or increase timeout."
-    } else if message.contains("rollback") || message.contains("aborted") {
-        "Transaction was rolled back. Check for errors in transaction body."
-    } else {
-        "Transaction failed. Ensure all operations in the transaction are valid."
-    }
+    advice(failure.kind())
+        .map(|(headline, next_step)| format!("{headline}{}. {next_step}", failure.detail()))
 }
 
 impl Error {
-    /// Return a user-facing next step derived from the variant and message.
-    ///
-    /// Driver failures answer from the structured [`DbFailure`] where one
-    /// survived translation — including the name of the constraint that fired —
-    /// and only fall back to reading the message when the driver classified
-    /// nothing.
+    /// Return a user-facing next step for the error: the advice for its
+    /// classified [`DbFailure`] where it has one — naming the constraint that
+    /// fired — and otherwise its variant's. The message is never read.
     pub fn suggestion(&self) -> String {
         match self {
-            Self::NotFound { message, .. } => {
-                if message.contains("find") || message.contains("Find") {
-                    "Check that the ID exists. Use `Model::exists(id).await?` to verify before find.".to_string()
-                } else {
-                    "Verify the record exists and hasn't been soft-deleted. Use `.with_trashed()` to include deleted records.".to_string()
-                }
-            }
-            Self::Connection { message, source } => source
+            Self::NotFound { .. } => "Check that the record exists and hasn't been soft-deleted: \
+                 `Model::exists(id).await?` checks a key, and `.with_trashed()` includes deleted \
+                 records."
+                .to_string(),
+            Self::Connection { source, .. } => source
                 .as_deref()
                 .and_then(structured_suggestion)
-                .unwrap_or_else(|| connection_suggestion_from_message(message)),
+                .unwrap_or_else(|| {
+                    "Check that the database server is reachable and that the connection URL \
+                     names the right host, port, user, password and database."
+                        .to_string()
+                }),
             Self::Query {
-                message,
-                context,
-                source,
+                context, source, ..
             } => {
                 let base_suggestion = source
                     .as_deref()
                     .and_then(structured_suggestion)
-                    .or_else(|| render_advice(classify_query_message(message), ""))
                     .unwrap_or_else(|| {
                         "Check the SQL query and ensure all referenced columns/tables exist."
                             .to_string()
@@ -188,20 +146,20 @@ impl Error {
                     None => base_suggestion,
                 }
             }
-            Self::Validation { field, message: _ } => {
+            Self::Validation { field, .. } => {
                 format!("Validate the '{}' field before saving. Use Model::validate() for custom validation.", field)
             }
-            Self::Conversion { message } => {
-                if message.contains("type") {
-                    "Type mismatch. Check that Rust types match database column types.".to_string()
-                } else {
-                    "Data conversion failed. Verify the data format matches expected type.".to_string()
-                }
-            }
-            Self::Transaction { message, source } => source
+            Self::Conversion { .. } => "Check that the Rust field types match the column types, \
+                 and that the data has the format its type expects."
+                .to_string(),
+            Self::Transaction { source, .. } => source
                 .as_deref()
                 .and_then(structured_suggestion)
-                .unwrap_or_else(|| transaction_suggestion_from_message(message).to_string()),
+                .unwrap_or_else(|| {
+                    "The transaction failed and was rolled back. Fix the error that ended it, \
+                     then run the transaction again."
+                        .to_string()
+                }),
             Self::Configuration { message } => {
                 format!("Check your TideConfig settings: {}", message)
             }
@@ -283,60 +241,26 @@ impl Error {
         match self {
             Self::NotFound { .. } => 404,
             Self::Connection { .. } => 503,
-            Self::Query { .. } => 400,
+            Self::Query { .. }
+            | Self::Conversion { .. }
+            | Self::PrimaryKeyNotSet { .. }
+            | Self::Tokenization { .. } => 400,
             Self::Validation { .. } => 422,
-            Self::Conversion { .. } => 400,
             Self::Transaction { .. } => 409,
-            Self::Configuration { .. } => 500,
-            Self::Internal { .. } => 500,
+            Self::Configuration { .. } | Self::Internal { .. } | Self::Rbac { .. } => 500,
             Self::AccessDenied { .. } => 403,
-            Self::Rbac { .. } => 500,
             Self::BackendNotSupported { .. } => 501,
-            Self::PrimaryKeyNotSet { .. } => 400,
-            Self::Tokenization { .. } => 400,
             Self::InvalidToken { .. } => 401,
         }
     }
 
     /// Report whether retrying the operation can plausibly succeed.
     ///
-    /// The driver's own classification decides it whenever one survived
-    /// translation: a `23505` is never retryable and a `40001` always is, no
-    /// matter how the backend worded the message. Only an unclassified failure
-    /// falls back to matching transient-looking phrases.
+    /// The failure's classification decides it: a `23505` is never retryable
+    /// and a `40001` always is, however the backend worded the message. An
+    /// error with no classified failure is not retryable.
     pub fn is_retryable(&self) -> bool {
-        let kind = self.failure_kind();
-        if kind != DbFailureKind::Unclassified {
-            return kind.is_retryable();
-        }
-
-        match self {
-            Self::Connection { message, .. } => {
-                message.contains("timeout")
-                    || message.contains("timed out")
-                    || message.contains("pool")
-                    || message.contains("refused")
-            }
-            Self::Query { message, .. } => {
-                // Match transient lock phrases, never the bare word "lock":
-                // column and table names such as `blocklist`, `locked_at`, or
-                // `unlocked` otherwise make permanent schema errors look
-                // retryable.
-                let message = message.to_ascii_lowercase();
-                message.contains("deadlock")
-                    || message.contains("timeout")
-                    || message.contains("database is locked")
-                    || message.contains("lock is not available")
-                    || message.contains("could not obtain lock")
-                    || message.contains("try restarting transaction")
-            }
-            Self::Transaction { message, .. } => {
-                message.contains("deadlock")
-                    || message.contains("timeout")
-                    || message.contains("serialization")
-            }
-            _ => false,
-        }
+        self.failure_kind().is_retryable()
     }
 
     /// Render the error with its code, context, and suggestion for logs.
@@ -347,14 +271,14 @@ impl Error {
             // `operator_chain` reads `Operator chain`.
             let mut label = name.replace('_', " ");
             label[..1].make_ascii_uppercase();
-            output.push_str(&format!("\n  {label}: {value}"));
+            let _ = write!(output, "\n  {label}: {value}");
         }
 
         if let Some(failure) = self.db_failure() {
-            output.push_str(&format!("\n  Database: {}", failure));
+            let _ = write!(output, "\n  Database: {}", failure);
         }
 
-        output.push_str(&format!("\n  Suggestion: {}", self.suggestion()));
+        let _ = write!(output, "\n  Suggestion: {}", self.suggestion());
         output
     }
 }

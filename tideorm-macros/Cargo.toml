@@ -1,6 +1,6 @@
 [package]
 name = "tideorm-macros"
-version = "0.16.2"
+version = "0.17.0"
 edition = "2024"
 description = "Procedural macros for TideORM"
 license = "MIT"
@@ -13,9 +13,15 @@ rust-version = "1.94"
 [lib]
 proc-macro = true
 
+[features]
+# PostgreSQL arrays in the `tideorm::orm` derives, enabled through tideorm's
+# own `postgres` feature.
+postgres = []
+
 [dependencies]
 proc-macro2 = "1.0.107"
 quote = "1.0.47"
 syn = { version = "3.0.9", features = ["full", "extra-traits", "parsing"] }
 darling = "0.24.1"
 unicode-segmentation = "1.13.3"
+pluralizer = "0.5"

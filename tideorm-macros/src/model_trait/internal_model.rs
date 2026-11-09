@@ -3,49 +3,17 @@ use super::*;
 pub(super) fn generate_internal_model_impl(ctx: &BuildContext) -> TokenStream2 {
     let struct_name = &ctx.struct_name;
     let internal_entity_mod = &ctx.internal_entity_mod;
-    let (insert_bindings, insert_setters) =
-        write_conversion(ctx, Conversion::Insert { encrypt: false });
-    let from_entity_fields = column_initializers(ctx, Conversion::FromEntity);
-    let to_entity_fields = column_initializers(ctx, Conversion::ToEntity { encrypt: false });
-    // Relation wrappers and `#[tideorm(skip)]` fields have no column to read.
-    let non_column_defaults = ctx
-        .fields
-        .iter()
-        .filter(|field| !field.is_column())
-        .map(|field| {
-            let ident = field.ident();
-            quote!(#ident: Default::default())
-        });
+    let (insert_bindings, insert_setters) = write_conversion(ctx, Conversion::Insert);
     let pk_column_variants = &ctx.pk_column_variants;
     let name_patterns = build_name_patterns(ctx);
     let field_idents = &ctx.field_idents;
-    // JSON writes a NaN or infinite float as `null`; dirty tracking compares
-    // float fields by a value that tells them apart.
-    let (float_patterns, float_idents): (Vec<_>, Vec<_>) = ctx
-        .db_fields
-        .iter()
-        .zip(&name_patterns)
-        .filter(|(field, _)| field.is_float())
-        .map(|(field, pattern)| (pattern.clone(), field.ident().clone()))
-        .unzip();
-    let field_compare_value = (!float_idents.is_empty()).then(|| {
-        quote! {
-            fn field_compare_value(&self, field: &str) -> ::tideorm::Result<Option<::tideorm::serde_json::Value>> {
-                match field {
-                    #(#float_patterns => Ok(Some(::tideorm::model::__FloatCompare::__compare_value(&self.#float_idents))),)*
-                    _ => self.field_json_value(field),
-                }
-            }
-        }
-    });
     let primary_key_condition_impl = build_primary_key_condition_impl(ctx);
-    // The trait's defaults bridge the fallible conversions to the plaintext ones,
-    // which is exactly right until a column is encrypted.
-    let encrypted_conversions = (!ctx.encrypted_fields.is_empty()).then(|| {
-        let (insert_bindings, insert_setters) =
-            write_conversion(ctx, Conversion::Insert { encrypt: true });
-        let to_entity_fields = column_initializers(ctx, Conversion::ToEntity { encrypt: true });
-        quote! {
+
+    quote! {
+        #[doc(hidden)]
+        impl ::tideorm::internal::InternalModel for #struct_name {
+            type ActiveModel = #internal_entity_mod::ActiveModel;
+
             fn try_into_active_model(self) -> ::tideorm::Result<Self::ActiveModel> {
                 use ::tideorm::orm::ActiveValue;
                 #insert_bindings
@@ -54,44 +22,10 @@ pub(super) fn generate_internal_model_impl(ctx: &BuildContext) -> TokenStream2 {
                 })
             }
 
-            fn try_to_entity_model(&self) -> ::tideorm::Result<<Self::Entity as ::tideorm::orm::EntityTrait>::Model> {
-                Ok(#internal_entity_mod::Model {
-                    #(#to_entity_fields),*
-                })
-            }
-        }
-    });
-
-    quote! {
-        #[doc(hidden)]
-        impl ::tideorm::internal::InternalModel for #struct_name {
-            type Entity = #internal_entity_mod::Entity;
-            type ActiveModel = #internal_entity_mod::ActiveModel;
-
-            fn into_active_model(self) -> Self::ActiveModel {
-                use ::tideorm::orm::ActiveValue;
-                #insert_bindings
-                #internal_entity_mod::ActiveModel {
-                    #(#insert_setters),*
-                }
-            }
-
-            #encrypted_conversions
-
-            fn try_from_entity_model(model: #internal_entity_mod::Model) -> ::tideorm::Result<Self> {
-                let model = Self {
-                    #(#from_entity_fields,)*
-                    #(#non_column_defaults,)*
-                }
-                .with_relations();
-                ::tideorm::model::__remember_dirty_snapshot(&model);
-                Ok(model)
-            }
-
-            fn to_entity_model(&self) -> <Self::Entity as ::tideorm::orm::EntityTrait>::Model {
-                #internal_entity_mod::Model {
-                    #(#to_entity_fields),*
-                }
+            fn finish_load(self, connection: &::tideorm::database::ConnectionRef) -> Self {
+                let mut model = self.with_relations();
+                ::tideorm::model::__finish_load(&mut model, connection);
+                model
             }
 
             fn primary_key_columns() -> Vec<<Self::Entity as ::tideorm::orm::EntityTrait>::Column> {
@@ -108,11 +42,7 @@ pub(super) fn generate_internal_model_impl(ctx: &BuildContext) -> TokenStream2 {
                 self.with_relations()
             }
 
-            fn refresh_runtime_relations_from(&mut self, previous: &Self) {
-                self.__wire_relations(Some(previous));
-            }
-
-            // Here, in `copy_field_from` and in `set_field_json` an arm only
+            // Here and in `set_field_json` an arm only
             // picks the field: the code after the `match` is emitted once per
             // model, not once per field.
             fn field_json_value(&self, field: &str) -> ::tideorm::Result<Option<::tideorm::serde_json::Value>> {
@@ -123,18 +53,6 @@ pub(super) fn generate_internal_model_impl(ctx: &BuildContext) -> TokenStream2 {
                 value.map(Some).map_err(|e| {
                     ::tideorm::Error::query(format!("Failed to serialize field '{}': {}", field, e))
                 })
-            }
-
-            #field_compare_value
-
-            fn copy_field_from(&mut self, source: &Self, field: &str) -> ::tideorm::Result<bool> {
-                match field {
-                    #(#name_patterns => {
-                        self.#field_idents = ::std::clone::Clone::clone(&source.#field_idents);
-                    })*
-                    _ => return Ok(false),
-                }
-                Ok(true)
             }
 
             fn set_field_json(&mut self, field: &str, value: ::tideorm::serde_json::Value) -> ::tideorm::Result<bool> {

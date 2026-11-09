@@ -1,4 +1,7 @@
 use super::*;
+use crate::orm::sql_builder::{
+    CommonTableExpression, LockType, OrderedStatement, SelectExpr, SelectExprTrait, WithClause,
+};
 
 impl<M: Model> QueryBuilder<M> {
     /// Canonicalize a column reference to its database column name, keeping any
@@ -114,7 +117,7 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
-    /// Render the projection from every source that contributed one.
+    /// Add the projection from every source that contributed one.
     ///
     /// The four sources compose in a fixed order — the typed columns of
     /// `select()`, the raw expressions of `select_raw()`, the scalar subqueries
@@ -127,204 +130,173 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// `distinct()` records itself as a sentinel among the raw expressions
     /// because it modifies the projection as a whole. The sentinel is dropped
-    /// here and re-emitted as the `DISTINCT` keyword in front of the joined
-    /// list, so it never reaches SQL and never counts as a contribution.
-    ///
-    /// The projection precedes every other clause, so the subqueries' values
-    /// are the first ones bound.
-    fn build_select_clause_sql(&self, db_type: DatabaseType, params: &mut Vec<Value>) -> String {
+    /// here and becomes the statement's `DISTINCT`, so it never reaches SQL
+    /// and never counts as a contribution.
+    fn project(&self, select: &mut SelectStatement, db_type: DatabaseType) -> Result<()> {
         let table = M::table_name();
-        let mut expressions: Vec<String> = Vec::new();
-
-        if let Some(columns) = &self.clauses.select_columns {
-            for column in columns {
-                expressions.push(self.format_select_column_for_db(db_type, table, column));
-            }
-        }
-
-        expressions.extend(self.raw_projection().cloned());
+        let mut outputs: Vec<SelectExpr> = self
+            .clauses
+            .select_columns
+            .iter()
+            .flatten()
+            .map(|column| self.format_select_column_for_db(db_type, table, column))
+            .chain(self.raw_projection().cloned())
+            .map(|expression| Expr::cust(expression).into())
+            .collect();
 
         for subquery in &self.clauses.subquery_select_expressions {
-            let query_sql = db_sql::rebase_placeholders(db_type, &subquery.query_sql, params.len());
-            params.extend(subquery.params.iter().cloned());
-            expressions.push(format!(
-                "({}) AS {}",
-                query_sql,
-                db_sql::quote_ident(db_type, &subquery.alias)
-            ));
+            let query = subquery.query.select(db_type)?;
+            outputs
+                .push(Expr::SubQuery(None, Box::new(query.into())).alias(subquery.alias.clone()));
         }
 
         // The default projection names the model's columns, so a column a
         // migration adds cannot change the shape of an already-prepared
         // statement. A raw UNION arm's shape is unknown, typically `SELECT *`,
         // so a query with one keeps `table.*` to stay aligned with it.
-        if expressions.is_empty() {
-            if self.reads_table_wildcard() {
-                expressions.push(format!("{}.*", db_sql::quote_ident(db_type, table)));
-            } else {
-                expressions.push(db_sql::model_columns_sql::<M>(db_type, Some(table)));
-            }
+        if outputs.is_empty() {
+            outputs.push(
+                Expr::cust(if self.reads_table_wildcard() {
+                    format!("{}.*", db_sql::quote_ident(db_type, table))
+                } else {
+                    db_sql::model_columns_sql::<M>(db_type, Some(table))
+                })
+                .into(),
+            );
         }
 
         // Window columns are Rust field names or database columns, as in every
         // other slot, so they are rendered the way the query renders those.
         let canonical = |column: &str| self.canonical_model_identifier(column).into_owned();
         for window_function in &self.clauses.window_functions {
-            expressions.push(
-                window_function
-                    .map_columns(&canonical)
-                    .to_sql_for_db(db_type),
+            if window_function.frame_type == Some(crate::query::FrameType::Groups)
+                && window_function.frame_start.is_some()
+                && !db_type.dialect().groups_frames()
+            {
+                return Err(Error::query(format!(
+                    "window '{}' is framed by GROUPS, which {:?} does not support; use ROWS or RANGE",
+                    window_function.alias, db_type
+                )));
+            }
+            outputs.push(
+                Expr::cust(
+                    window_function
+                        .map_columns(&canonical)
+                        .to_sql_for_db(db_type),
+                )
+                .into(),
             );
         }
 
-        let keyword = if self.is_distinct() {
-            "SELECT DISTINCT"
-        } else {
-            "SELECT"
-        };
-
-        format!("{} {} ", keyword, expressions.join(", "))
+        if self.is_distinct() {
+            select.distinct();
+        }
+        select.exprs(outputs);
+        Ok(())
     }
 
-    pub(crate) fn append_from_and_join_sql(&self, sql: &mut String, db_type: DatabaseType) {
-        sql.push_str("FROM ");
-        db_sql::push_quoted_table::<M>(sql, db_type);
-        sql.push(' ');
+    /// Add the query's table, each join's `<JOIN> <table> ON <a> = <b>`, and
+    /// the `WHERE` filter.
+    pub(super) fn add_tables_and_filter(
+        &self,
+        select: &mut SelectStatement,
+        db_type: DatabaseType,
+    ) -> Result<()> {
+        select.from(db_sql::table_name(M::schema_name(), M::table_name()));
 
         for join in &self.clauses.joins {
-            // Validated as `table` or `schema.table`, so each part is quoted.
-            let table = db_sql::format_column(db_type, &join.table);
-            let join_table = if let Some(alias) = &join.alias {
-                format!("{} AS {}", table, db_sql::quote_ident(db_type, alias))
-            } else {
-                table
-            };
-
-            sql.push_str(&format!(
-                "{} {} ON {} = {} ",
-                join.join_type.as_sql(),
-                join_table,
+            // Validated as `table` or `schema.table`.
+            let (schema, table) = crate::query::builder::schema_and_table(&join.table);
+            let table = db_sql::table_name(schema, table);
+            let on = Expr::cust(format!(
+                "{} = {}",
                 self.format_column_for_db(db_type, &join.left_column),
                 self.format_column_for_db(db_type, &join.right_column)
             ));
+            match &join.alias {
+                Some(alias) => {
+                    select.join_as(join.join_type.to_builder(), table, alias.clone(), on)
+                }
+                None => select.join(join.join_type.to_builder(), table, on),
+            };
         }
+
+        let filter = self.where_bound(db_type)?;
+        if !filter.is_empty() {
+            select.and_where(filter.into());
+        }
+        Ok(())
     }
 
-    fn append_group_by_and_having_sql(
-        &self,
-        sql: &mut String,
-        db_type: DatabaseType,
-        params: &mut Vec<Value>,
-    ) {
-        if !self.clauses.group_by.is_empty() {
-            let columns: Vec<String> = self
-                .clauses
+    fn group_by_and_having(&self, select: &mut SelectStatement, db_type: DatabaseType) {
+        select.add_group_by(
+            self.clauses
                 .group_by
                 .iter()
-                .map(|column| self.format_column_for_db(db_type, column))
-                .collect();
-            sql.push_str(&format!("GROUP BY {} ", columns.join(", ")));
-        }
+                .map(|column| Expr::cust(self.format_column_for_db(db_type, column))),
+        );
 
         if !self.clauses.having_conditions.is_empty() {
-            // Validation has matched each template's placeholders to its values.
-            let clauses: Vec<String> = self
-                .having_clauses()
-                .map(|(template, bindings)| {
-                    let clause = db_sql::render_template(db_type, template, params.len() + 1);
-                    params.extend(bindings);
-                    clause
-                })
-                .collect();
-
-            sql.push_str(&format!("HAVING {} ", clauses.join(" AND ")));
+            let clauses = self
+                .clauses
+                .having_conditions
+                .iter()
+                .map(|clause| self.having_bound(db_type, clause));
+            select.and_having(BoundSql::join(clauses, " AND ").into());
         }
     }
 
-    fn cte_keyword(&self) -> &'static str {
-        if self.clauses.ctes.iter().any(|cte| cte.recursive) {
-            "WITH RECURSIVE "
-        } else {
-            "WITH "
-        }
-    }
-
-    /// Whether a compound-select operand is parenthesized for `db_type`.
-    ///
-    /// SQLite's compound-select grammar only accepts a bare select-core after
-    /// `UNION`/`INTERSECT`/`EXCEPT`; a parenthesized operand fails to parse with
-    /// `near "(": syntax error`. Postgres and MySQL accept either form, and keep
-    /// the parenthesized one.
-    fn wraps_compound_operand(db_type: DatabaseType) -> bool {
-        !matches!(db_type, DatabaseType::SQLite)
-    }
-
-    fn append_cte_sql(&self, sql: &mut String, db_type: DatabaseType, params: &mut Vec<Value>) {
+    /// The query's CTEs, `RECURSIVE` when one refers to itself, or `None`
+    /// without one.
+    fn with_clause(&self, db_type: DatabaseType) -> Result<Option<WithClause>> {
         if self.clauses.ctes.is_empty() {
-            return;
+            return Ok(None);
         }
 
-        sql.push_str(self.cte_keyword());
-
-        let mut cte_parts = Vec::with_capacity(self.clauses.ctes.len());
+        let mut with = WithClause::new();
+        with.recursive(self.clauses.ctes.iter().any(|cte| cte.recursive));
         for cte in &self.clauses.ctes {
-            let body_sql = db_sql::rebase_placeholders(db_type, &cte.query_sql, params.len());
-            cte_parts.push(cte.to_sql_with_body_for_db(db_type, &body_sql));
-            params.extend(cte.params.iter().cloned());
-        }
-
-        sql.push_str(&cte_parts.join(", "));
-        sql.push(' ');
-    }
-
-    fn append_union_sql(&self, sql: &mut String, db_type: DatabaseType, params: &mut Vec<Value>) {
-        for union in &self.clauses.unions {
-            let operand_sql = db_sql::rebase_placeholders(db_type, &union.query_sql, params.len());
-
-            sql.push(' ');
-            sql.push_str(union.union_type.as_sql());
-            if Self::wraps_compound_operand(db_type) {
-                sql.push_str(" (");
-                sql.push_str(&operand_sql);
-                sql.push(')');
-            } else {
-                sql.push(' ');
-                sql.push_str(&operand_sql);
+            let body = match &cte.query {
+                Some(query) => query.select(db_type)?,
+                None => SelectStatement::custom(BoundSql::sql(cte.query_sql.as_str())),
+            };
+            let mut table = CommonTableExpression::new();
+            table.table_name(cte.name.clone()).query(body);
+            if let Some(columns) = &cte.columns {
+                table.columns(columns.iter().cloned());
             }
+            with.cte(table);
+        }
+        Ok(Some(with))
+    }
 
-            params.extend(union.params.iter().cloned());
+    /// Order `statement` as the query is ordered.
+    pub(crate) fn add_ordering(
+        &self,
+        statement: &mut impl OrderedStatement,
+        db_type: DatabaseType,
+    ) {
+        for (column, direction) in &self.clauses.order_by {
+            let (expression, direction) = self.order_term(db_type, column, *direction);
+            statement.order_by_expr(Expr::cust(expression), direction.to_builder());
         }
     }
 
-    /// ` ORDER BY ..` for the query's ordering, or nothing without one.
-    pub(crate) fn order_by_sql(&self, db_type: DatabaseType) -> String {
-        if self.clauses.order_by.is_empty() {
-            return String::new();
-        }
-        let order_parts: Vec<String> = self
-            .clauses
-            .order_by
-            .iter()
-            .map(|(column, direction)| self.format_order_by_for_db(db_type, column, *direction))
-            .collect();
-        format!(" ORDER BY {}", order_parts.join(", "))
-    }
-
-    /// Render a single ORDER BY term.
+    /// A single ORDER BY term: its expression and direction.
     ///
     /// Entries created by `order_by_raw()` carry the raw-expression marker and
     /// are emitted verbatim; everything else has already been restricted to a
     /// resolvable column reference by validation. A column that carries its own
     /// `ASC`/`DESC` suffix keeps it, because appending the tuple direction on top
     /// would render `"name" DESC ASC`.
-    pub(in crate::query) fn format_order_by_for_db(
+    pub(in crate::query) fn order_term(
         &self,
         db_type: DatabaseType,
         column: &str,
         direction: Order,
-    ) -> String {
+    ) -> (String, Order) {
         if let Some(expression) = crate::query::builder::raw_order_by_expression(column) {
-            return format!("{} {}", expression, direction.as_str());
+            return (expression.to_string(), direction);
         }
 
         let trimmed = column.trim();
@@ -340,155 +312,103 @@ impl<M: Model> QueryBuilder<M> {
             let output = self
                 .derived_output_name(reference)
                 .unwrap_or_else(|| M::canonical_column_parts(reference).1.to_string());
-            return format!(
-                "{} {}",
-                db_sql::quote_ident(db_type, &output),
-                direction.as_str()
-            );
+            return (db_sql::quote_ident(db_type, &output), direction);
         }
 
-        format!(
-            "{} {}",
-            self.format_column_for_db(db_type, reference),
-            direction.as_str()
-        )
+        (self.format_column_for_db(db_type, reference), direction)
     }
 
-    /// `ORDER BY`, then the limit written into the SQL and the offset bound.
+    /// Everything but the row lock: the CTEs, the select core (projection,
+    /// FROM and joins, WHERE, GROUP BY and HAVING), every compound operand,
+    /// then the ordering, the limit and the offset.
     ///
-    /// A literal limit keeps one statement per page size, and a bound offset
-    /// lets every page reuse it instead of preparing a statement per page; a
-    /// bound limit would make SQLite 3.50+ recompile it on every run. An
-    /// offset past `i64::MAX` stays literal for the database to reject.
-    fn append_order_limit_offset_sql(
-        &self,
-        sql: &mut String,
-        db_type: DatabaseType,
-        params: &mut Vec<Value>,
-    ) {
-        sql.push_str(&self.order_by_sql(db_type));
-
-        db_sql::append_limit_offset(
-            sql,
-            db_type,
-            self.clauses.limit_value,
-            self.clauses.offset_value,
-            params,
-        );
-    }
-
-    /// The select core: projection, FROM/JOIN, WHERE, GROUP BY and HAVING, with
-    /// the values bound to each in placeholder order.
-    pub(crate) fn build_base_select_sql_with_params_for_db(
-        &self,
-        db_type: DatabaseType,
-    ) -> (String, Vec<Value>) {
-        let mut params = Vec::new();
-        let mut sql = self.build_select_clause_sql(db_type, &mut params);
-        self.append_from_and_join_sql(&mut sql, db_type);
-
-        let (where_sql, where_params) = self.build_where_clause_with_condition_for_db(db_type);
-        if !where_sql.is_empty() {
-            sql.push_str("WHERE ");
-            sql.push_str(&db_sql::rebase_placeholders(
-                db_type,
-                &where_sql,
-                params.len(),
-            ));
-            sql.push(' ');
+    /// The builder writes the limit into the SQL and binds the offset: a
+    /// literal limit keeps one statement per page size, and a bound offset lets
+    /// every page reuse it instead of preparing a statement per page; a bound
+    /// limit would make SQLite 3.50+ recompile it on every run.
+    fn unlocked_statement(&self, db_type: DatabaseType) -> Result<SelectStatement> {
+        let with = self.with_clause(db_type)?;
+        let mut select = SelectStatement::new();
+        self.project(&mut select, db_type)?;
+        self.add_tables_and_filter(&mut select, db_type)?;
+        self.group_by_and_having(&mut select, db_type);
+        if let Some(with) = with {
+            select.with_cte(with);
         }
-        params.extend(where_params);
 
-        self.append_group_by_and_having_sql(&mut sql, db_type, &mut params);
-        (into_trimmed(sql), params)
+        for union in &self.clauses.unions {
+            let operand = match &union.operand {
+                Operand::Query(query) => query.compound_operand(db_type)?,
+                Operand::Sql { sql, values } => SelectStatement::custom(db_sql::template_bound(
+                    sql,
+                    values.clone().unwrap_or_default(),
+                )),
+            };
+            select.union(union.union_type.to_builder(), operand);
+        }
+
+        self.add_ordering(&mut select, db_type);
+        if let Some(limit) = self.clauses.limit_value {
+            select.limit(limit);
+        }
+        if let Some(offset) = self.clauses.offset_value {
+            select.offset(offset);
+        }
+        Ok(select)
     }
 
     /// This query as an operand of another's `UNION`, with its own ordering,
-    /// limit and offset. PostgreSQL and MySQL parenthesize an operand, which may
-    /// then carry them; SQLite takes a bare select there, so an ordered or
-    /// limited operand is read through a derived table. An operand with unions
-    /// or CTEs of its own is read whole through a derived table on every
-    /// backend, so none of its branches and none of its CTEs are lost.
-    pub(crate) fn build_compound_operand_sql_for_db(
+    /// limit and offset. An operand with unions or CTEs of its own is read
+    /// whole through a derived table, so none of its branches and none of its
+    /// CTEs are lost.
+    pub(in crate::query) fn compound_operand_statement(
         &self,
         db_type: DatabaseType,
-    ) -> (String, Vec<Value>) {
-        if !self.clauses.unions.is_empty() || !self.clauses.ctes.is_empty() {
-            let (sql, params) = self.build_select_sql_with_params_for_db(db_type);
-            return (
-                db_sql::select_from_derived(db_type, "*", &sql, "tideorm_union_operand"),
-                params,
-            );
+    ) -> Result<SelectStatement> {
+        if self.clauses.unions.is_empty() && self.clauses.ctes.is_empty() {
+            return self.unlocked_statement(db_type);
         }
-
-        let (mut sql, mut params) = self.build_base_select_sql_with_params_for_db(db_type);
-        if self.clauses.order_by.is_empty()
-            && self.clauses.limit_value.is_none()
-            && self.clauses.offset_value.is_none()
-        {
-            return (sql, params);
-        }
-        self.append_order_limit_offset_sql(&mut sql, db_type, &mut params);
-        if !Self::wraps_compound_operand(db_type) {
-            sql = db_sql::select_from_derived(db_type, "*", &sql, "tideorm_union_operand");
-        }
-        (sql, params)
+        Ok(db_sql::select_from_derived(
+            "*",
+            self.select_statement(db_type)?,
+            "tideorm_union_operand",
+        ))
     }
 
-    /// Splice the CTE prefix and compound-select operands around the base select,
-    /// keeping bound values in placeholder order.
-    ///
-    /// Placeholders appear left to right in exactly three groups: the `WITH`
-    /// prefix precedes the base select, and every union operand follows it. The
-    /// values are pushed in that same order — CTE bodies in declaration order,
-    /// then the base select's own values, then union operands in order — because
-    /// backends bind purely by position.
+    /// The whole statement [`get()`](Self::get) runs.
+    pub(in crate::query) fn select_statement(
+        &self,
+        db_type: DatabaseType,
+    ) -> Result<SelectStatement> {
+        let mut select = self.unlocked_statement(db_type)?;
+        if self.clauses.lock_for_update {
+            select.lock(LockType::Update);
+        }
+        Ok(select)
+    }
+
+    /// [`select_statement`](Self::select_statement), rendered.
     pub(crate) fn build_select_sql_with_params_for_db(
         &self,
         db_type: DatabaseType,
-    ) -> (String, Vec<Value>) {
-        let (base_sql, base_params) = self.build_base_select_sql_with_params_for_db(db_type);
-
-        let mut sql = String::new();
-        let mut params: Vec<Value> = Vec::new();
-
-        self.append_cte_sql(&mut sql, db_type, &mut params);
-        sql.push_str(&db_sql::rebase_placeholders(
-            db_type,
-            &base_sql,
-            params.len(),
-        ));
-        params.extend(base_params);
-        self.append_union_sql(&mut sql, db_type, &mut params);
-        self.append_order_limit_offset_sql(&mut sql, db_type, &mut params);
-        // SQLite has no row locks: a transaction's first write locks the whole
-        // database, so a competing read-check-write fails instead of racing.
-        if self.clauses.lock_for_update && db_type != DatabaseType::SQLite {
-            sql.push_str(" FOR UPDATE");
-        }
-
-        (into_trimmed(sql), params)
+    ) -> Result<(String, Vec<Value>)> {
+        db_sql::built(db_type, &self.select_statement(db_type)?)
     }
 
-    pub(crate) fn build_select_sql_with_params(&self) -> (String, Vec<Value>) {
-        self.build_select_sql_with_params_for_db(self.db_type_for_sql())
+    pub(crate) fn build_select_sql_with_params(&self) -> Result<(String, Vec<Value>)> {
+        self.build_select_sql_with_params_for_db(self.db_type_for_sql()?)
     }
 
     /// The statement [`get()`](Self::get) runs, with its bound values inlined.
     ///
     /// For display only: it backs [`build_sql_preview()`](Self::build_sql_preview).
+    /// A query that cannot be rendered shows why, as an SQL comment.
     pub(crate) fn build_select_sql_for_db(&self, db_type: DatabaseType) -> String {
-        let (sql, params) = self.build_select_sql_with_params_for_db(db_type);
-        db_sql::inline_parameters(db_type, &sql, &params)
+        match self.build_select_sql_with_params_for_db(db_type) {
+            Ok((sql, params)) => db_sql::inline_parameters(db_type, &sql, &params),
+            Err(error) => format!("-- {error}"),
+        }
     }
-}
-
-/// `sql` with surrounding whitespace removed, in place.
-fn into_trimmed(mut sql: String) -> String {
-    sql.truncate(sql.trim_end().len());
-    let leading = sql.len() - sql.trim_start().len();
-    sql.drain(..leading);
-    sql
 }
 
 #[cfg(test)]

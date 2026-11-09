@@ -538,3 +538,49 @@ async fn assignments_reject_invalid_boolean_bytes_and_float_width() {
     let row = AssignmentRow::find_with(1, &db).await.unwrap().unwrap();
     assert_eq!((row.active, row.bytes, row.amount), (None, None, None));
 }
+
+#[tokio::test]
+async fn prebuilt_assignments_apply_like_their_setters() {
+    let db = items_database().await;
+    for (id, change) in [
+        (1, UpdateValue::Increment(5)),
+        (2, UpdateValue::Value(7.into())),
+    ] {
+        let updated = Item::query_with(&db)
+            .where_eq(Item::ID, id)
+            .update_all()
+            .set_value(Item::RANK, change)
+            .execute()
+            .await
+            .unwrap();
+        assert_eq!(updated, 1);
+    }
+    let ranks: Vec<i64> = Item::query_with(&db)
+        .order_asc(Item::ID)
+        .get()
+        .await
+        .unwrap()
+        .iter()
+        .map(|item| item.rank)
+        .collect();
+    assert_eq!(ranks, [15, 7, 30]);
+
+    // Another model's typed column is refused, as with every setter.
+    let foreign = Item::query_with(&db)
+        .where_eq(Item::ID, 3)
+        .update_all()
+        .set_value(ChunkProjection::RANK, UpdateValue::Increment(1))
+        .execute()
+        .await;
+    assert!(foreign.is_err());
+
+    // A prebuilt value goes through its setter's checks: a NaN is refused.
+    let error = Item::query_with(&db)
+        .where_eq(Item::ID, 3)
+        .update_all()
+        .set_value(Item::RANK, UpdateValue::Value(f64::NAN.into()))
+        .execute()
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("NaN or infinite"), "{error}");
+}

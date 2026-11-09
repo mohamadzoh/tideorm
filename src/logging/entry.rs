@@ -21,20 +21,30 @@ pub enum LogLevel {
     Trace = 5,
 }
 
-impl LogLevel {
-    /// Parse a log level from environment-style text.
-    pub fn parse_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
+/// Reads a level as `TIDE_LOG_LEVEL` takes it, ignoring case: `off` (or
+/// `none`), `error`, `warn` (or `warning`), `info`, `debug`, `trace` (or
+/// `all`), or the level's number, `0` to `5`.
+impl std::str::FromStr for LogLevel {
+    type Err = crate::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s.to_ascii_lowercase().as_str() {
             "off" | "none" | "0" => Self::Off,
             "error" | "1" => Self::Error,
             "warn" | "warning" | "2" => Self::Warn,
             "info" | "3" => Self::Info,
             "debug" | "4" => Self::Debug,
             "trace" | "all" | "5" => Self::Trace,
-            _ => Self::Off,
-        }
+            _ => {
+                return Err(crate::Error::configuration(format!(
+                    "unknown log level '{s}'; expected off, error, warn, info, debug or trace"
+                )));
+            }
+        })
     }
+}
 
+impl LogLevel {
     /// Return the stable uppercase label used in logs.
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -190,11 +200,10 @@ impl QueryLogEntry {
         self
     }
 
-    /// True when the recorded duration meets the slow-query threshold.
-    pub fn is_slow(&self, threshold_ms: u64) -> bool {
-        self.duration
-            .map(|d| d.as_millis() as u64 >= threshold_ms)
-            .unwrap_or(false)
+    /// True when the recorded duration meets the slow-query threshold; an
+    /// entry without a duration never does.
+    pub fn is_slow(&self, threshold: Duration) -> bool {
+        self.duration.is_some_and(|duration| duration >= threshold)
     }
 
     /// Render the entry in the multiline console format used by trace logging.
@@ -269,7 +278,7 @@ pub struct QueryStats {
     /// Sum of recorded query time in nanoseconds.
     pub total_time_ns: u64,
     /// Slow-query threshold in milliseconds.
-    pub slow_threshold_ms: u64,
+    pub slow_threshold: Duration,
 }
 
 impl QueryStats {
@@ -282,8 +291,7 @@ impl QueryStats {
     pub fn avg_query_time(&self) -> Duration {
         self.total_time_ns
             .checked_div(self.total_queries)
-            .map(Duration::from_nanos)
-            .unwrap_or(Duration::ZERO)
+            .map_or(Duration::ZERO, Duration::from_nanos)
     }
 
     /// Percentage of recorded queries that crossed the slow-query threshold.
@@ -303,17 +311,20 @@ pub(crate) struct StatsCounters {
     total_queries: AtomicU64,
     slow_queries: AtomicU64,
     total_time_ns: AtomicU64,
-    slow_threshold_ms: AtomicU64,
+    /// The slow-query threshold in nanoseconds.
+    slow_threshold_ns: AtomicU64,
 }
 
 impl StatsCounters {
-    pub(crate) const fn new(slow_threshold_ms: u64) -> Self {
-        Self {
+    pub(crate) fn new(slow_threshold: Duration) -> Self {
+        let counters = Self {
             total_queries: AtomicU64::new(0),
             slow_queries: AtomicU64::new(0),
             total_time_ns: AtomicU64::new(0),
-            slow_threshold_ms: AtomicU64::new(slow_threshold_ms),
-        }
+            slow_threshold_ns: AtomicU64::new(0),
+        };
+        counters.set_slow_threshold(slow_threshold);
+        counters
     }
 
     /// Count one query, and its time when it has one. Returns whether it
@@ -325,19 +336,20 @@ impl StatsCounters {
         };
         self.total_time_ns
             .fetch_add(duration.as_nanos() as u64, Ordering::SeqCst);
-        let slow = duration.as_millis() as u64 >= self.slow_threshold_ms();
+        let slow = duration >= self.slow_threshold();
         if slow {
             self.slow_queries.fetch_add(1, Ordering::SeqCst);
         }
         slow
     }
 
-    pub(crate) fn slow_threshold_ms(&self) -> u64 {
-        self.slow_threshold_ms.load(Ordering::SeqCst)
+    pub(crate) fn slow_threshold(&self) -> Duration {
+        Duration::from_nanos(self.slow_threshold_ns.load(Ordering::SeqCst))
     }
 
-    pub(crate) fn set_slow_threshold_ms(&self, ms: u64) {
-        self.slow_threshold_ms.store(ms, Ordering::SeqCst);
+    pub(crate) fn set_slow_threshold(&self, threshold: Duration) {
+        let nanos = u64::try_from(threshold.as_nanos()).unwrap_or(u64::MAX);
+        self.slow_threshold_ns.store(nanos, Ordering::SeqCst);
     }
 
     pub(crate) fn snapshot(&self) -> QueryStats {
@@ -345,7 +357,7 @@ impl StatsCounters {
             total_queries: self.total_queries.load(Ordering::SeqCst),
             slow_queries: self.slow_queries.load(Ordering::SeqCst),
             total_time_ns: self.total_time_ns.load(Ordering::SeqCst),
-            slow_threshold_ms: self.slow_threshold_ms(),
+            slow_threshold: self.slow_threshold(),
         }
     }
 
@@ -377,7 +389,7 @@ impl fmt::Display for QueryStats {
             "Avg Query Time:    {:.2}ms",
             millis(self.avg_query_time())
         )?;
-        writeln!(f, "Slow Threshold:    {}ms", self.slow_threshold_ms)?;
+        writeln!(f, "Slow Threshold:    {:?}", self.slow_threshold)?;
         write!(f, "═══════════════════════════════════════════════════")
     }
 }

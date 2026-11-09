@@ -160,8 +160,7 @@ impl TranslationsData {
     pub fn has_translations(&self, field: &str) -> bool {
         self.fields
             .get(field)
-            .map(|f| !f.translations.is_empty())
-            .unwrap_or(false)
+            .is_some_and(|f| !f.translations.is_empty())
     }
 
     /// Get all translatable fields
@@ -228,11 +227,13 @@ pub trait HasTranslations {
         self.set_translations_data(data)
     }
 
-    /// Set multiple translated values for one field.
-    fn set_translations<V: Into<serde_json::Value>>(
+    /// Set multiple translated values for one field, given as
+    /// `(language, value)` pairs: a `HashMap`, an array of tuples, or any
+    /// iterator of them. Nothing is set when a language is not allowed.
+    fn set_translations<L: AsRef<str>, V: Into<serde_json::Value>>(
         &mut self,
         field: &str,
-        translations: HashMap<&str, V>,
+        translations: impl IntoIterator<Item = (L, V)>,
     ) -> Result<(), TranslationError> {
         self.validate_field(field)?;
 
@@ -241,11 +242,12 @@ pub trait HasTranslations {
         self.set_translations_data(data)
     }
 
-    /// Replace all stored translations for one field.
-    fn sync_translations<V: Into<serde_json::Value>>(
+    /// Replace all stored translations for one field with `(language, value)`
+    /// pairs, taken as [`set_translations`](Self::set_translations) takes them.
+    fn sync_translations<L: AsRef<str>, V: Into<serde_json::Value>>(
         &mut self,
         field: &str,
-        translations: HashMap<&str, V>,
+        translations: impl IntoIterator<Item = (L, V)>,
     ) -> Result<(), TranslationError> {
         self.validate_field(field)?;
 
@@ -368,6 +370,19 @@ pub trait HasTranslations {
             })
     }
 
+    /// [`to_translated_json`](Self::to_translated_json) with its translatable
+    /// fields in `language`: `product.to_translated_json_in("ar")`.
+    fn to_translated_json_in(&self, language: &str) -> serde_json::Value
+    where
+        Self: serde::Serialize,
+    {
+        self.try_to_translated_json_in(language)
+            .unwrap_or_else(|error| {
+                crate::tide_warn!("Translation serialization failed: {}", error);
+                serde_json::json!({})
+            })
+    }
+
     /// Render translations while reporting serialization and accessor failures.
     fn try_to_translated_json(
         &self,
@@ -376,22 +391,30 @@ pub trait HasTranslations {
     where
         Self: serde::Serialize,
     {
-        let opts = options.unwrap_or_default();
-        let fallback = Self::fallback_language();
-        let requested_lang = opts
-            .get("language")
-            .map(|s| s.as_str())
-            .unwrap_or(&fallback);
+        match options.as_ref().and_then(|options| options.get("language")) {
+            Some(language) => self.try_to_translated_json_in(language),
+            None => self.try_to_translated_json_in(&Self::fallback_language()),
+        }
+    }
 
-        let mut json = match serde_json::to_value(self)
+    /// [`try_to_translated_json`](Self::try_to_translated_json) with its
+    /// translatable fields in `language`.
+    fn try_to_translated_json_in(
+        &self,
+        language: &str,
+    ) -> Result<serde_json::Value, TranslationError>
+    where
+        Self: serde::Serialize,
+    {
+        let fallback = Self::fallback_language();
+        let requested_lang = language;
+
+        let serde_json::Value::Object(mut json) = serde_json::to_value(self)
             .map_err(|error| TranslationError::ParseError(error.to_string()))?
-        {
-            serde_json::Value::Object(map) => map,
-            _ => {
-                return Err(TranslationError::ParseError(
-                    "Model must serialize to an object".into(),
-                ));
-            }
+        else {
+            return Err(TranslationError::ParseError(
+                "Model must serialize to an object".into(),
+            ));
         };
 
         // Read through the accessor, as every translation lookup does: the

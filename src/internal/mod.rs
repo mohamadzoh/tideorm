@@ -5,7 +5,8 @@
 //! read/write paths live on [`QueryExecutor`], and engine errors become TideORM
 //! errors in `translate_error`.
 
-use crate::error::{DbFailure, DbFailureKind, Error, Result};
+use crate::config::DatabaseType;
+use crate::error::{Error, Result};
 // `ConnAcquireErr` and `RuntimeErr` arrive through the `entity::prelude::*` re-export
 // below; importing them again privately would shadow that public glob.
 use crate::soft_delete::{SoftDeleteScope, query_scope_for};
@@ -13,50 +14,46 @@ use crate::soft_delete::{SoftDeleteScope, query_scope_for};
 mod backend;
 mod batch_insert;
 mod column_values;
-mod executor;
+mod error_translation;
 mod json_loss;
 mod key_sequence;
 mod per_poll;
-#[cfg(feature = "fulltext")]
-pub(crate) mod sql_builder;
+mod query_executor;
 pub(crate) mod sql_lexer;
 pub(crate) mod sql_safety;
 mod topology;
 
 pub use column_values::__column_type_of;
 pub(crate) use column_values::{
-    column_type_of, is_integer, json_to_array_element, json_to_assignment_value,
-    json_to_column_value,
+    array_element, column_type_of, column_value, is_integer, json_to_column_value, value_document,
 };
-pub use executor::Executor;
+pub(crate) use error_translation::{reclassify_error, translate_connection_error, translate_error};
 pub(crate) use json_loss::json_loss;
 pub(crate) use key_sequence::{advance_key_sequence, holds_auto_increment_key};
 pub(crate) use per_poll::per_poll;
+pub use query_executor::QueryExecutor;
 pub(crate) use topology::topological_order;
 
 // Re-export the ORM engine through TideORM's facade, broadly, so other modules
 // can import selectively.
 pub use crate::orm::{
-    ActiveModelBehavior, ActiveModelTrait, ActiveValue, ColumnTrait, ColumnType, Condition,
-    ConnectOptions, ConnectionTrait, Database as OrmDatabase, DatabaseConnection as OrmConnection,
-    DatabaseTransaction as OrmTransaction, DbBackend as OrmBackend, DbErr as OrmError, DeleteMany,
-    DeriveEntityModel, DeriveRelation, EntityTrait, EnumIter, ExecResult, FromQueryResult, Iden,
-    IntoActiveModel, Iterable, LoaderTrait, ModelTrait, PaginatorTrait, QueryFilter, QueryOrder,
-    QuerySelect, QueryTrait, Related, RelationDef, RelationTrait, Statement as OrmStatement,
-    TransactionSession, TransactionTrait, TryGetable, Value,
+    ActiveModelTrait, ActiveValue, ColumnTrait, ColumnType, Condition, ConnectOptions,
+    ConnectTarget, ConnectionTrait, Database as OrmDatabase, DatabaseConnection as OrmConnection,
+    DatabaseTransaction as OrmTransaction, DbErr as OrmError, DeleteMany, EntityTrait, EnumIter,
+    ExecResult, FromQueryResult, Iden, IntoActiveModel, Iterable, ModelTrait, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, QueryTrait, Statement as OrmStatement, TransactionTrait,
+    TryGetable, Value,
     entity::prelude::*,
-    sea_query::{
-        Alias, Asterisk, ColumnDef as OrmColumnDef, ColumnType as OrmColumnType, Expr, ExprTrait,
-        Index, MysqlQueryBuilder, OnConflict, PostgresQueryBuilder, Query, SimpleExpr,
-        SqliteQueryBuilder, Table, Token, Tokenizer, extension::postgres::PgBinOper,
-        inject_parameters,
+    sql_builder::{
+        Alias, Asterisk, ColumnType as OrmColumnType, Expr, ExprTrait, MysqlQueryBuilder,
+        OnConflict, PostgresQueryBuilder, Query, SimpleExpr, SqliteQueryBuilder,
+        extension::postgres::PgBinOper, inject_parameters,
     },
 };
 
 #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
-pub use crate::orm::sqlx;
+pub use crate::orm::driver;
 
-pub use backend::Backend;
 pub(crate) use backend::{build_statement, build_statement_with_values};
 
 /// A single database parameter value.
@@ -120,11 +117,11 @@ pub(crate) fn json_to_db_value(value: &serde_json::Value) -> Value {
 
 /// `value` as a parameter every driver can bind.
 ///
-/// The SQLite and PostgreSQL drivers panic converting an unsigned 64-bit value
-/// past `i64::MAX` to their signed integer, so such a value is bound as an exact
-/// decimal, which each backend still compares with an integer column. Generated
-/// primary-key conditions bind through here, so a `u64` key read from a request
-/// cannot crash `find`.
+/// The SQLite and PostgreSQL drivers cannot encode an unsigned 64-bit value
+/// past `i64::MAX` as their signed integer, which fails the statement, so such
+/// a value is bound as an exact decimal, which each backend still compares with
+/// an integer column. Generated primary-key conditions bind through here, so a
+/// `u64` key read from a request finds no row instead of failing `find`.
 #[doc(hidden)]
 pub fn bindable_value(value: impl Into<Value>) -> Value {
     match value.into() {
@@ -142,7 +139,7 @@ pub(crate) fn ensure_active_values_storable<M: crate::model::Model>(
     active: &M::ActiveModel,
     conn: &impl ConnectionTrait,
 ) -> Result<()> {
-    if conn.get_database_backend() != OrmBackend::Sqlite {
+    if conn.get_database_backend() != DatabaseType::SQLite {
         return Ok(());
     }
     // The generated entity's columns are `M::column_names()`, in that order,
@@ -164,8 +161,9 @@ pub(crate) fn ensure_active_values_storable<M: crate::model::Model>(
     Ok(())
 }
 
-/// The largest decimal magnitude SQLite can return: it stores a `Decimal` as
-/// an `f64`, and 2^96 rounds past `Decimal::MAX`, so the `f64` just below it.
+/// The largest decimal magnitude SQLite can return: a `REAL` column stores a
+/// `Decimal` as an `f64`, and 2^96 rounds past `Decimal::MAX`, so the `f64`
+/// just below it.
 pub(crate) const SQLITE_DECIMAL_MAX: f64 = 79_228_162_514_264_337_593_543_950_336_f64.next_down();
 
 /// Whether SQLite can store `value` and read it back as a `Decimal`.
@@ -176,61 +174,6 @@ pub(crate) fn sqlite_decimal_is_storable(value: rust_decimal::Decimal) -> bool {
         .is_some_and(|number| number.abs() <= SQLITE_DECIMAL_MAX)
 }
 
-/// Refuse to write `M` through `conn` when its driver cannot store one of `M`'s
-/// integer fields and read it back.
-///
-/// The write would land and reading the stored row back would fail, so the
-/// caller would get an error for a row that exists, and a retry would store it
-/// twice; a `u64` past `i64::MAX` panics the driver instead. MySQL's driver
-/// handles every width.
-pub(crate) fn ensure_fields_storable<M, C>(conn: &C) -> Result<()>
-where
-    M: crate::model::ModelMeta,
-    C: ConnectionTrait,
-{
-    check_fields_storable::<M>(Backend::from(conn.get_database_backend()))
-}
-
-fn check_fields_storable<M: crate::model::ModelMeta>(backend: Backend) -> Result<()> {
-    let unstorable: Vec<String> = M::driver_limited_fields()
-        .iter()
-        .filter_map(|&(field, rust_type)| {
-            let replacement = match (backend, rust_type) {
-                (Backend::Postgres, "i8" | "u8") => "i16",
-                (Backend::Postgres, "u16") => "i32",
-                (Backend::Postgres | Backend::Sqlite, "u64") => "i64",
-                _ => return None,
-            };
-            Some(format!(
-                "field `{field}` is a `{rust_type}`; declare it as `{replacement}`"
-            ))
-        })
-        .collect();
-    if unstorable.is_empty() {
-        return Ok(());
-    }
-    Err(Error::conversion(format!(
-        "the {} driver cannot store and read back every field of `{}`: {}",
-        backend.as_database_type(),
-        M::table_name(),
-        unstorable.join(", ")
-    )))
-}
-
-/// The marker for the `index`-th (1-based) bound parameter: `$index` on
-/// PostgreSQL, a positional `?` everywhere else.
-///
-/// `Expr::cust_with_values` only substitutes the marker its query builder
-/// emits, so a fragment written with the other backend's marker binds nothing.
-pub(crate) fn placeholder(db_type: crate::config::DatabaseType, index: usize) -> String {
-    match db_type {
-        crate::config::DatabaseType::Postgres => format!("${}", index),
-        crate::config::DatabaseType::MySQL
-        | crate::config::DatabaseType::MariaDB
-        | crate::config::DatabaseType::SQLite => "?".to_string(),
-    }
-}
-
 /// Bind `value` and return the placeholder that refers to it.
 pub(crate) fn push_param(
     db_type: crate::config::DatabaseType,
@@ -238,79 +181,46 @@ pub(crate) fn push_param(
     value: Value,
 ) -> String {
     params.push(value);
-    placeholder(db_type, params.len())
-}
-
-/// Refuse an encryption-blind fallback before it can move plaintext or
-/// ciphertext across the persistence boundary.
-///
-/// `InternalModel::try_into_active_model` and `try_to_entity_model` default to
-/// their infallible twins, which is correct for the overwhelming majority of
-/// models: they declare no `#[tideorm(encrypted)]` fields, so the two paths are
-/// the same conversion and the default saves every model from spelling it twice.
-/// A model that *does* declare encrypted fields must override them — the derive
-/// does — because the infallible half has nowhere to report a cipher failure and
-/// would write plaintext into a ciphertext column. If that override is ever
-/// missing, this turns a silent data-integrity bug into an error at the point of
-/// conversion.
-pub(crate) fn reject_encryption_blind_conversion<M>(conversion: &str) -> Result<()>
-where
-    M: crate::model::ModelMeta,
-{
-    if !M::has_encrypted_fields() {
-        return Ok(());
-    }
-
-    Err(Error::internal(format!(
-        "`{}` fell back to the plaintext conversion for `{}`, which cannot handle the encrypted \
-         field(s): {}",
-        conversion,
-        M::table_name(),
-        M::encrypted_fields().join(", ")
-    )))
+    db_type.dialect().marker(params.len())
 }
 
 /// Internal trait that maps TideORM models to ORM engine entities.
 /// This is implemented by TideORM's model macros.
 ///
-/// The outbound conversions come in pairs. The `try_` half is the persistence
-/// path: it is where encrypted fields are encrypted, so it is the only half
-/// allowed to reach the database. The infallible half is a plaintext, in-memory
-/// convenience that cannot report a cipher failure — never build a statement
-/// from it. The `try_` defaults bridge to it only for models with no encrypted
-/// fields; see `reject_encryption_blind_conversion`. The inbound conversion,
-/// which decrypts, only exists in its fallible form.
+/// The model is its entity's model: rows decode into it, encrypted fields
+/// decrypted as they decode, and the engine's `IntoActiveModel` writes its
+/// columns as they are, encrypted ones left unset. A decoded row is not yet a
+/// loaded model: its relation wrappers are detached until
+/// [`finish_load`](Self::finish_load). A write builds its active model with
+/// [`try_into_active_model`](Self::try_into_active_model), which encrypts.
 #[doc(hidden)]
-pub trait InternalModel: crate::model::ModelMeta + Sized + Send + Sync + Clone {
-    type Entity: EntityTrait;
-    type ActiveModel: ActiveModelTrait<Entity = Self::Entity> + ActiveModelBehavior + Send;
+pub trait InternalModel:
+    crate::model::ModelMeta
+    + Sized
+    + Send
+    + Sync
+    + Clone
+    + ModelTrait<Entity: EntityTrait<Model = Self>>
+    + FromQueryResult
+    + IntoActiveModel<<Self as InternalModel>::ActiveModel>
+{
+    type ActiveModel: ActiveModelTrait<Entity = Self::Entity> + Send;
 
-    /// Convert a TideORM model to the ORM engine's active model, in plaintext.
-    fn into_active_model(self) -> Self::ActiveModel;
+    /// The active model a write sends: keys and managed timestamps set, and
+    /// encrypted fields encrypted.
+    fn try_into_active_model(self) -> Result<Self::ActiveModel>;
 
-    /// Convert a TideORM model to the ORM engine's active model and allow
-    /// model-level preprocessing such as encrypted field writes.
-    fn try_into_active_model(self) -> Result<Self::ActiveModel> {
-        reject_encryption_blind_conversion::<Self>("try_into_active_model")?;
-        Ok(self.into_active_model())
-    }
+    /// A decoded row, read through `connection`, as a loaded model: relation
+    /// wrappers built from its columns and querying the pool the row came
+    /// from, and its dirty-tracking baseline recorded. Every load runs it once.
+    fn finish_load(self, connection: &crate::database::ConnectionRef) -> Self;
 
-    /// Convert the generated entity model to a TideORM model, decrypting
-    /// encrypted fields.
-    fn try_from_entity_model(model: <Self::Entity as EntityTrait>::Model) -> Result<Self>;
-
-    /// Convert a TideORM model into its generated entity model, in plaintext.
-    ///
-    /// The plaintext rendering is what in-memory comparisons want — comparing
-    /// two ciphertexts of a randomized cipher reports a change on every field —
-    /// so this stays the comparison path even for encrypted models.
-    fn to_entity_model(&self) -> <Self::Entity as EntityTrait>::Model;
-
-    /// Convert a TideORM model into its generated entity model and allow
-    /// model-level preprocessing such as encrypted field writes.
-    fn try_to_entity_model(&self) -> Result<<Self::Entity as EntityTrait>::Model> {
-        reject_encryption_blind_conversion::<Self>("try_to_entity_model")?;
-        Ok(self.to_entity_model())
+    /// Whether every column holds what `other`'s does, compared as values, so
+    /// a NaN float equals itself. Encrypted columns are compared in
+    /// plaintext: two ciphertexts of a randomized cipher differ.
+    fn same_columns(&self, other: &Self) -> bool {
+        <<Self::Entity as EntityTrait>::Column as crate::orm::Iterable>::iter()
+            .all(|column| self.get(column) == other.get(column))
     }
 
     /// Resolve an entity column enum from either a field name or column name,
@@ -323,64 +233,66 @@ pub trait InternalModel: crate::model::ModelMeta + Sized + Send + Sync + Clone {
     }
 
     /// Get entity primary key columns.
-    fn primary_key_columns() -> Vec<<Self::Entity as EntityTrait>::Column> {
-        Vec::new()
-    }
+    fn primary_key_columns() -> Vec<<Self::Entity as EntityTrait>::Column>;
 
     /// Get the ORM condition for an exact primary key match.
     fn primary_key_condition(
         primary_key: &<Self as crate::model::ModelMeta>::PrimaryKey,
     ) -> Condition;
 
-    /// Rebuild runtime-only relation wrappers after an in-memory model overwrite.
-    fn refresh_runtime_relations_from(&mut self, _previous: &Self) {}
-
     /// This model with its relation wrappers built from its own fields, as a
     /// load builds them; for a model read back from JSON, whose wrappers a
     /// user's `Deserialize` leaves detached.
     #[doc(hidden)]
-    fn __rebuild_relations(self) -> Self
-    where
-        Self: Sized,
-    {
-        self
-    }
+    fn __rebuild_relations(self) -> Self;
 
     /// Get one model field as JSON without serializing the full model.
-    fn field_json_value(&self, _field: &str) -> Result<Option<serde_json::Value>> {
-        Ok(None)
+    fn field_json_value(&self, field: &str) -> Result<Option<serde_json::Value>>;
+
+    /// The column of the field `name` names, by field or column name, a
+    /// field's name first, as the derive's field accessors read one.
+    fn field_column(name: &str) -> Option<<Self::Entity as EntityTrait>::Column> {
+        let field = Self::canonical_field_name(name)?;
+        let index = Self::field_names()
+            .iter()
+            .position(|known| *known == field)?;
+        Self::column_from_str(Self::column_names().get(index)?)
     }
 
-    /// One model field as dirty tracking and the entity manager compare it:
-    /// its JSON, except that a NaN or infinite float, which JSON writes as
-    /// `null`, is its text, so a change to or from one shows.
-    fn field_compare_value(&self, field: &str) -> Result<Option<serde_json::Value>> {
-        self.field_json_value(field)
+    /// One field, by field or column name, as the value its column holds:
+    /// what dirty tracking and the entity manager compare. `None` when the
+    /// model has no such field.
+    fn field_value(&self, field: &str) -> Option<Value> {
+        Self::field_column(field).map(|column| self.get(column))
+    }
+
+    /// Set one field, by field or column name, to `value`, an integer of any
+    /// width for an integer field; `false` when the model has no such field.
+    /// Relation wrappers are left alone.
+    fn set_field_value(&mut self, field: &str, value: Value) -> Result<bool> {
+        let Some(column) = Self::field_column(field) else {
+            return Ok(false);
+        };
+        let value = column_values::integer_as(value, Self::get_value_type(column));
+        self.try_set(column, value).map_err(|error| {
+            Error::conversion(format!("Failed to set field '{field}': {error}"))
+        })?;
+        Ok(true)
     }
 
     /// Copy one field, by field or column name, from `source`; `false` when
-    /// the model has no such field. The derive copies the value itself, so a
-    /// value JSON cannot hold, such as a NaN float, survives; this default
-    /// goes through the field's JSON.
+    /// the model has no such field. The value itself is copied, encrypted
+    /// fields in plaintext.
     fn copy_field_from(&mut self, source: &Self, field: &str) -> Result<bool> {
-        match source.field_json_value(field)? {
-            Some(value) => self.set_field_json(field, value),
+        match source.field_value(field) {
+            Some(value) => self.set_field_value(field, value),
             None => Ok(false),
         }
     }
 
     /// Set one model field, by field or column name, from JSON; `false` when
     /// the model has no such field.
-    fn set_field_json(&mut self, _field: &str, _value: serde_json::Value) -> Result<bool> {
-        Ok(false)
-    }
-}
-
-/// Leave statement logging to TideORM: `TIDE_LOG_QUERIES` and the
-/// `QueryLogger` decide what is printed, where the driver would log every
-/// statement at `INFO` to any subscriber listening.
-pub(crate) fn quiet_driver_logging(options: &mut ConnectOptions) {
-    options.sqlx_logging(false);
+    fn set_field_json(&mut self, field: &str, value: serde_json::Value) -> Result<bool>;
 }
 
 /// Internal connection wrapper
@@ -388,35 +300,28 @@ pub(crate) fn quiet_driver_logging(options: &mut ConnectOptions) {
 pub struct InternalConnection {
     pub(crate) conn: OrmConnection,
     pub(crate) cache_scope: crate::database::cache_scope::CacheScope,
-    /// Whether the server behind a MySQL-protocol connection is MariaDB,
-    /// which SeaORM cannot tell apart and some SQL is rendered differently
-    /// for.
-    mariadb: bool,
+    /// Where SQLite opened the main database file, canonicalized; `None`
+    /// for an in-memory or temporary database and for other backends.
+    #[cfg(feature = "sqlite")]
+    pub(crate) sqlite_file: Option<std::path::PathBuf>,
 }
 
 impl InternalConnection {
-    /// Wrap a freshly opened `conn`, asking a MySQL-protocol server whether
-    /// it is MariaDB. The pool has only just opened, so a failure even of
-    /// `SELECT VERSION()` means it is unusable, and is returned.
+    /// Wrap a freshly opened `conn`, identifying the database it reaches for
+    /// the query cache.
     pub(crate) async fn open(conn: OrmConnection) -> Result<Self> {
+        #[allow(unused_mut)]
         let mut connection = Self::new(conn);
-        if Backend::from_orm_backend(connection.conn.get_database_backend()) == Some(Backend::MySql)
+        #[cfg(feature = "sqlite")]
         {
-            let statement = OrmStatement::from_string(
-                connection.conn.get_database_backend(),
-                "SELECT VERSION() AS version",
-            );
-            let version: String = connection
+            connection.sqlite_file = connection
                 .conn
-                .query_one_raw(statement)
+                .sqlite_main_file()
                 .await
                 .map_err(translate_connection_error)?
-                .ok_or_else(|| Error::query("SELECT VERSION() returned no row"))?
-                .try_get("", "version")
-                .map_err(translate_error)?;
-            connection.mariadb = version.to_ascii_lowercase().contains("mariadb");
+                .map(|file| std::fs::canonicalize(&file).unwrap_or(file));
         }
-        let cache_scope = crate::database::cache_scope::identify(&connection.conn).await?;
+        let cache_scope = crate::database::cache_scope::identify(&connection);
         *connection.cache_scope.write() = cache_scope;
         Ok(connection)
     }
@@ -424,305 +329,24 @@ impl InternalConnection {
     /// Wrap `conn`, reporting the statements the engine renders itself — the
     /// typed CRUD paths and raw SQL — to the query log.
     pub(crate) fn new(mut conn: OrmConnection) -> Self {
-        conn.set_metric_callback(crate::logging::log_engine_statement);
+        conn.set_metric_callback(crate::logging::observe_engine_statement);
         Self {
             conn,
             cache_scope: Default::default(),
-            mariadb: false,
+            #[cfg(feature = "sqlite")]
+            sqlite_file: None,
         }
     }
 
     pub fn connection(&self) -> &OrmConnection {
         &self.conn
     }
-
-    /// Whether the server is MariaDB.
-    pub(crate) fn is_mariadb(&self) -> bool {
-        self.mariadb
-    }
 }
 
-/// Read the SQLSTATE, constraint name and table a driver reported.
-///
-/// The engine's own error kind answers the constraint violations on every
-/// backend; everything else is classified from the SQLSTATE, which is where
-/// syntax, privilege and lock failures become distinguishable.
-#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
-fn runtime_failure(runtime: &RuntimeErr) -> DbFailure {
-    use crate::orm::sqlx::error::ErrorKind;
-
-    let RuntimeErr::SqlxError(driver_error) = runtime else {
-        return DbFailure::new(DbFailureKind::Unclassified);
-    };
-    let Some(database_error) = driver_error.as_database_error() else {
-        return DbFailure::new(transport_failure_kind(driver_error));
-    };
-
-    let code = database_error.code().map(|code| code.into_owned());
-    let kind = match database_error.kind() {
-        ErrorKind::UniqueViolation => DbFailureKind::UniqueViolation,
-        ErrorKind::ForeignKeyViolation => DbFailureKind::ForeignKeyViolation,
-        ErrorKind::NotNullViolation => DbFailureKind::NotNullViolation,
-        ErrorKind::CheckViolation => DbFailureKind::CheckViolation,
-        // A SQLSTATE is five characters; SQLite's native codes are at most four
-        // digits.
-        _ => match code.as_deref() {
-            Some(code) if code.len() < 5 && code.bytes().all(|b| b.is_ascii_digit()) => {
-                DbFailureKind::from_sqlite_code(code, database_error.message())
-            }
-            Some(sqlstate) => {
-                match mysql_error_number(database_error).map(DbFailureKind::from_mysql_code) {
-                    Some(kind) if kind != DbFailureKind::Unclassified => kind,
-                    _ => DbFailureKind::from_sqlstate(sqlstate),
-                }
-            }
-            None => DbFailureKind::Unclassified,
-        },
-    };
-
-    DbFailure::new(kind)
-        .with_code(code)
-        .with_constraint(database_error.constraint().map(str::to_string))
-        .with_table(database_error.table().map(str::to_string))
-}
-
-/// Classify a driver failure that carries no database error: the connection
-/// broke under the statement — MySQL's `KILL` and a server restart close the
-/// socket without a word — or no connection could be had.
-#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
-fn transport_failure_kind(error: &crate::orm::sqlx::Error) -> DbFailureKind {
-    use crate::orm::sqlx::Error as DriverError;
-
-    match error {
-        DriverError::Io(_) | DriverError::PoolClosed | DriverError::WorkerCrashed => {
-            DbFailureKind::ConnectionClosed
-        }
-        DriverError::PoolTimedOut => DbFailureKind::ConnectionTimeout,
-        _ => DbFailureKind::Unclassified,
-    }
-}
-
-#[cfg(feature = "mysql")]
-fn mysql_error_number(error: &dyn crate::orm::sqlx::error::DatabaseError) -> Option<u16> {
-    error
-        .try_downcast_ref::<crate::orm::sqlx::mysql::MySqlDatabaseError>()
-        .map(|error| error.number())
-}
-
-#[cfg(all(not(feature = "mysql"), any(feature = "postgres", feature = "sqlite")))]
-fn mysql_error_number(_error: &dyn crate::orm::sqlx::error::DatabaseError) -> Option<u16> {
-    None
-}
-
-/// Without a driver feature compiled in there is no driver error to read, so
-/// every runtime failure stays unclassified.
-#[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
-fn runtime_failure(_runtime: &RuntimeErr) -> DbFailure {
-    DbFailure::new(DbFailureKind::Unclassified)
-}
-
-/// Recover the structured driver detail behind an engine error.
-///
-/// Only the engine variants that actually came back from a driver produce a
-/// failure — the rest is engine bookkeeping with nothing to preserve. The engine
-/// error itself is kept as the failure's own source, which is what makes
-/// `{:#}`-style chains and `anyhow` interop reach the backend instead of
-/// stopping at TideORM's rendered message.
-pub(crate) fn driver_failure(err: &OrmError) -> Option<DbFailure> {
-    let failure = match err {
-        // A pool acquire failure never reaches a driver, so it has no SQLSTATE,
-        // but the engine already classified it and both cases are transient.
-        OrmError::ConnectionAcquire(ConnAcquireErr::Timeout) => {
-            DbFailure::new(DbFailureKind::ConnectionTimeout)
-        }
-        OrmError::ConnectionAcquire(ConnAcquireErr::ConnectionClosed) => {
-            DbFailure::new(DbFailureKind::ConnectionClosed)
-        }
-        OrmError::Conn(runtime) | OrmError::Exec(runtime) | OrmError::Query(runtime) => {
-            runtime_failure(runtime)
-        }
-        _ => return None,
-    };
-
-    Some(failure.with_source(Box::new(err.clone())))
-}
-
-/// What the executor's refusal of a statement on an aborted transaction
-/// starts with, which [`translate_error`] makes a transaction error.
-pub(crate) const TRANSACTION_ABORTED: &str = "tideorm: transaction aborted: ";
-
-/// Translate ORM engine errors to TideORM errors.
-///
-/// The structured driver detail rides along, so the returned error can answer
-/// for its SQLSTATE and constraint name and its `source` chain still reaches the
-/// driver.
-pub(crate) fn translate_error(err: OrmError) -> Error {
-    let failure = driver_failure(&err);
-    translate_engine_error(err).with_db_failure(failure)
-}
-
-/// Translate a failure to open a pool on `url`.
-///
-/// The engine quotes a URL it cannot parse or has no driver for, password and
-/// all. That error is reported with the URL's credentials masked, and without
-/// the engine error behind it, so logging it cannot leak them.
-pub(crate) fn translate_connect_error(err: OrmError, url: &str) -> Error {
-    match translate_connection_error(err) {
-        Error::Connection { message, .. } if message.contains(url) => {
-            Error::connection(message.replace(url, &mask_url_credentials(url)))
-        }
-        other => other,
-    }
-}
-
-/// `url` with its credentials masked: everything between the scheme and the
-/// `@` that ends the user and password (see [`userinfo_end`]), and the value
-/// of a query parameter that carries a password, which the PostgreSQL driver
-/// reads as `?password=..`. The CLI prints URLs through it too.
+/// `url` with its credentials masked, as the engine quotes it in its own
+/// connection errors. The CLI prints URLs through it too.
 #[doc(hidden)]
-pub fn mask_url_credentials(url: &str) -> String {
-    let (scheme, rest) = match url.find("://") {
-        Some(index) => url.split_at(index + 3),
-        None => ("", url),
-    };
-    let rest = match userinfo_end(rest) {
-        Some(at) => format!("***{}", &rest[at..]),
-        None => rest.to_string(),
-    };
-    let (base, query) = match rest.split_once('?') {
-        Some((base, query)) => (format!("{scheme}{base}"), Some(query)),
-        None => (format!("{scheme}{rest}"), None),
-    };
-    let Some(query) = query else {
-        return base;
-    };
-    let query: Vec<String> = query
-        .split('&')
-        .map(|pair| match pair.split_once('=') {
-            Some((key, _))
-                if matches!(
-                    key.to_ascii_lowercase().as_str(),
-                    "password" | "sslpassword" | "passwd" | "pwd"
-                ) =>
-            {
-                format!("{key}=***")
-            }
-            _ => pair.to_string(),
-        })
-        .collect();
-    format!("{base}?{}", query.join("&"))
-}
-
-/// Where the user and password of `rest`, a URL after its `://`, end: at the
-/// last `@` of the authority, or, when a password holding an unencoded `/`,
-/// `?` or `#` ended the authority early, at the last `@` a host name follows
-/// once a `:` has begun a password. Masking a little more than the
-/// credentials is better than printing part of them.
-fn userinfo_end(rest: &str) -> Option<usize> {
-    let authority_end = |text: &str| text.find(['/', '?', '#']).unwrap_or(text.len());
-    if let Some(at) = rest[..authority_end(rest)].rfind('@') {
-        return Some(at);
-    }
-    let host_follows = |text: &str| {
-        text[..authority_end(text)].chars().all(|character| {
-            character.is_ascii_alphanumeric()
-                || matches!(character, '-' | '.' | '_' | ':' | '[' | ']' | '%')
-        })
-    };
-    rest.rmatch_indices('@')
-        .map(|(at, _)| at)
-        .find(|&at| rest[..at].contains(':') && host_follows(&rest[at + 1..]))
-}
-
-/// Translate an engine error from reaching or probing the server.
-///
-/// Whatever the driver called it, such a failure is a connection failure; the
-/// structured driver detail is carried over so the SQLSTATE and the source
-/// chain survive the reclassification.
-pub(crate) fn translate_connection_error(err: OrmError) -> Error {
-    reclassify_error(err, |message, source| Error::Connection { message, source })
-}
-
-/// Translate `err` and file it under the variant `class` builds, unless it
-/// is a connection failure, which keeps its own. The variant changes, so the
-/// structured driver failure is carried over explicitly: otherwise a
-/// serialization failure would arrive with no SQLSTATE and no source chain.
-pub(crate) fn reclassify_error(
-    err: OrmError,
-    class: impl FnOnce(String, Option<Box<crate::error::DbFailure>>) -> Error,
-) -> Error {
-    let message = err.to_string();
-    match translate_error(err) {
-        connection @ Error::Connection { .. } => connection,
-        other => class(message, other.into_db_failure()),
-    }
-}
-
-/// `message`, with what to do about a column type the driver cannot read at
-/// all: sqlx 0.9 refuses PostgreSQL's multirange types (type code 109, `m`)
-/// while it reads the statement's columns, before any row arrives.
-fn explain_unreadable_type(message: String) -> String {
-    if message.contains("decoding column \"typtype\": unknown type code 109") {
-        return format!(
-            "{message}: a column of the statement is a PostgreSQL multirange, which the driver \
-             cannot read; select it as text (`column::text`)"
-        );
-    }
-    message
-}
-
-/// Map an engine error onto the TideORM variant that describes it.
-fn translate_engine_error(err: OrmError) -> Error {
-    match err {
-        OrmError::RecordNotFound(msg) => Error::not_found(msg),
-        OrmError::ConnectionAcquire(e) => Error::connection(e.to_string()),
-        OrmError::Conn(e) => Error::connection(e.to_string()),
-        OrmError::Exec(e) => Error::query(e.to_string()),
-        OrmError::Query(e) => Error::query(explain_unreadable_type(e.to_string())),
-        OrmError::ConvertFromU64(msg) => Error::conversion(msg),
-        OrmError::TryIntoErr { from, into, source } => {
-            Error::conversion(format!("Error converting `{from}` into `{into}`: {source}"))
-        }
-        OrmError::Type(msg) => Error::conversion(msg),
-        OrmError::Json(msg) => Error::conversion(msg),
-        // Raised by `TryFrom<ActiveModel>` when an attribute was never set, which
-        // is a per-field completeness failure and carries the field name — the
-        // exact shape of `Error::Validation`.
-        OrmError::AttrNotSet(attribute) => Error::validation(attribute, "attribute is not set"),
-        OrmError::KeyArityMismatch { expected, received } => Error::query(format!(
-            "Primary key arity mismatch: expected {expected} key column(s), received {received}"
-        )),
-        OrmError::UnpackInsertId => Error::query("Failed to get insert ID".to_string()),
-        OrmError::UpdateGetPrimaryKey => {
-            Error::query("Failed to get primary key after update".to_string())
-        }
-        OrmError::BackendNotSupported { db, ctx } => Error::backend_not_supported(ctx, db),
-        OrmError::PrimaryKeyNotSet { ctx } => {
-            Error::primary_key_not_set(format!("primary key not set for {ctx}"), "model")
-        }
-        OrmError::RecordNotInserted => Error::query("None of the records are inserted".to_string()),
-        OrmError::RecordNotUpdated => Error::not_found("None of the records are updated"),
-        // A migration failure is a statement that did not execute, which is what
-        // `Error::Query` describes — and it is what TideORM's own migrator
-        // (`migration::migrator`) already reports for the same failures, so
-        // engine-raised migration errors must not land somewhere else.
-        OrmError::Migration(msg) => Error::query(msg),
-        OrmError::AccessDenied {
-            permission,
-            resource,
-        } => Error::access_denied(permission, resource),
-        OrmError::RbacError(msg) => Error::rbac(msg),
-        OrmError::Custom(msg) => match msg.strip_prefix(TRANSACTION_ABORTED) {
-            Some(message) => Error::transaction(message),
-            None => Error::internal(msg),
-        },
-        // Everything left over — a poisoned engine mutex, plus whatever a future
-        // engine release adds — has no TideORM counterpart and stays internal on
-        // purpose. This arm is deliberately a catch-all so an engine upgrade
-        // cannot break the build.
-        _ => Error::internal(err.to_string()),
-    }
-}
+pub use crate::orm::mask_url_credentials;
 
 #[doc(hidden)]
 pub fn model_error_context<M>(query: impl Into<String>) -> crate::error::ErrorContext
@@ -766,70 +390,6 @@ where
         .column_as(Expr::col(Asterisk).count(), "count")
 }
 
-/// `select` limited to its first row, with the `LIMIT 1` written into the SQL.
-///
-/// `Select::one` binds that limit as a parameter, and recent SQLite releases
-/// recompile a statement whose `LIMIT` is a bound parameter every time it runs.
-/// `select` must not carry a limit of its own.
-fn one_row_statement<E: EntityTrait>(select: Select<E>, backend: OrmBackend) -> OrmStatement {
-    let mut statement = select.build(backend);
-    statement.sql.push_str(" LIMIT 1");
-    statement
-}
-
-/// The first row `select` finds, read through [`one_row_statement`]. The
-/// generated upsert reload uses it.
-#[doc(hidden)]
-pub async fn first_row<E, C>(
-    select: Select<E>,
-    conn: &C,
-) -> std::result::Result<Option<E::Model>, OrmError>
-where
-    E: EntityTrait,
-    C: ConnectionTrait,
-{
-    let statement = one_row_statement(select, conn.get_database_backend());
-    E::Model::find_by_statement(statement).one(conn).await
-}
-
-/// `select` narrowed to `limit` rows after the first `offset`, with the limit
-/// written into the SQL and the offset bound.
-///
-/// That keeps one statement per page size, reused for every page, where a bound
-/// limit would be recompiled on every run (see [`one_row_statement`]).
-fn page_statement<E: EntityTrait>(
-    select: Select<E>,
-    backend: OrmBackend,
-    limit: i64,
-    offset: i64,
-) -> OrmStatement {
-    let mut statement = select.build(backend);
-    let values = &mut statement
-        .values
-        .get_or_insert_with(|| crate::orm::Values(Vec::new()))
-        .0;
-    values.push(Value::BigInt(Some(offset)));
-    let offset_marker = placeholder(Backend::from(backend).as_database_type(), values.len());
-    statement
-        .sql
-        .push_str(&format!(" LIMIT {limit} OFFSET {offset_marker}"));
-    statement
-}
-
-/// `SELECT 1 .. LIMIT 1` over the model's scoped rows.
-///
-/// SeaORM's own `SelectExt::exists` drops the limit and relies on the driver to
-/// stop after one row, which MySQL cannot do: it drains every matching row.
-fn build_exists_any_statement<M>(backend: OrmBackend) -> OrmStatement
-where
-    M: InternalModel + crate::model::Model,
-{
-    let select = scoped_find::<M>()
-        .select_only()
-        .column_as(Expr::cust("1"), "tideorm_exists");
-    one_row_statement(select, backend)
-}
-
 /// `M::Entity::find()` with `M`'s soft-delete scope applied, so trashed rows
 /// stay hidden. Generated eager loaders start their relation queries here.
 #[doc(hidden)]
@@ -850,14 +410,14 @@ where
     select
 }
 
-/// Run a statement's future profiled, with its error translated and given
-/// the context `context` builds.
+/// Run a statement's future, with its error translated and given the context
+/// `context` builds.
 #[doc(hidden)]
-pub async fn run_profiled<T>(
+pub async fn run_statement<T>(
     statement: impl std::future::Future<Output = std::result::Result<T, OrmError>>,
     context: impl FnOnce() -> crate::error::ErrorContext,
 ) -> Result<T> {
-    crate::profiling::__profile_future(statement)
+    statement
         .await
         .map_err(translate_error)
         .map_err(|err| err.with_context(context()))
@@ -867,9 +427,8 @@ pub async fn run_profiled<T>(
 /// `include_trashed`. The generated `find`/`find_with`, `reload()` and
 /// `soft_delete()` read through it; `what` names the call in an error.
 ///
-/// A key matches at most one row, so the lookup reads with `all()`: `one()`
-/// adds a bound `LIMIT`, which recent SQLite releases recompile the statement
-/// for on every run.
+/// A key matches at most one row, so the lookup reads with `all()` and needs
+/// no `LIMIT`.
 #[doc(hidden)]
 pub async fn find_by_primary_key<M>(
     connection: &crate::database::ConnectionRef,
@@ -885,7 +444,7 @@ where
     } else {
         scoped_find::<M>()
     };
-    let rows = run_profiled(
+    let rows = run_statement(
         select
             .filter(M::primary_key_condition(id))
             .all(&connection.executor()),
@@ -894,176 +453,21 @@ where
     .await?;
     // The baseline dirty tracking keeps is the one of the database the row
     // came from.
-    crate::model::__loading_through(connection, || {
-        rows.into_iter()
-            .next()
-            .map(M::try_from_entity_model)
-            .transpose()
-    })
+    Ok(rows
+        .into_iter()
+        .next()
+        .map(|row| row.finish_load(connection)))
 }
 
-/// The typed reads the `Model` defaults run, each on the current connection.
-///
-/// The connection is resolved before the profiled statement, so a missing or
-/// unreachable database keeps its `Error::Connection` class.
-#[doc(hidden)]
-pub struct QueryExecutor;
-
-impl QueryExecutor {
-    /// Every row in the model's soft-delete scope.
-    pub async fn find_all<M>() -> Result<Vec<M>>
-    where
-        M: crate::model::Model,
-    {
-        let connection = crate::database::__current_connection()?;
-        let rows = run_profiled(scoped_find::<M>().all(&connection.executor()), || {
-            model_error_context::<M>("find_all()")
-        })
-        .await?;
-        crate::model::__loading_through(&connection, || {
-            rows.into_iter().map(M::try_from_entity_model).collect()
-        })
-    }
-
-    /// The first row in scope, in the backend's natural order.
-    pub async fn first<M>() -> Result<Option<M>>
-    where
-        M: crate::model::Model,
-    {
-        Self::first_of::<M>(scoped_find::<M>(), "first()".to_string()).await
-    }
-
-    /// The row in scope with the highest primary key; unordered when the model
-    /// declares no primary key column.
-    pub async fn last<M>() -> Result<Option<M>>
-    where
-        M: crate::model::Model,
-    {
-        let mut select = scoped_find::<M>();
-        let mut query_label = String::from("last()");
-
-        let pk_columns = M::primary_key_columns();
-        if !pk_columns.is_empty() {
-            for pk_col in pk_columns {
-                select = select.order_by_desc(pk_col);
-            }
-            query_label = format!("last(order_by={} desc)", M::primary_key_names().join(", "));
-        }
-
-        Self::first_of::<M>(select, query_label).await
-    }
-
-    /// The first row `select` finds, read through [`first_row`].
-    async fn first_of<M>(select: Select<M::Entity>, query_label: String) -> Result<Option<M>>
-    where
-        M: crate::model::Model,
-    {
-        let connection = crate::database::__current_connection()?;
-        let row = run_profiled(first_row(select, &connection.executor()), || {
-            model_error_context::<M>(query_label)
-        })
-        .await?;
-        crate::model::__loading_through(&connection, || {
-            row.map(M::try_from_entity_model).transpose()
-        })
-    }
-
-    /// `COUNT(*)` over the model's scoped rows.
-    ///
-    /// The statement always returns exactly one row, so it is read with `all`,
-    /// which adds no bound `LIMIT` (see [`one_row_statement`]), and a missing
-    /// row is a decode failure rather than an empty table.
-    pub async fn count<M>() -> Result<u64>
-    where
-        M: crate::model::Model,
-    {
-        #[derive(Debug, FromQueryResult)]
-        struct CountResult {
-            count: i64,
-        }
-
-        let connection = crate::database::__current_connection()?;
-        let rows: Vec<CountResult> = run_profiled(
-            build_count_select::<M>()
-                .into_model::<CountResult>()
-                .all(&connection.executor()),
-            || model_error_context::<M>("count(*)"),
-        )
-        .await?;
-
-        let row = rows
-            .into_iter()
-            .next()
-            .ok_or_else(|| Error::query("Database returned no row for count(*)"))?;
-        count_to_u64(row.count, "count(*)")
-    }
-
-    /// Whether any row is in the model's scope.
-    pub async fn exists_any<M>() -> Result<bool>
-    where
-        M: crate::model::Model,
-    {
-        let connection = crate::database::__current_connection()?;
-        let executor = connection.executor();
-        let statement = build_exists_any_statement::<M>(executor.get_database_backend());
-        let row = run_profiled(executor.query_one_raw(statement), || {
-            model_error_context::<M>("exists_any()")
-        })
-        .await?;
-        Ok(row.is_some())
-    }
-
-    /// Page `page` of `per_page` rows in scope, in primary key order.
-    ///
-    /// Without an order PostgreSQL returns rows in heap order, which an UPDATE
-    /// changes: a row rewritten between two page requests moves, and the next
-    /// page repeats it and skips another.
-    pub async fn paginate<M>(page: u64, per_page: u64) -> Result<Vec<M>>
-    where
-        M: crate::model::Model,
-    {
-        // The same check `QueryBuilder::page` makes, so both refuse alike.
-        // Every backend takes LIMIT and OFFSET as signed 64-bit integers,
-        // which it already bounds both by.
-        let offset = crate::query::page_offset(page, per_page)
-            .map_err(|(field, message)| Error::validation(field, message))?;
-        let (limit, offset) = (per_page as i64, offset as i64);
-
-        let mut select = scoped_find::<M>();
-        for pk_col in M::primary_key_columns() {
-            select = select.order_by_asc(pk_col);
-        }
-        let connection = crate::database::__current_connection()?;
-        let executor = connection.executor();
-        let statement = page_statement(select, executor.get_database_backend(), limit, offset);
-        let rows = run_profiled(
-            <M::Entity as EntityTrait>::Model::find_by_statement(statement).all(&executor),
-            || model_error_context::<M>(format!("paginate(limit={}, offset={})", limit, offset)),
-        )
-        .await?;
-        crate::model::__loading_through(&connection, || {
-            rows.into_iter().map(M::try_from_entity_model).collect()
-        })
-    }
-
-    // Deletes deliberately do not live here: the macro-generated `delete` and
-    // `destroy` filter on `primary_key_condition`, which binds the key through
-    // `bindable_value`, rather than deleting an `ActiveModel`.
-
-    /// Insert `models` on the current connection and return them as stored,
-    /// in the order they were passed; see `batch_insert` for the statements
-    /// each backend runs.
-    pub async fn insert_many<M>(models: Vec<M>) -> Result<Vec<M>>
-    where
-        M: crate::model::Model,
-        <<M as InternalModel>::Entity as EntityTrait>::Model: IntoActiveModel<M::ActiveModel>,
-    {
-        let connection = crate::database::__current_connection()?;
-        // Triggers and foreign keys can change tables beyond the inserted model.
-        connection
-            .invalidating(batch_insert::insert_many(&connection, models))
-            .await
-    }
+/// The decoded `rows` read through `connection`, loaded, each remembered as
+/// read from that connection's pool.
+pub(crate) fn models_read_through<M: crate::model::Model>(
+    connection: &crate::database::ConnectionRef,
+    rows: impl IntoIterator<Item = M>,
+) -> Vec<M> {
+    rows.into_iter()
+        .map(|row| row.finish_load(connection))
+        .collect()
 }
 
 #[cfg(test)]

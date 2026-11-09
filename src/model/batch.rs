@@ -52,17 +52,15 @@ pub struct BatchUpdateBuilder<M: Model> {
 /// have to read rows first. That also means these never run model callbacks or
 /// validations — a batch update writes columns, not models.
 ///
-/// Build these through the [`BatchUpdateBuilder`] setters
-/// ([`set`](BatchUpdateBuilder::set), [`increment`](BatchUpdateBuilder::increment),
-/// and friends) rather than by hand.
+/// The [`BatchUpdateBuilder`] setters ([`set`](BatchUpdateBuilder::set),
+/// [`increment`](BatchUpdateBuilder::increment), and friends) build each
+/// variant; [`set_value`](BatchUpdateBuilder::set_value) takes one built at
+/// run time.
 #[derive(Debug, Clone)]
 pub enum UpdateValue {
-    /// Assign a literal value, bound as a parameter.
-    Value(serde_json::Value),
-    /// Assign SQL NULL, preserving Option::None separately from a JSON null document.
-    SqlNull,
-    /// Use SQL NULL as the COALESCE fallback.
-    CoalesceSqlNull,
+    /// Assign a literal value, bound as a parameter. A `None` of any type is
+    /// SQL NULL; the JSON `null` document is NULL too, except in a JSON column.
+    Value(crate::DbValue),
     /// Assign a raw SQL expression, spliced into the statement verbatim.
     ///
     /// Nothing escapes or validates the string, so it must never contain
@@ -83,20 +81,20 @@ pub enum UpdateValue {
     ///
     /// Rendered with the backend's own function: `array_append` on PostgreSQL,
     /// `JSON_ARRAY_APPEND` on MySQL/MariaDB, `json_insert` on SQLite.
-    ArrayAppend(serde_json::Value),
+    ArrayAppend(crate::DbValue),
     /// Remove matching entries from an array or JSON array column.
     ///
-    /// PostgreSQL removes every match; the JSON-based backends remove one.
-    ArrayRemove(serde_json::Value),
+    /// Every backend removes every match.
+    ArrayRemove(crate::DbValue),
     /// Set one path inside a JSON column, leaving the rest of the document alone.
     ///
     /// The path is `$` followed by `.key`, `."any key"`, `['any key']` or
     /// `[index]` steps; anything else is rejected when the SQL is built.
-    JsonSet(String, serde_json::Value),
+    JsonSet(String, crate::DbValue),
     /// Replace the column only where it is currently `NULL` (`col = COALESCE(col, default)`).
     ///
     /// This is the backfill variant: rows that already hold a value keep it.
-    Coalesce(serde_json::Value),
+    Coalesce(crate::DbValue),
 }
 
 impl<M: Model> Default for BatchUpdateBuilder<M> {

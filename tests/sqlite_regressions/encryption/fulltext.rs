@@ -25,7 +25,7 @@ async fn searching_an_encrypted_column_is_refused() {
     let index = FullTextIndex::new(
         "encrypted_notes_search",
         "encrypted_notes",
-        vec!["title".into(), "body".into()],
+        ["title", "body"],
     );
     for sql in index.to_sqlite_sql() {
         db.exec_raw(&sql).await.unwrap();
@@ -40,10 +40,10 @@ async fn searching_an_encrypted_column_is_refused() {
 
     // By field name and by column name, in every kind of search.
     for column in ["secret", "body"] {
-        encrypted_error(Note::search(&[column], "alpha").get().await);
-        encrypted_error(Note::search(&["title", column], "alpha").get_ranked().await);
-        encrypted_error(Note::search(&[column], "alpha").count().await);
-        encrypted_error(Note::search(&[column], "alpha").first().await);
+        encrypted_error(Note::search([column], "alpha").get().await);
+        encrypted_error(Note::search(["title", column], "alpha").get_ranked().await);
+        encrypted_error(Note::search([column], "alpha").count().await);
+        encrypted_error(Note::search([column], "alpha").first().await);
     }
-    assert_eq!(Note::search(&["title"], "alpha").count().await.unwrap(), 1);
+    assert_eq!(Note::search(["title"], "alpha").count().await.unwrap(), 1);
 }

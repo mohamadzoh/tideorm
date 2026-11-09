@@ -232,11 +232,12 @@ impl CacheStore {
 
     /// Mark `key` as the most recently used entry and return its data.
     pub(super) fn touch(&mut self, key: &str, access_order: u64) -> Option<Arc<[u8]>> {
-        let entry = self.entries.get_mut(key)?;
+        // The map's own key, so a hit allocates no copy of it.
+        let key = Arc::clone(self.entries.get_key_value(key)?.0);
+        let entry = self.entries.get_mut(&key)?;
         entry.access_order = access_order;
         let data = entry.data.clone();
-        self.lru_heap
-            .push(Candidate::new(access_order, &Arc::from(key)));
+        self.lru_heap.push(Candidate::new(access_order, &key));
         self.maybe_rebuild_indexes();
         Some(data)
     }
@@ -268,29 +269,30 @@ impl CacheStore {
             .saturating_mul(INDEX_REBUILD_MULTIPLIER)
             .saturating_add(INDEX_REBUILD_SLACK);
 
-        if entry_count == 0
-            || self.lru_heap.len() > threshold
-            || self.fifo_heap.len() > threshold
-            || self.ttl_heap.len() > threshold
-        {
-            self.rebuild_indexes();
+        // Each heap is rebuilt on its own: LRU hits grow only the LRU heap.
+        let stale = |len: usize| entry_count == 0 || len > threshold;
+        if stale(self.lru_heap.len()) {
+            self.lru_heap = heap_of(&self.entries, CacheEntry::lru_priority);
+        }
+        if stale(self.fifo_heap.len()) {
+            self.fifo_heap = heap_of(&self.entries, CacheEntry::fifo_priority);
+        }
+        if stale(self.ttl_heap.len()) {
+            self.ttl_heap = heap_of(&self.entries, CacheEntry::ttl_priority);
         }
     }
+}
 
-    fn rebuild_indexes(&mut self) {
-        self.lru_heap.clear();
-        self.fifo_heap.clear();
-        self.ttl_heap.clear();
-
-        for (key, entry) in &self.entries {
-            self.lru_heap
-                .push(Candidate::new(entry.lru_priority(), key));
-            self.fifo_heap
-                .push(Candidate::new(entry.fifo_priority(), key));
-            self.ttl_heap
-                .push(Candidate::new(entry.ttl_priority(), key));
-        }
-    }
+/// A heap holding one current candidate per entry. `collect` heapifies the
+/// whole vector at once, in linear time.
+fn heap_of<P: Ord>(
+    entries: &HashMap<Arc<str>, CacheEntry>,
+    priority_of: impl Fn(&CacheEntry) -> P,
+) -> BinaryHeap<Reverse<Candidate<P>>> {
+    entries
+        .iter()
+        .map(|(key, entry)| Candidate::new(priority_of(entry), key))
+        .collect()
 }
 
 /// Pop candidates until one still matches its entry's priority, and return

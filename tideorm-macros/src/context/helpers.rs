@@ -215,13 +215,6 @@ pub(super) fn resolve_encrypted_fields<'a>(
 ) -> syn::Result<Vec<&'a ModelField>> {
     let resolved = resolve_field_list(struct_ident, "encrypted", fields, requested)?;
     for field in &resolved {
-        if !field.supports_encryption() {
-            return Err(syn::Error::new_spanned(
-                &field.ty,
-                "#[tideorm(encrypted = ...)] only supports String/Text fields and Option<String>/Option<Text> fields",
-            ));
-        }
-
         // Every write stores a fresh ciphertext, so an encrypted key would
         // never match the plaintext `find`, `update` and `delete` look it up by.
         if field.primary_key {

@@ -3,27 +3,26 @@
 use std::marker::PhantomData;
 
 use crate::error::Result;
+use crate::internal::Value;
 use crate::model::Model;
 use crate::query::QueryBuilder;
 
 #[cfg(feature = "entity-manager")]
 mod entity_manager_support;
+mod mutations;
 
-use super::helpers::{
-    ensure_relation_configured, linkable_key, owner_is_unsaved, quote_ident,
-    require_scalar_relation_key, required_key, where_key,
-};
+use super::helpers::{ensure_relation_configured, required_key, where_key};
 use super::state::{RelationState, relation_serde};
 
 /// A many-to-many relation: rows of `Related` reached by joining `Pivot`'s
 /// table.
 ///
 /// `Pivot` must be a real model, because the mutation methods
-/// ([`attach`](Self::attach), [`detach`](Self::detach), [`sync`](Self::sync))
-/// query and delete pivot rows through it. Reads go the other way — they select
-/// from `Related` with the pivot joined in — so a pivot column that is not a
-/// field on `Pivot` is invisible to `load()` but still available inside
-/// [`load_with`](Self::load_with).
+/// ([`attach`](Self::attach), [`detach`](Self::detach), [`sync`](Self::sync)
+/// and their batch forms) query and delete pivot rows through it. Reads select
+/// from `Related`: `load()`, `count()` and `exists()` keep the rows whose key
+/// one of the owner's pivot rows holds, and [`load_with`](Self::load_with)
+/// joins the pivot, so its closure can read a pivot column.
 ///
 /// ```ignore
 /// #[tideorm(has_many_through = "Role", pivot = "user_roles",
@@ -36,11 +35,10 @@ use super::state::{RelationState, relation_serde};
 ///
 /// # Duplicate pivot rows
 ///
-/// The join fans a related row out once per matching pivot row. `load()` collapses
-/// that with a `GROUP BY` on `Related`'s primary key, and `count()` counts the
-/// same groups; `load_with()` deliberately does not, because its closure owns
-/// the projection. `attach()` also refuses to create a second pivot row for a
-/// pair that already exists.
+/// `load()` and `count()` read each related row once, however many pivot rows
+/// link it. `load_with()` joins the pivot, so there a pair stored twice repeats
+/// its related row. `attach()` refuses to create a second pivot row for a pair
+/// that already exists.
 ///
 /// # Soft-delete pivots
 ///
@@ -54,7 +52,7 @@ use super::state::{RelationState, relation_serde};
 /// not carry: serializing yields just the cached `Vec<Related>`, and a
 /// deserialized wrapper can no longer query. A model rebuilt from JSON works
 /// again only after
-/// [`refresh_runtime_relations_from`](crate::internal::InternalModel::refresh_runtime_relations_from)
+/// [`__rebuild_relations`](crate::internal::InternalModel::__rebuild_relations)
 /// re-derives the wrappers. Like the direct wrappers, `load()` prefers the
 /// database over the cache whenever a connection is reachable — see
 /// [`get_cached`](Self::get_cached) for the non-querying view.
@@ -114,7 +112,7 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
         Ok(())
     }
 
-    fn parent_key(&self, context: &str) -> Result<&serde_json::Value> {
+    fn parent_key(&self, context: &str) -> Result<&Value> {
         self.ensure_configured()?;
         required_key(&self.state.key, "Parent primary key", context)
     }
@@ -126,6 +124,8 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     /// order pairs each key with the table it belongs to: the two pivot columns
     /// first, then the owner-side and related-side columns they point at.
     /// Normally the derive supplies all of this.
+    #[doc(hidden)]
+    #[must_use]
     pub fn new(
         foreign_key: &'static str,
         related_key: &'static str,
@@ -144,15 +144,23 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     }
 
     /// Supply the owning model's [`local_key`](Self::local_key) value, which is
-    /// what pivot rows are matched on.
+    /// what pivot rows are matched on, and whether the owner is new (its
+    /// `is_new()`), whose cached rows carry over when saving it rebuilds the
+    /// relation.
     ///
     /// Must be a scalar; composite keys are rejected at call time. Without it the
     /// wrapper is inert — every read and every mutation errors with "Parent
     /// primary key not set for relation", so an unsaved model cannot
     /// `attach()`.
-    pub fn with_parent_pk(mut self, pk: serde_json::Value) -> Self {
-        self.state.key = Some(pk);
+    #[doc(hidden)]
+    pub fn with_parent_pk(mut self, pk: impl Into<Value>, owner_is_new: bool) -> Self {
+        self.state.set_owner_key(pk.into(), owner_is_new);
         self
+    }
+
+    #[doc(hidden)]
+    pub fn attach_query_database(&mut self, database: &crate::database::Database) {
+        self.state.source.database = Some(database.clone());
     }
 
     #[doc(hidden)]
@@ -173,11 +181,8 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
             && self.relation_name == previous.relation_name
             && self.owner_table == previous.owner_table;
 
-        self.state.preserve_from(
-            &previous.state,
-            same_relation,
-            owner_is_unsaved(&previous.state.key),
-        );
+        self.state
+            .preserve_from(&previous.state, same_relation, previous.state.owner_is_new);
     }
 
     /// Apply the pivot join and the owner filter `load_with` reads the
@@ -186,11 +191,7 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     /// The join fans a related row out once per matching pivot row, so a pivot
     /// table holding the same pair twice repeats the related model; the
     /// closure owns the projection, so it may read the pivot's columns.
-    fn scope_to_pivot(
-        &self,
-        query: QueryBuilder<Related>,
-        pk: &serde_json::Value,
-    ) -> QueryBuilder<Related> {
+    fn scope_to_pivot(&self, query: QueryBuilder<Related>, pk: &Value) -> QueryBuilder<Related> {
         let pivot_related_column = format!(
             "{}.{}",
             self.pivot_table,
@@ -295,281 +296,16 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
         self.load_query("HasManyThrough::count")?.count().await
     }
 
-    /// Associate `related_id` with the owner by inserting a pivot row.
-    ///
-    /// Idempotent: attaching an already-attached id is a silent no-op. The row
-    /// is inserted only when it is missing, and a unique-key conflict counts as
-    /// already attached, so concurrent calls for the same pair store one row:
-    /// on SQLite always, since the insert runs under its write lock, and
-    /// elsewhere when the pivot table has a unique key on the two columns.
-    /// Without that key, PostgreSQL and MySQL can still let a concurrent pair
-    /// through twice. PostgreSQL and SQLite check and insert in one statement;
-    /// MySQL and MariaDB read first, because InnoDB locks what an
-    /// `INSERT .. SELECT` reads and two such attaches can deadlock.
-    ///
-    /// Only the two key columns are written. A pivot table with extra
-    /// `NOT NULL` columns and no defaults needs a direct `Pivot::create`
-    /// instead. On a soft-delete pivot, a trashed row for the pair is restored
-    /// rather than left to block the insert.
-    pub async fn attach(&self, related_id: impl serde::Serialize) -> Result<()> {
-        let pk = linkable_key(
-            self.parent_key("HasManyThrough::attach")?,
-            "HasManyThrough::attach",
-        )?;
-        let related_id = crate::query::filter_value(related_id);
-        let related_id = linkable_key(
-            require_scalar_relation_key(&related_id, "HasManyThrough::attach")?,
-            "HasManyThrough::attach related key",
-        )?;
-        let db = self.state.source.database()?;
-        let db_type = db.execution_backend();
-
-        let pair = || self.pair(self.state.source.query(), pk, related_id);
-        if Pivot::soft_delete_enabled() && pair().restore().await? > 0 {
-            return Ok(());
-        }
-
-        if matches!(
-            db_type,
-            crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB
-        ) && pair().with_trashed().exists().await?
-        {
-            return Ok(());
-        }
-
-        insert_pivot_pair::<Pivot>(&db, self.foreign_key, self.related_key, pk, related_id).await?;
-        Ok(())
+    /// Whether a related row is linked, as [`count`](Self::count) would count
+    /// it, without counting them all. Always queries.
+    pub async fn exists(&self) -> Result<bool> {
+        self.load_query("HasManyThrough::exists")?.exists().await
     }
 
-    /// Remove the association with `related_id`, returning how many pivot rows
-    /// were deleted (`0` if it was not attached).
-    ///
-    /// Deletes pivot rows only — neither the owner nor the related row is
-    /// touched.
-    pub async fn detach(&self, related_id: impl serde::Serialize) -> Result<u64> {
-        let pk = linkable_key(
-            self.parent_key("HasManyThrough::detach")?,
-            "HasManyThrough::detach",
-        )?;
-
-        let related_id = crate::query::filter_value(related_id);
-        self.pair(self.state.source.query(), pk, &related_id)
-            .delete()
-            .await
-    }
-
-    /// `query` narrowed to the pivot rows linking the owner key `parent` with
-    /// `related`.
-    fn pair(
-        &self,
-        query: QueryBuilder<Pivot>,
-        parent: &serde_json::Value,
-        related: &serde_json::Value,
-    ) -> QueryBuilder<Pivot> {
-        pivot_pair(query, self.foreign_key, self.related_key, parent, related)
-    }
-
-    /// Replace the whole association set with exactly `related_ids`.
-    ///
-    /// Delete-then-reinsert, not a diff: every existing pivot row for this owner
-    /// is removed, soft-deleted ones included, and the wanted ids are inserted
-    /// fresh, so any extra columns on a pivot row are lost. Passing an empty
-    /// vector detaches everything.
-    /// Duplicates in `related_ids` are collapsed, and every id is validated up
-    /// front so a bad one cannot be discovered halfway through.
-    ///
-    /// The delete and the re-inserts run as one transaction — a failure part way
-    /// through would otherwise leave the associations permanently deleted. It
-    /// joins an ambient transaction as a SAVEPOINT rather than opening a second
-    /// top-level one.
-    pub async fn sync<V: serde::Serialize>(&self, related_ids: Vec<V>) -> Result<()> {
-        let pk = linkable_key(
-            self.parent_key("HasManyThrough::sync")?,
-            "HasManyThrough::sync",
-        )?
-        .clone();
-
-        let mut seen = std::collections::HashSet::new();
-        let mut wanted = Vec::with_capacity(related_ids.len());
-        for id in related_ids.into_iter().map(crate::query::filter_value) {
-            linkable_key(
-                require_scalar_relation_key(&id, "HasManyThrough::sync")?,
-                "HasManyThrough::sync related key",
-            )?;
-            if seen.insert(id.to_string()) {
-                wanted.push(id);
-            }
-        }
-
-        let db = self.state.source.database()?;
-        let foreign_key = self.foreign_key;
-        let related_key = self.related_key;
-        let scoped_db = db.clone();
-
-        // `Database::transaction` defers to an ambient transaction installed by
-        // the caller, so this nests as a SAVEPOINT instead of opening a second,
-        // independent top-level transaction.
-        db.transaction(move |_| {
-            Box::pin(async move {
-                // A trashed pivot row left behind would keep a wanted pair
-                // from being inserted again.
-                Pivot::query_with(&scoped_db)
-                    .where_eq(foreign_key, pk.clone())
-                    .force_delete()
-                    .await?;
-
-                for id in &wanted {
-                    insert_pivot_pair::<Pivot>(&scoped_db, foreign_key, related_key, &pk, id)
-                        .await?;
-                }
-
-                Ok(())
-            })
-        })
-        .await?;
-
-        Ok(())
-    }
-
-    /// The eagerly-loaded rows, if this relation was populated. Never queries
-    /// and never awaits.
-    ///
-    /// `Some(&[])` means "loaded, and there are none"; `None` means nothing was
-    /// ever loaded. Filled by eager loading or by deserializing a payload that
-    /// contained the key — not by [`load`](Self::load), which does not write its
-    /// result back.
-    pub fn get_cached(&self) -> Option<&[Related]> {
-        self.state.cached().map(Vec::as_slice)
-    }
-
-    /// Mutable access to the cached rows.
-    ///
-    /// Edits are local to the cache: pushing or removing an element does *not*
-    /// create or delete a pivot row. Use [`attach`](Self::attach),
-    /// [`detach`](Self::detach) or [`sync`](Self::sync) to change the
-    /// association itself.
-    pub fn as_mut(&mut self) -> Option<&mut Vec<Related>> {
-        self.state.cached_mut()
-    }
-
-    /// Whether the cache has been populated. `true` for a loaded-but-empty
-    /// relation.
-    pub fn is_loaded(&self) -> bool {
-        self.state.is_loaded()
-    }
-}
-
-/// Insert the pivot row linking `parent_pk` and `related_id` unless it is
-/// there, and fail if the pair is still missing afterwards.
-///
-/// The conflict clause that turns a lost race into a no-op also swallows a
-/// conflict on any other unique key of the pivot, which linked nothing and
-/// reported success. PostgreSQL and SQLite report an insert that wrote no row;
-/// MySQL and MariaDB count a duplicate that changed nothing as a written row,
-/// so there the pair is always read back.
-async fn insert_pivot_pair<Pivot: Model>(
-    db: &crate::database::Database,
-    foreign_key: &str,
-    related_key: &str,
-    parent_pk: &serde_json::Value,
-    related_id: &serde_json::Value,
-) -> Result<()> {
-    use crate::config::DatabaseType;
-
-    let db_type = db.execution_backend();
-    let (sql, params) =
-        build_pivot_insert::<Pivot>(db_type, foreign_key, related_key, parent_pk, related_id);
-    // A trigger can change other tables before failing or suppressing the insert.
-    let written = db
-        .invalidating(db.__execute_with_params(&sql, params))
-        .await?;
-    let unconfirmed =
-        written == 0 || matches!(db_type, DatabaseType::MySQL | DatabaseType::MariaDB);
-    if unconfirmed
-        && !pivot_pair(
-            Pivot::query_with(db),
-            foreign_key,
-            related_key,
-            parent_pk,
-            related_id,
-        )
-        .exists()
-        .await?
-    {
-        let table = Pivot::table_name();
-        return Err(crate::error::Error::query(format!(
-            "no {table} row links {parent_pk} with {related_id}: another unique key of \
-             {table} refused it"
-        )));
-    }
-    Ok(())
-}
-
-/// `query` narrowed to the pivot rows linking `parent` with `related`.
-fn pivot_pair<Pivot: Model>(
-    query: QueryBuilder<Pivot>,
-    foreign_key: &str,
-    related_key: &str,
-    parent: &serde_json::Value,
-    related: &serde_json::Value,
-) -> QueryBuilder<Pivot> {
-    query
-        .where_eq(foreign_key, parent.clone())
-        .where_eq(related_key, related.clone())
-}
-
-/// Build the parameterized pivot-row INSERT shared by `attach` and `sync`, with
-/// each key bound as the type of its `Pivot` column.
-///
-/// On PostgreSQL and SQLite it inserts the row only when it is missing. On
-/// MySQL and MariaDB it inserts unconditionally, and the caller checks first:
-/// InnoDB takes shared next-key locks for the reads inside an
-/// `INSERT .. SELECT`, which two concurrent attaches turn into a deadlock.
-fn build_pivot_insert<Pivot: Model>(
-    db_type: crate::config::DatabaseType,
-    foreign_key: &str,
-    related_key: &str,
-    parent_pk: &serde_json::Value,
-    related_id: &serde_json::Value,
-) -> (String, Vec<crate::internal::Value>) {
-    use crate::config::DatabaseType;
-    use crate::internal::push_param;
-
-    let mut params = Vec::with_capacity(4);
-    let key_value = |column: &str, value: &serde_json::Value| {
-        crate::internal::json_to_column_value(
-            value,
-            crate::internal::column_type_of::<Pivot>(column).as_ref(),
-        )
-    };
-    let parent = key_value(foreign_key, parent_pk);
-    let related = key_value(related_key, related_id);
-    let new_parent = push_param(db_type, &mut params, parent.clone());
-    let new_related = push_param(db_type, &mut params, related.clone());
-    let table = crate::query::db_sql::quote_table::<Pivot>(db_type);
-    let foreign_key = quote_ident(db_type, Pivot::column_named(foreign_key));
-    let related_key = quote_ident(db_type, Pivot::column_named(related_key));
-    let sql = match db_type {
-        // The conflict clause makes losing a race on a unique key a no-op
-        // instead of an error.
-        DatabaseType::MySQL | DatabaseType::MariaDB => format!(
-            "INSERT INTO {table} ({foreign_key}, {related_key}) VALUES ({new_parent}, {new_related}) \
-             ON DUPLICATE KEY UPDATE {foreign_key} = {foreign_key}"
-        ),
-        // `NOT EXISTS` keeps a pivot table without a unique key free of
-        // duplicates, and the conflict clause covers a race on one with a key.
-        DatabaseType::Postgres | DatabaseType::SQLite => {
-            let existing_parent = push_param(db_type, &mut params, parent);
-            let existing_related = push_param(db_type, &mut params, related);
-            format!(
-                "INSERT INTO {table} ({foreign_key}, {related_key}) SELECT {new_parent}, {new_related} \
-                 WHERE NOT EXISTS (SELECT 1 FROM {table} WHERE {foreign_key} = {existing_parent} \
-                 AND {related_key} = {existing_related}) ON CONFLICT DO NOTHING"
-            )
-        }
-    };
-
-    (sql, params)
+    crate::relations::state::many_rows_cache!(
+        Related,
+        "Adding or removing a row creates or deletes no pivot row: use [`attach`](Self::attach), [`detach`](Self::detach) or [`sync`](Self::sync). Under an entity manager, the owner's next save detaches the rows the relation no longer holds."
+    );
 }
 
 impl<Related: Model, Pivot: Model> Default for HasManyThrough<Related, Pivot> {

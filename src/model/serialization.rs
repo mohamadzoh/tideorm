@@ -4,6 +4,11 @@ use std::collections::HashMap;
 
 use super::{Model, ModelMeta};
 
+/// The options `to_json` reads to render one language.
+pub(crate) fn language_options(language: &str) -> HashMap<String, String> {
+    HashMap::from([("language".to_string(), language.to_string())])
+}
+
 pub(crate) fn to_json<M>(model: &M, options: Option<&HashMap<String, String>>) -> serde_json::Value
 where
     M: Model,
@@ -38,8 +43,7 @@ pub(crate) fn try_to_json<M: Model>(
             let fallback = M::fallback_language();
             let language = options
                 .and_then(|opts| opts.get("language"))
-                .map(String::as_str)
-                .unwrap_or(&fallback);
+                .map_or(fallback.as_str(), String::as_str);
             // A field the model's own serde skips stays out, translated or not.
             let fields = M::translatable_fields()
                 .into_iter()
@@ -60,18 +64,18 @@ pub(crate) fn try_to_json<M: Model>(
 
     #[cfg(feature = "attachments")]
     if M::has_file_attachments()
-        && let Some(files) = json.remove(M::serialized_name("files"))
-        && let Some(files_obj) = files.as_object()
+        && let Some(serde_json::Value::Object(mut files_obj)) =
+            json.remove(M::serialized_name("files"))
     {
         let hidden = M::hidden_attributes();
-        let url_generator = M::file_url_generator();
+        let url_generator = crate::config::Config::get_file_url_generator();
         for relation in M::files_relations() {
             // An attachment named among the hidden attributes stays hidden.
             if is_hidden(relation, &hidden, &global_hidden) {
                 continue;
             }
-            if let Some(file_data) = files_obj.get(relation) {
-                let processed = process_file_for_json(relation, file_data, &hidden, url_generator);
+            if let Some(file_data) = files_obj.remove(relation) {
+                let processed = process_file_for_json(relation, file_data, &hidden, &url_generator);
                 json.insert(relation.to_string(), processed);
             }
         }
@@ -259,39 +263,38 @@ fn strip_hidden_attributes(
 #[cfg(feature = "attachments")]
 fn process_file_for_json(
     field_name: &str,
-    file_data: &serde_json::Value,
+    file_data: serde_json::Value,
     hidden_attrs: &[&str],
-    url_generator: crate::config::FileUrlGenerator,
+    url_generator: &crate::config::FileUrlGenerator,
 ) -> serde_json::Value {
+    // Read from the whole attachment, hidden keys included.
+    let url = match &file_data {
+        serde_json::Value::Object(_) => {
+            <crate::attachments::FileAttachment as serde::Deserialize>::deserialize(&file_data)
+                .ok()
+                .map(|file_attachment| url_generator(field_name, &file_attachment))
+        }
+        _ => None,
+    };
     match file_data {
-        serde_json::Value::Object(obj) => {
-            let mut cleaned = serde_json::Map::new();
-            for (key, value) in obj {
-                if !hidden_attrs.contains(&key.as_str()) {
-                    cleaned.insert(key.clone(), value.clone());
-                }
-            }
-
-            if let Ok(file_attachment) = serde_json::from_value::<crate::attachments::FileAttachment>(
-                serde_json::Value::Object(obj.clone()),
-            ) {
-                let url = url_generator(field_name, &file_attachment);
+        serde_json::Value::Object(mut cleaned) => {
+            cleaned.retain(|key, _| !hidden_attrs.contains(&key.as_str()));
+            if let Some(url) = url {
                 cleaned.insert("url".to_string(), serde_json::Value::String(url));
             }
-
             serde_json::Value::Object(cleaned)
         }
         serde_json::Value::Array(arr) => serde_json::Value::Array(
-            arr.iter()
+            arr.into_iter()
                 .map(|item| process_file_for_json(field_name, item, hidden_attrs, url_generator))
                 .collect(),
         ),
-        other => other.clone(),
+        other => other,
     }
 }
 
 pub(crate) fn collection_to_json<M>(
-    models: Vec<M>,
+    models: &[M],
     options: Option<HashMap<String, String>>,
 ) -> serde_json::Value
 where
@@ -309,28 +312,17 @@ pub(crate) fn to_hash_map<M>(model: &M) -> HashMap<String, String>
 where
     M: Model,
 {
-    let json = to_json(model, None);
-    let mut map = HashMap::new();
-
-    if let Some(obj) = json.as_object() {
-        for (key, value) in obj {
-            let Some(output_key) = hash_map_output_key(key, value) else {
-                continue;
-            };
-
-            map.insert(output_key.to_string(), crate::internal::json_text(value));
-        }
-    }
-
-    map
-}
-
-fn hash_map_output_key<'a>(key: &'a str, value: &serde_json::Value) -> Option<&'a str> {
-    if key == "params" && (value.is_object() || value.is_array()) {
-        None
-    } else {
-        Some(key)
-    }
+    let serde_json::Value::Object(object) = to_json(model, None) else {
+        return HashMap::new();
+    };
+    object
+        .into_iter()
+        .filter(|(key, value)| !(key == "params" && (value.is_object() || value.is_array())))
+        .map(|(key, value)| {
+            let text = crate::internal::json_text(&value);
+            (key, text)
+        })
+        .collect()
 }
 
 fn model_to_object<M>(

@@ -133,7 +133,7 @@ fn test_validation_errors_convert_to_validation_error() {
 
     let error: Error = errors.into();
     assert!(
-        matches!(&error, Error::Validation { field, message } if field == "email" && message == "is invalid"),
+        matches!(&error, Error::Validation { field, message, .. } if field == "email" && message == "is invalid"),
         "unexpected conversion: {error:?}"
     );
 }

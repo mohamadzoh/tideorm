@@ -55,22 +55,24 @@ mod error_exhaustive_variants {
 mod error_retryable_edge_cases {
     use tideorm::error::Error;
 
-    /// Without a driver classification, retries are judged from the message.
+    /// Retries follow how the database classified a failure. An error built
+    /// from a message alone has no classified failure, so it is not
+    /// retryable, however its message reads.
     #[test]
-    fn test_only_transient_failures_are_retryable() {
-        for (error, retryable) in [
-            (Error::connection("Connection refused by host"), true),
-            (Error::connection("connection pool exhausted"), true),
-            (Error::query("lock wait timeout exceeded"), true),
-            (Error::transaction("serialization failure"), true),
-            (Error::query("deadlock detected"), true),
-            (Error::query("syntax error"), false),
-            (Error::not_found("User not found"), false),
-            (Error::validation("email", "invalid"), false),
-            (Error::configuration("missing key"), false),
-            (Error::backend_not_supported("arrays", "sqlite"), false),
+    fn test_errors_without_a_classified_failure_are_not_retryable() {
+        for error in [
+            Error::connection("Connection refused by host"),
+            Error::connection("connection pool exhausted"),
+            Error::query("lock wait timeout exceeded"),
+            Error::transaction("serialization failure"),
+            Error::query("deadlock detected"),
+            Error::query("syntax error"),
+            Error::not_found("User not found"),
+            Error::validation("email", "invalid"),
+            Error::configuration("missing key"),
+            Error::backend_not_supported("arrays", "sqlite"),
         ] {
-            assert_eq!(error.is_retryable(), retryable, "{error:?}");
+            assert!(!error.is_retryable(), "{error:?}");
         }
     }
 }

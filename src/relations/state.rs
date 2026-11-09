@@ -3,12 +3,13 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::helpers::QuerySource;
+use crate::internal::Value;
 
 /// What a relation wrapper holds besides the names of its keys: the rows it
 /// has cached and whether it has loaded, the key it looks rows up by, and
 /// where its statements run. Serde carries the cache alone; the rest is
 /// rebuilt from the owning model's columns
-/// ([`refresh_runtime_relations_from`](crate::internal::InternalModel::refresh_runtime_relations_from)).
+/// ([`__rebuild_relations`](crate::internal::InternalModel::__rebuild_relations)).
 #[derive(Debug, Clone)]
 pub(crate) struct RelationState<C> {
     cached: Option<C>,
@@ -17,7 +18,13 @@ pub(crate) struct RelationState<C> {
     loaded: bool,
     /// The value rows are looked up by: the owner's key, or the foreign key
     /// the row itself holds for `BelongsTo` and `SelfRef`.
-    pub(crate) key: Option<serde_json::Value>,
+    pub(crate) key: Option<Value>,
+    /// Whether the owner was not stored yet when the wrapper was built, as
+    /// the owner's own `is_new()` tells. The rows cached in such a wrapper
+    /// are the caller's, so they are kept when saving the owner rebuilds the
+    /// wrapper under its stored key: an entity manager then saves them as its
+    /// children. A wrapper given no key counts as one.
+    pub(crate) owner_is_new: bool,
     pub(crate) source: QuerySource,
     /// The entity-manager identity keys of the rows this copy of the relation
     /// held when it loaded through an entity manager, or when a save last
@@ -33,6 +40,7 @@ impl<C> Default for RelationState<C> {
             cached: None,
             loaded: false,
             key: None,
+            owner_is_new: true,
             source: QuerySource::default(),
             #[cfg(feature = "entity-manager")]
             loaded_keys: None,
@@ -51,6 +59,13 @@ impl<C> RelationState<C> {
 
     pub(crate) fn is_loaded(&self) -> bool {
         self.loaded
+    }
+
+    /// Look rows up by the owner's `key`; `owner_is_new` is the owner's
+    /// `is_new()`.
+    pub(crate) fn set_owner_key(&mut self, key: Value, owner_is_new: bool) {
+        self.key = Some(key);
+        self.owner_is_new = owner_is_new;
     }
 
     /// Hold `value` as what a load found.
@@ -87,9 +102,10 @@ impl<C> RelationState<C> {
 
     /// Carry `previous`'s cache and load over to this state, rebuilt for the
     /// same owner: when it is the same relation, or when `previous` belonged
-    /// to an owner not stored yet (`previous_unsaved`), whose cached rows are
-    /// the caller's to save with it. The two travel together, so a rebuilt
-    /// wrapper never holds rows it counts as unloaded.
+    /// to an owner not stored yet (`previous_unsaved`, its `owner_is_new` for
+    /// a relation keyed by the owner), whose cached rows are the caller's to
+    /// save with it. The two travel together, so a rebuilt wrapper never
+    /// holds rows it counts as unloaded.
     pub(crate) fn preserve_from(
         &mut self,
         previous: &Self,
@@ -167,3 +183,91 @@ macro_rules! relation_serde {
 }
 
 pub(crate) use relation_serde;
+
+/// `get_cached`, `as_mut`, `is_loaded` and `clear` for a wrapper that caches
+/// at most one `$model` in its `state`. `$note` adds what editing the cache
+/// does for this relation.
+macro_rules! one_row_cache {
+    ($model:ident $(, $note:literal)?) => {
+        /// The cached row, if one is cached: eager-loaded, loaded through an
+        /// entity manager, or deserialized. Never queries and never awaits.
+        ///
+        /// `None` both when nothing was loaded and when the relation is known
+        /// to have no row; [`is_loaded`](Self::is_loaded) tells them apart.
+        pub fn get_cached(&self) -> Option<&$model> {
+            self.state.cached().map(|model| &**model)
+        }
+
+        /// Mutable access to the cached row, if one is cached.
+        ///
+        /// Edits stay in the cache, and [`load`](Self::load) does not see
+        /// them: save the row itself to persist them.
+        $(#[doc = ""] #[doc = $note])?
+        pub fn as_mut(&mut self) -> Option<&mut $model> {
+            self.state.cached_mut().map(|model| &mut **model)
+        }
+
+        /// Whether the cache holds a load: an eager load, a load through an
+        /// entity manager, [`clear`](Self::clear), or a deserialized
+        /// non-`null` payload. A loaded relation may hold no row.
+        pub fn is_loaded(&self) -> bool {
+            self.state.is_loaded()
+        }
+
+        /// Drop the cached row and mark the relation *loaded and empty*.
+        ///
+        /// [`is_loaded`](Self::is_loaded) stays `true`, and without a
+        /// reachable connection [`load`](Self::load) answers `Ok(None)` from
+        /// the cache: this records a detach, it does not invalidate.
+        $(#[doc = ""] #[doc = $note])?
+        pub fn clear(&mut self) {
+            self.state.set_cached(None);
+        }
+    };
+}
+
+pub(crate) use one_row_cache;
+
+/// `get_cached`, `as_mut`, `is_loaded` and `clear` for a wrapper that caches
+/// a list of `$model` in its `state`, as [`one_row_cache!`] does for one row.
+macro_rules! many_rows_cache {
+    ($model:ident $(, $note:literal)?) => {
+        /// The cached rows, if the relation was loaded: eager-loaded, loaded
+        /// through an entity manager, or deserialized. Never queries and never
+        /// awaits; [`load`](Self::load) does not fill it.
+        ///
+        /// `Some(&[])` means loaded, and there are none; `None` means nothing
+        /// was loaded.
+        pub fn get_cached(&self) -> Option<&[$model]> {
+            self.state.cached().map(Vec::as_slice)
+        }
+
+        /// Mutable access to the cached rows, if the relation was loaded.
+        ///
+        /// Edits stay in the cache, and [`load`](Self::load) does not see
+        /// them: save the rows themselves to persist them.
+        $(#[doc = ""] #[doc = $note])?
+        pub fn as_mut(&mut self) -> Option<&mut Vec<$model>> {
+            self.state.cached_mut()
+        }
+
+        /// Whether the cache holds a load: an eager load, a load through an
+        /// entity manager, [`clear`](Self::clear), or a deserialized
+        /// non-`null` payload. A loaded relation may hold no rows.
+        pub fn is_loaded(&self) -> bool {
+            self.state.is_loaded()
+        }
+
+        /// Drop the cached rows and mark the relation *loaded and empty*.
+        ///
+        /// [`is_loaded`](Self::is_loaded) stays `true`, and without a
+        /// reachable connection [`load`](Self::load) answers with no rows from
+        /// the cache: this records a detach, it does not invalidate.
+        $(#[doc = ""] #[doc = $note])?
+        pub fn clear(&mut self) {
+            self.state.set_cached(Some(Vec::new()));
+        }
+    };
+}
+
+pub(crate) use many_rows_cache;

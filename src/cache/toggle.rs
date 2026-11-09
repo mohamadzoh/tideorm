@@ -1,4 +1,4 @@
-//! The configuration and on/off switch both caches keep.
+//! The query cache's configuration and on/off switch.
 
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::sync::atomic::{AtomicBool, Ordering};

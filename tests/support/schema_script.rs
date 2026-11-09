@@ -1,16 +1,15 @@
 //! Split a `SchemaWriter` export into statements without splitting function
 //! bodies, literals or comments.
-#[allow(dead_code)]
-#[path = "../../src/internal/sql_lexer.rs"]
-mod lexer;
+use tideorm::orm::sql::{Dialect, Kind, tokens};
 
 /// The statements of `sql`. A `DELIMITER` directive switches the separator;
 /// otherwise `;` separates, found with MySQL's quoting and comment rules when
-/// `mysql` is set and with the crate's SQL lexer when it is not.
+/// `mysql` is set and with the rules for any backend when it is not.
 pub fn statements(sql: &str, mysql: bool) -> Vec<&str> {
     let mut remaining = sql;
     let mut delimiter = ";";
     let mut result = Vec::new();
+    let dialect = if mysql { Dialect::MySql } else { Dialect::Any };
     while !remaining.trim().is_empty() {
         remaining = remaining.trim_start();
         if let Some(directive) = remaining.strip_prefix("DELIMITER ") {
@@ -21,29 +20,9 @@ pub fn statements(sql: &str, mysql: bool) -> Vec<&str> {
         }
         let end = if delimiter != ";" {
             remaining.find(delimiter)
-        } else if mysql {
-            let mut pos = 0;
-            let mut boundary = None;
-            while pos < remaining.len() {
-                let rest = &remaining[pos..];
-                let ch = rest.chars().next().unwrap();
-                if matches!(ch, '\'' | '"' | '`') {
-                    pos += lexer::quoted_len(rest, ch, ch != '`');
-                } else if rest.starts_with("/*") {
-                    pos += lexer::block_comment_len(rest, false);
-                } else if rest.starts_with("--") || ch == '#' {
-                    pos += rest.find('\n').unwrap_or(rest.len());
-                } else if ch == ';' {
-                    boundary = Some(pos);
-                    break;
-                } else {
-                    pos += ch.len_utf8();
-                }
-            }
-            boundary
         } else {
-            lexer::tokens(remaining)
-                .find(|token| token.kind == lexer::Kind::Symbol && token.text == ";")
+            tokens(remaining, dialect)
+                .find(|token| token.kind == Kind::Symbol && token.text == ";")
                 .map(|token| token.start)
         };
         if let Some(end) = end {

@@ -103,7 +103,7 @@ Use these inline in `#[tideorm::model(...)]`, or in a `#[tideorm(...)]` attribut
 | `#[tideorm(skip_default)]` | Skip auto-generated Default impl only |
 | `#[tideorm(skip_serialize)]` | Skip auto-generated Serialize impl only |
 | `#[tideorm(skip_deserialize)]` | Skip auto-generated Deserialize impl only |
-| `#[tideorm(encrypted = "field_a,field_b")]` | Encrypt selected persisted string columns on write and decrypt them on load. Requires the `encrypted-fields` feature. |
+| `#[tideorm(encrypted = "field_a,field_b")]` | Encrypt selected persisted columns on write and decrypt them as rows are read. Requires the `encrypted-fields` feature. |
 | `#[index("col")]` | Create an index |
 | `#[unique_index("col")]` | Create a unique index |
 | `#[index(name = "idx", columns = "a,b")]` | Named composite index |
@@ -130,10 +130,10 @@ Enable the `encrypted-fields` Cargo feature before using `encrypted = "..."`.
 
 ```toml
 [dependencies]
-tideorm = { version = "0.16.2", features = ["postgres", "encrypted-fields"] }
+tideorm = { version = "0.17.0", features = ["postgres", "encrypted-fields"] }
 ```
 
-Use `encrypted = "..."` on the model when specific persisted string columns should be stored encrypted in the database but remain plain strings in your Rust model.
+Use `encrypted = "..."` on the model when specific persisted columns should be stored encrypted in the database but keep their own plaintext type in your Rust model.
 
 ```rust
 #[tideorm::model(
@@ -152,7 +152,7 @@ pub struct Customer {
 
 Encrypted field behavior:
 
-- TideORM encrypts these fields before `create()`, `save()`, `update()`, `insert_all()`, nested saves, and batch `update_all().set(...)` writes.
+- TideORM encrypts these fields before `create()`, `save()`, `update()`, `insert_all()`, upserts, nested saves, and batch `update_all().set(...)` writes.
 - TideORM decrypts them automatically on `find()`, query-builder reads, eager loads, and raw model hydration.
 - This feature is separate from `#[tideorm(tokenize)]`. It uses the same configured encryption key, but it protects regular columns rather than primary-key tokens.
 - Each encrypted field uses a scoped key derived from the configured encryption secret plus the model table and column name, so ciphertext from one attribute does not decrypt under another attribute's context.
@@ -162,7 +162,7 @@ Encrypted field behavior:
 - Typed unions reject known incompatible output types, such as a boolean and an integer at the same position, because all rows share one decoder.
 - `UNION` rejects encrypted projections because deduplication compares ciphertext. `UNION ALL` supports explicit columns (or the default model projection) when each output position has the same encryption table and column in every operand. Incompatible scopes and unknown shapes such as raw SQL or wildcards are rejected when an encrypted projection is involved; read those queries separately.
 - Configure the encryption key once during startup with `TideConfig::init().encryption_key("...")` or `TokenConfig::set_encryption_key("...")`.
-- Supported encrypted field types are `String`, `Text`, `Option<String>`, and `Option<Text>`. A batch `set()` of an encrypted field takes a string or `None`.
+- An encrypted field can have any type that implements `Serialize` and `Deserialize` (`String`, `Option<String>`, numbers, your own structs). Its column stores the encrypted JSON of the value as text, so declare it `TEXT` whatever the field's type; `None` is stored as `NULL`. A row decrypts as it is read, so a model never holds ciphertext. A batch `set()` of an encrypted field takes a value of the field's type (or `None` for an `Option` field) and refuses anything else.
 - `pluck`, `value`, `get_json` and `get_as` decrypt encrypted columns from the query model or joined models. Named projections in `get_json` and `get_as` retain decryption through aliases and scalar subqueries.
 - A primary key cannot be encrypted: every write stores a new ciphertext, which no lookup by the key could match, so `#[tideorm(encrypted = "..")]` on one is a compile error.
 - For the same reason an `#[index]` or `#[unique_index]` over an encrypted field, or `searchable = ".."` naming one, is a compile error (a unique index would never see two equal values), and a full-text search over an encrypted column fails with an error.
@@ -251,22 +251,24 @@ user.name = "Jane Doe".to_string();
 
 assert_eq!(user.changed_fields()?, Some(vec!["name"]));
 
-// The inner `Option` is the column's own value, which may itself be NULL.
+// The inner `Option` is the column's own value, `None` for NULL.
 assert_eq!(
     user.original_value("name")?,
-    Some(Some(serde_json::json!("John Doe")))
+    Some(Some(DbValue::from("John Doe")))
 );
 ```
 
-The usual gate reads:
+`is_dirty()` and `is_field_dirty(field)` answer the same question with a `bool`, `None` again meaning no baseline. The usual gate saves unless the model is known to be unchanged:
 
 ```rust
-match user.changed_fields()? {
-    // Nothing to compare against: save rather than guess.
-    None => user.save().await?,
-    Some(changed) if !changed.is_empty() => user.save().await?,
-    Some(_) => user,
-};
+// Nothing to compare against (`None`): save rather than guess.
+if user.is_dirty()? != Some(false) {
+    user = user.save().await?;
+}
+
+if user.is_field_dirty(User::columns.email)? == Some(true) {
+    send_confirmation(&user).await?;
+}
 ```
 
 `changed_fields()` only reports persisted model fields, not runtime relation wrappers. The tracked baseline is refreshed by TideORM loads such as `find()`, query results, `reload()`, `save()`, and `update()`. Bulk mutation helpers such as `update_all()` and query-builder deletes invalidate the baseline for that model type.
@@ -294,6 +296,77 @@ User::query()
 
 On a soft-delete model `delete()`, `destroy()` and `query().delete()` mark the row deleted instead of removing it; `force_delete()` removes it for good.
 
+### Choosing a Write
+
+| Call | Hooks | Validates | Timestamps | No row matches | Returns |
+|---|---|---|---|---|---|
+| `Model::create(m)` | validation, save, create | yes | sets `created_at` and `updated_at` | always inserts | the stored row |
+| `m.save()` | those of the create or update it runs | yes | as create or update | see below | the stored row |
+| `m.update()` | validation, save, update | yes | sets `updated_at` | `Error::NotFound` | the stored row |
+| `m.delete()`, `Model::destroy(id)` | delete; `after_delete` only when a row went | no | none | `Ok(0)` | rows affected |
+| `Model::insert_all(models)` | none | yes, every model before any is written | as create | always inserts | the stored rows, in input order |
+| `Model::on_conflict(..)`, `insert_or_update(..)` | none | yes | an insert sets both; an update refreshes `updated_at` only when it is in the update set | inserts | the stored row |
+| `update_all()`…`execute()` | none | no | none: set `updated_at` yourself | `Ok(0)` | rows affected |
+| `query()`…`delete()`, `delete_all()` | none | no | none | `Ok(0)` | rows affected |
+
+The stored row is read back from the database, so it carries generated keys, defaults and stamped timestamps. Nested saves (`save_with_many(..)`, see [Nested Save](#nested-save-cascade-operations)) run each model's own `save()`, hooks included, in one transaction.
+
+`save()` decides by the key:
+
+- A key still at its default (`0`, an empty string, a nil UUID; any component of a composite key) inserts.
+- A single auto-increment key that is set updates. A key no row holds is `Error::NotFound`, not an insert: reset the key to `0` to insert a copy.
+- Any other key that is set (natural, UUID, composite) updates the row with that key, a trashed one included, and inserts when there is none.
+
+`update()` writes every column of the model, not only the fields you changed, so two requests that each change one field of the same row undo each other's change. To write only some columns, name them in a batch update, which runs no hooks or validation and stamps no timestamp:
+
+```rust
+User::update_all()
+    .set(User::NAME, name)
+    .set(User::UPDATED_AT, Utc::now())
+    .where_eq(User::ID, id)
+    .execute()
+    .await?;
+```
+
+To refuse a write based on a stale read (optimistic concurrency), keep a version column and make the write conditional on it; zero rows means someone else wrote first:
+
+```rust
+let written = Document::update_all()
+    .set(Document::BODY, body)
+    .increment(Document::VERSION, 1)
+    .where_eq(Document::ID, id)
+    .where_eq(Document::VERSION, version_read)
+    .execute()
+    .await?;
+if written == 0 {
+    // reload and show the newer version, or report a conflict
+}
+```
+
+Or lock the row for the read-check-write, as [Concurrent Updates](#concurrent-updates) shows.
+
+### Returning Models from an Endpoint
+
+Render a model for an API response with `try_to_json()`. It drops hidden fields (the model's `hidden` list and the global ones), turns attachment fields into URLs and resolves translatable fields to one language, and returns an error when a field cannot be rendered:
+
+```rust
+async fn show(id: i64) -> tideorm::Result<serde_json::Value> {
+    let user = User::find_or_fail(id).await?;
+    user.try_to_json(None) // try_collection_to_json(&users, None) for a list
+}
+```
+
+The other ways to get JSON skip some of that:
+
+| Call | Hidden fields | Attachments and translations | On failure |
+|---|---|---|---|
+| `model.try_to_json(options)` | left out | URLs, one language | `Err` |
+| `model.to_json(options)` | left out | URLs, one language | logs it and returns `{}` |
+| `serde_json::to_value(&model)`, a framework's `Json(model)` | **included** | as stored | serde's error |
+| `query().get_json()` | **included**: every selected column | as stored | `Err` |
+
+Plain serde and `get_json()` are for internal use (caches, queues, admin exports); never send them to a client unless the model has nothing to hide.
+
 ---
 
 ## Schema Synchronization (Development Only)
@@ -311,7 +384,11 @@ TideConfig::init()
 
 `models_matching(...)` filters compiled `#[tideorm::model]` types by their source file path, so patterns like `src/models/*`, `src/models/*.model.rs`, and `src/models/**/*.rs` work as long as those modules are still included through normal Rust `mod` declarations.
 
+Sync creates each column with the type its field's Rust type maps to: the type's `ValueType::column_type()`, which a model's `Column::def()` reports too, rendered as migrations render it (a `String` is `TEXT`, `LONGTEXT` on MySQL; a `u32` is `BIGINT` on PostgreSQL). A field type with no `ValueType` does not compile: derive `DeriveValueType` on a newtype, `DeriveActiveEnum` on an enum, or mark a field that is not a column `#[tideorm(skip)]`.
+
 Sync also creates the indexes a model declares with `#[index]` and `#[unique_index]`. On an existing table it adds the ones that are missing, and a failure there is logged as a warning rather than stopping startup.
+
+On an existing table sync only adds: it adds the columns the table lacks and never drops or changes one. A new non-`Option` field without a `#[tideorm(default = "..")]` can be added only while the table is empty, since its rows would otherwise hold `NULL`; with rows present, sync fails and names the column. Give the field a default, make it an `Option`, or add it with a migration that fills it in. SQLite cannot add a `NOT NULL` column without a default at all, so there sync adds it as nullable to an empty table.
 
 Or export schema to a file:
 
@@ -325,7 +402,18 @@ TideConfig::init()
 
 > ⚠️ **Warning**: Do NOT use `sync(true)` in production! Use proper migrations instead.
 
-`force_sync(true)` goes further: on every connect it drops and recreates the table of each registered model, deleting all of its rows. It is for throwaway development and test databases only.
+`force_sync(true)` goes further: on every connect it drops and recreates the table of each registered model, deleting all of its rows. It drops every table before creating any, each before the registered tables its foreign keys reference, and the recreated tables have no foreign keys. It is for throwaway development and test databases only.
+
+To sync a database yourself, outside `connect()`:
+
+```rust
+use tideorm::sync::{SyncMode, sync_database_with};
+
+sync_database_with(&db, SyncMode::Additive).await?; // what sync(true) does
+sync_database_with(&db, SyncMode::Recreate).await?; // what force_sync(true) does
+```
+
+`SchemaGenerator::new(DatabaseType::Postgres).add_model::<User>().generate()` renders the `CREATE TABLE` sync would run for a model, without connecting.
 
 ---
 
@@ -375,7 +463,7 @@ let trashed_posts = Post::query()
     .await?;
 ```
 
-The scope applies everywhere: `find(id)`, `exists(id)`, every query terminal, `update_all()`, relation loads and full-text search leave trashed rows out. To reach them:
+The scope applies to every read and filtered write: `find(id)`, `exists(id)`, every query terminal, `update_all()`, relation loads and full-text search leave trashed rows out. Writes of a model by its key do not: `update()`, `save()` and the upserts reach a trashed row and write the model's `deleted_at` back, so saving a stale copy of a trashed row restores it (`restore()` works this way). To reach trashed rows on purpose:
 
 - `Post::query().with_trashed().find(id)` reads a trashed row by key; `reload()` refreshes the record in hand even when it is trashed.
 - `Post::update_all().with_trashed()` updates the trash too; `Post::query().only_trashed().restore()` restores it.
@@ -477,25 +565,112 @@ let users = User::query()
 TideORM provides clean transaction support:
 
 ```rust
-// Model-centric transactions
-User::transaction(|tx| Box::pin(async move {
-    // All operations in here are in a single transaction
+db.transaction(async move |_tx| {
+    // Every TideORM call in here joins the transaction: no handle is passed
     let user = User::create(User { ... }).await?;
     let profile = Profile::create(Profile { user_id: user.id, ... }).await?;
-    
+
     // Return Ok to commit, Err to rollback
     Ok((user, profile))
-})).await?;
+}).await?;
 
-// Database-level transactions
-db.transaction(|tx| Box::pin(async move {
+// On whatever database the surrounding code runs on: the enclosing
+// transaction's (as a savepoint), a `scope`'s, else the global one
+Database::current()?.transaction(async move |_tx| {
     // ... operations ...
     Ok(result)
-})).await?;
+}).await?;
 ```
 
 If the closure returns `Ok`, the transaction is committed.
 If it returns `Err` or panics, the transaction is rolled back.
+
+`atomically` takes a plain future instead of a closure, for work that needs no transaction handle. Every TideORM call inside it joins the transaction:
+
+```rust
+let order = require_db()?.atomically(async {
+    let order = Order::create(order).await?;
+    Item::update_all().decrement("stock", 1).where_eq("id", item_id).execute().await?;
+    Ok(order)
+}).await?;
+```
+
+`scope` runs a future with a database as the ambient connection without opening a transaction, so model calls that name no handle — `create`, `find`, `Model::query()`, `Database::raw` — use a replica or a tenant's database instead of the global one:
+
+```rust
+let user = tenant_db.scope(async {
+    let user = User::create(user).await?;
+    Profile::create(Profile { user_id: user.id, ..Default::default() }).await?;
+    Ok(user)
+}).await?;
+```
+
+### Choosing the Database a Call Uses
+
+| You want | Use |
+|---|---|
+| The application's database | nothing: `User::find(id)`, `User::query()`, `user.save()` |
+| One read from another database, such as a replica | `User::query_with(&replica)`, `User::find_with(id, &replica)`; eager loads of that query read there too |
+| Every call in a piece of code on another database, such as a tenant's | `tenant_db.scope(async { .. })` |
+| Several writes that succeed or fail together | `db.transaction(..)` or `db.atomically(..)` |
+
+A call that names no database uses the innermost scope around it (a transaction is one), else the global database. A call that names one (`query_with`, `find_with`) joins the innermost enclosing transaction opened on that database's pool, and otherwise runs on that database's own connection, even inside another database's transaction: a replica read inside a primary's transaction goes to the replica, outside the transaction. Model writes (`create`, `save`, `update`, `delete`) name no database, so run them inside a `scope` or a transaction of the database they belong to.
+
+That lets one service function serve every database, the caller choosing where it runs:
+
+```rust
+async fn rename(id: i64, name: String) -> tideorm::Result<User> {
+    let mut user = User::find_or_fail(id).await?;
+    user.name = name;
+    user.update().await
+}
+
+let user = tenant_db.scope(rename(7, "Ada".into())).await?;    // the tenant's database
+let user = primary.atomically(rename(7, "Ada".into())).await?; // in a transaction
+let total = Order::query_with(&replica).count().await?;         // a replica read
+```
+
+### Transactions and Concurrent Tasks
+
+A transaction, like a `scope`, follows the future it was given: it is installed each time that future is polled. So:
+
+- calls awaited in the closure join it;
+- futures run together inside it with `join!`, `try_join!` or `select!` join it too, since they are polled as part of its future. They share its one connection, so their statements run one after another;
+- a task started with `tokio::spawn` (or `async_std::task::spawn`) does **not**. It is polled on its own, so its calls run on the global database, outside the transaction: they commit on their own and stay if the transaction rolls back, they cannot see its uncommitted rows, and they can wait on locks it holds.
+
+```rust
+let user = db.transaction(async move |_tx| {
+    let (user, settings) = tokio::try_join!(
+        User::create(user),         // both in the transaction
+        Settings::create(settings),
+    )?;
+    Ok(user)
+}).await?;
+
+// Work that must not be part of the transaction starts after it, on purpose,
+// and names its database when it is not the global one
+let db = tenant_db.clone();
+tokio::spawn(async move { db.scope(send_welcome(&user)).await });
+```
+
+Do not move the transaction handle into a spawned task either: a clone of it still alive when the closure returns fails the commit ("transaction handle leaked outside the transaction scope") and rolls the transaction back.
+
+### Isolation Level and Access Mode
+
+`transaction_with` begins the transaction with `TransactionOptions`: an isolation level and an access mode on PostgreSQL and MySQL/MariaDB, and the `BEGIN` mode on SQLite, which has neither:
+
+```rust
+let report = db.transaction_with(
+    TransactionOptions {
+        isolation_level: Some(IsolationLevel::Serializable),
+        access_mode: Some(AccessMode::ReadOnly),
+        ..TransactionOptions::default()
+    },
+    async move |_tx| { Report::build().await },
+).await?;
+```
+
+A read-only transaction refuses writes; SQLite cannot make one read-only, so it refuses `AccessMode::ReadOnly` with an error as the transaction begins. On SQLite, `SqliteTransactionMode::Immediate` takes the write lock as the transaction begins, so two competing writers queue at `BEGIN` (up to the busy timeout) instead of the second failing at its first write. Options set a transaction up as it begins, so a `transaction_with` inside another transaction, which opens a savepoint, returns an error when given any.
 
 ### Concurrent Updates
 
@@ -504,7 +679,7 @@ A transaction does not stop two requests from reading the same row at the same t
 Lock the rows you are about to change with `lock_for_update()` (`SELECT ... FOR UPDATE`). A second transaction that locks the same row waits until the first commits, then reads what it wrote:
 
 ```rust
-let shipped = Item::transaction(|_tx| Box::pin(async move {
+let shipped = Database::current()?.atomically(async {
     let mut item = Item::query()
         .where_eq("id", id)
         .lock_for_update()
@@ -516,12 +691,18 @@ let shipped = Item::transaction(|_tx| Box::pin(async move {
     item.stock -= quantity;
     item.update().await?;
     Ok(true)
-})).await?;
+}).await?;
 ```
 
 For a plain counter, a single conditional statement needs no lock: `Item::update_all().decrement("stock", quantity).where_eq("id", id).where_gte("stock", quantity).execute()` returns `0` when the stock ran out.
 
 SQLite has no row locks, so `lock_for_update()` adds nothing there: the first write of a transaction locks the whole database, and the second of two competing transactions fails with a retryable `LockNotAvailable` error instead.
+
+### Automatic Rollback
+
+SQLite rolls a transaction back by itself after some failed statements (a constraint's `ON CONFLICT ROLLBACK`, a trigger's `RAISE(ROLLBACK)`), and every database rolls back the whole transaction a deadlock hits, savepoints included. TideORM then refuses the transaction's later statements, nested transactions and its commit at every savepoint depth, even when the closure caught the error, so nothing runs outside it; rolling back stays safe. Retry the whole transaction: its earlier writes were rolled back too.
+
+A connection goes back to the pool with no transaction open: one left open is rolled back, and a connection that cannot be brought back to that state is closed.
 
 ---
 
@@ -556,7 +737,7 @@ let post = post.update().await?;
 
 A field named — or mapped with `column = ".."` to — `created_at` or `updated_at` is managed when it holds a `DateTime<Utc>` or a `NaiveDateTime` (set to the current UTC time, matching `timestamps_naive()` columns), optional or not. The value you set on such a field is replaced; a field of any other type keeps it.
 
-Every write keeps the creation time: `update()` never writes `created_at`, and an upsert that finds the row already there refreshes `updated_at` but leaves `created_at` alone unless you name it in `update_columns`. A request body can leave both fields out, so a model deserialized from `{"email": ".."}` saves with fresh timestamps, and a body that sends `created_at` cannot rewrite it. `update_all()` writes only what it is told to, so set `updated_at` there yourself if you need it.
+Every write keeps the creation time: `update()` never writes `created_at`, and an upsert that finds the row already there leaves `created_at` alone unless you name it in `update_columns`. It refreshes `updated_at` when that column is in its update set: by default it is, but `update_columns([..])` must name it, and `do_nothing()` writes nothing. A request body can leave both fields out, so a model deserialized from `{"email": ".."}` saves with fresh timestamps, and a body that sends `created_at` cannot rewrite it. `update_all()` writes only what it is told to, so set `updated_at` there yourself if you need it.
 
 ---
 
@@ -584,7 +765,8 @@ impl Callbacks for User {
     
     fn after_create(&self) -> tideorm::Result<()> {
         println!("User {} created with id {}", self.email, self.id);
-        // Could send welcome email, create audit log, etc.
+        // Hooks cannot query: queue the welcome email here, and create
+        // related records once `create()` has returned.
         Ok(())
     }
     
@@ -613,7 +795,7 @@ impl Callbacks for User {
 | `before_delete` | Before deleting record |
 | `after_delete` | After deleting record; not when no row matched |
 
-An `Err` from a `before_*` hook stops the operation before anything is written. An `after_*` hook runs once the statement has succeeded: its `Err` is returned from `save()`, `update()` or `delete()`, but the row is already written. Inside `Database::transaction`, propagating that error with `?` rolls the write back with the rest of the transaction; outside one, it stays. Callbacks run for single-model writes only — `insert_all()`, `update_all()`, upserts and `query().delete()` skip them.
+An `Err` from a `before_*` hook stops the operation before anything is written. An `after_*` hook runs once the statement has succeeded: its `Err` is returned from `save()`, `update()` or `delete()`, but the row is already written. Inside `Database::transaction`, propagating that error with `?` rolls the write back with the rest of the transaction; outside one, it stays. Callbacks run for single-model writes only — `insert_all()`, `update_all()`, upserts and the query writes (`delete()`, `delete_all()`, `soft_delete()`, `force_delete()`, `restore()`) skip them. `before_save` runs after validation, so what it changes is not validated, and a managed `created_at`/`updated_at` is stamped after it, so a value the hook writes there is replaced.
 
 ---
 
@@ -646,6 +828,21 @@ let affected = User::query()
     .set("status", "dormant")
     .execute()
     .await?;
+```
+
+`set`, `coalesce`, `array_append`, `array_remove` and `json_set` take any value a filter takes (`impl Into<DbValue>`) and bind it as the column's type, as filters do: text can name a UUID or a timestamp, a `None` writes NULL, and a JSON column takes the value as a document (`serde_json::json!(..)` for an object). A NaN or infinite float, or a value the column cannot hold, fails the update before any row changes.
+
+### Upserts
+
+`on_conflict(columns)` inserts a model or, when it collides with the unique key those columns form, updates the stored row, and returns the row as stored. Every other column is overwritten by default (a managed `created_at` keeps the original creation time); `update_columns` and `update_all_except` narrow that, and `do_nothing()` keeps the stored row as it is, so the call reads "insert unless it exists":
+
+```rust
+let user = User::on_conflict(["email"])
+    .update_all_except(["role"])
+    .insert(user)
+    .await?;
+
+let tag = Tag::on_conflict([Tag::columns.slug]).do_nothing().insert(tag).await?;
 ```
 
 Like a query, `update_all()` leaves soft-deleted rows out; `.with_trashed()` reaches them. `query().update_all()` keeps the query's own scope, filters and the database `query_with` names. A query that joins, groups, pages or unions cannot become an `UPDATE`, and running one fails.
@@ -691,7 +888,7 @@ Rules on a `#[tideorm(skip)]` field run too, for a value that is checked but nev
 
 ### Applying Rules by Hand
 
-`Validator::validate_rule` checks one value against one `ValidationRule` and returns the failure message, and `ValidationBuilder::new(field)` collects the rules for one field. `ValidationRule` also has `In` and `NotIn` for allow/deny lists:
+`Validator::validate_rule` checks one value against one `ValidationRule` and returns the failure message, and `ValidationBuilder::new(field)` collects the rules for one field and checks a value against all of them with `validate(&value)`. `ValidationRule` also has `In` and `NotIn` for allow/deny lists (`in_list` and `not_in` on the builder):
 
 ```rust
 use tideorm::validation::{ValidationBuilder, ValidationRule, Validator};
@@ -710,6 +907,29 @@ let username = "ab".to_string();
 for rule in &rules {
     if let Some(message) = Validator::validate_rule(&username, rule, &field) {
         println!("{}", message);
+    }
+}
+
+// Or check a value against every rule of a builder at once
+let errors = ValidationBuilder::new("username")
+    .min_length(3)
+    .alphanumeric()
+    .validate(&username)
+    .unwrap_err();
+```
+
+A hand-written `Validate` impl collects a struct's failures with `ValidationErrors::check`, which applies a field's rules and records each failure under its name:
+
+```rust
+use tideorm::validation::{Validate, ValidationErrors, ValidationRule};
+
+impl Validate for Signup {
+    fn validate(&self) -> Result<(), ValidationErrors> {
+        let mut errors = ValidationErrors::new();
+        errors
+            .check("email", &self.email, &[ValidationRule::Required, ValidationRule::Email])
+            .check("age", &self.age, &[ValidationRule::MinExact("18".into())]);
+        errors.to_result()
     }
 }
 ```
@@ -738,6 +958,18 @@ if !errors.is_empty() {
 
 // Convert to TideORM Error
 let tide_error: tideorm::error::Error = errors.into();
+```
+
+A failed `create()`, `save()` or `update()` returns that `Error::Validation`; `validation_errors()` gives back the failures, field by field, to answer a form with:
+
+```rust
+match user.save().await {
+    Ok(user) => Ok(user),
+    Err(error) => match error.validation_errors() {
+        Some(errors) => Err(form_errors(errors.errors())), // Vec<(field, message)>
+        None => Err(error.into()),
+    },
+}
 ```
 
 ---
@@ -851,6 +1083,7 @@ async fn get_user(token: String) -> tideorm::Result<Json<serde_json::Value>> {
 For custom tokenization logic, implement the `Tokenizable` trait manually:
 
 ```rust
+use std::sync::Arc;
 use tideorm::tokenization::{Tokenizable, TokenEncoder, TokenDecoder};
 
 #[tideorm::model(table = "documents")]
@@ -869,14 +1102,14 @@ impl Tokenizable for Document {
     
     // Custom encoder - prefix with "DOC-"
     fn token_encoder() -> Option<TokenEncoder> {
-        Some(|id, _model| Ok(format!("DOC-{}", id)))
+        Some(Arc::new(|id: &str, _model: &str| Ok(format!("DOC-{}", id))))
     }
     
     // Custom decoder
     fn token_decoder() -> Option<TokenDecoder> {
-        Some(|token, _model| {
+        Some(Arc::new(|token: &str, _model: &str| {
             Ok(token.strip_prefix("DOC-").map(ToOwned::to_owned))
-        })
+        }))
     }
     
     async fn from_token(token: &str) -> tideorm::Result<Self> {
@@ -890,21 +1123,46 @@ impl Tokenizable for Document {
 
 ### Global Custom Encoder
 
-Set a custom encoder for all models:
+Set a custom encoder for all models. The global codecs are closures, so they
+may capture what they need, such as a tenant prefix read at startup:
 
 ```rust
-// Set global custom encoder
-TokenConfig::set_encoder(|id, model| {
-    Ok(format!("{}-{}", model.to_lowercase(), id))
+let tenant = std::env::var("TENANT")?;
+let prefix = format!("{tenant}-");
+
+TokenConfig::set_encoder(move |id, model| {
+    Ok(format!("{tenant}-{}-{}", model.to_lowercase(), id))
 });
 
-TokenConfig::set_decoder(|token, model| {
-    let prefix = format!("{}-", model.to_lowercase());
-    Ok(token.strip_prefix(&prefix).map(ToOwned::to_owned))
+TokenConfig::set_decoder(move |token, model| {
+    let rest = token.strip_prefix(&prefix);
+    let model_prefix = format!("{}-", model.to_lowercase());
+    Ok(rest
+        .and_then(|rest| rest.strip_prefix(&model_prefix))
+        .map(ToOwned::to_owned))
 });
 ```
 
-Calling `TokenConfig::set_encryption_key`, `TokenConfig::set_encoder`, or `TokenConfig::set_decoder` again replaces the previous global override. Use `TokenConfig::reset()` to clear all tokenization overrides and return to the default encoder/decoder configuration.
+`TideConfig::token_encoder` and `TideConfig::token_decoder` take the same
+closures and install them on `connect()` or `apply()`.
+
+Calling `TokenConfig::set_encryption_key`, `TokenConfig::set_encoder`, or `TokenConfig::set_decoder` again replaces the previous global override. Use `TokenConfig::reset()` (or `TideConfig::reset()`, which also clears the rest of the configuration) to clear all tokenization overrides and return to the default encoder/decoder configuration.
+
+### Reading Tokens From Requests
+
+A token from a request may be garbled, forged, minted for another model, or
+name a row that has since been deleted. `decode_token` and `from_token` report
+those as `Error::InvalidToken` and `Error::NotFound`; the `try_`/`find_` forms
+return `Ok(None)` instead, leaving only a missing encryption key as an error:
+
+```rust
+match User::find_by_token(&token).await? {
+    Some(user) => respond_with(user),
+    None => not_found(),
+}
+
+let id: Option<i64> = User::try_decode_token(&token)?;
+```
 
 ### Tokenization Security
 
@@ -1115,6 +1373,7 @@ let (user, posts) = user.update_with_many(posts).await?;
 
 // Cascade delete (children first for referential integrity)
 let deleted_count = user.delete_with_many(posts).await?;
+// or, for a single child: user.delete_with_one(profile).await?
 
 // Builder API for complex nested saves
 let (user, saved) = NestedSaveBuilder::new(user)
@@ -1123,11 +1382,11 @@ let (user, saved) = NestedSaveBuilder::new(user)
     .with_many(comments, "author_id")
     .save()
     .await?;
-let profile: Profile = saved[0].clone().into_one()?;
-let posts: Vec<Post> = saved[1].clone().into_many()?;
+let profile: Option<&Profile> = saved[0].as_one();
+let posts: Option<&[Post]> = saved[1].as_many();
 ```
 
-`save()` returns one `SavedRelation` per `with_one`/`with_many`, in the order they were added, holding the children as they were stored.
+`save()` returns one `SavedRelation` per `with_one`/`with_many`, in the order they were added, holding the children as they were stored: `as_one`/`as_many` borrow them (`None` for another shape or model type), and `into_one`/`into_many` take them, failing instead.
 
 Each nested operation runs in one transaction — a savepoint when you are already inside one — so a child that fails also rolls back the parent's write. Related rows are written one at a time through each model's own `create`, `update`, or `delete`, so their callbacks and validation run as usual. The foreign key may be given as the Rust field name or the database column name.
 
@@ -1235,6 +1494,3 @@ builder.unique_named("uq_email_tenant", &["email", "tenant_id"]);
 // CHECK constraints (migrations)
 builder.string("email").check("email LIKE '%@%'");
 ```
-
----
-

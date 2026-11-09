@@ -71,7 +71,7 @@ pub(super) fn bench_fluent_or_execution(c: &mut Criterion) {
             rt.block_on(async {
                 let _results = OrBenchUser::query()
                     .where_eq("active", true)
-                    .or_where(|q| {
+                    .where_any(|q| {
                         q.nested_and(|inner| inner.where_eq("role", "admin").where_gt("age", 25))
                             .nested_and(|inner| {
                                 inner.where_eq("role", "moderator").where_gt("age", 30)

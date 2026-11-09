@@ -7,7 +7,9 @@ trait WherePreview {
 
 impl<M: crate::model::Model> WherePreview for QueryBuilder<M> {
     fn where_preview(&self) -> String {
-        let (sql, params) = self.build_where_clause_with_condition_for_db(DatabaseType::Postgres);
+        let (sql, params) = self
+            .build_where_clause_with_condition_for_db(DatabaseType::Postgres)
+            .unwrap();
         db_sql::inline_parameters(DatabaseType::Postgres, &sql, &params)
     }
 }
@@ -16,13 +18,28 @@ impl<M: crate::model::Model> WherePreview for QueryBuilder<M> {
 fn test_where_sql_includes_or_groups() {
     let query = QueryBuilder::<QueryTestUser>::new()
         .where_eq("status", "active")
-        .or_where(|q| q.where_eq("role", "admin").where_eq("role", "moderator"));
+        .where_any(|q| q.where_eq("role", "admin").where_eq("role", "moderator"));
 
     let sql = query.where_preview();
 
     assert_eq!(
         sql,
         "\"status\" = 'active' AND (\"role\" = 'admin' OR \"role\" = 'moderator')"
+    );
+}
+
+#[test]
+fn test_where_all_groups_its_conditions_with_and() {
+    let query = QueryBuilder::<QueryTestUser>::new()
+        .where_any(|q| q.where_eq("role", "admin").where_eq("role", "moderator"))
+        .where_all(|q| {
+            q.where_eq("status", "active")
+                .nested_or(|o| o.where_eq("plan", "pro").where_eq("plan", "team"))
+        });
+
+    assert_eq!(
+        query.where_preview(),
+        "(\"role\" = 'admin' OR \"role\" = 'moderator') AND (\"status\" = 'active' AND (\"plan\" = 'pro' OR \"plan\" = 'team'))"
     );
 }
 
@@ -37,7 +54,7 @@ fn test_where_sql_parenthesizes_raw_fragments() {
     );
 
     let in_or_group = QueryBuilder::<QueryTestUser>::new()
-        .or_where(|q| q.where_raw("a = 1 AND b = 2").where_eq("id", 7));
+        .where_any(|q| q.where_raw("a = 1 AND b = 2").where_eq("id", 7));
     assert_eq!(
         in_or_group.where_preview(),
         "(a = 1 AND b = 2) OR \"id\" = 7"
@@ -46,7 +63,7 @@ fn test_where_sql_parenthesizes_raw_fragments() {
 
 #[test]
 fn test_where_sql_includes_typed_columns_in_or_groups() {
-    let query = QueryBuilder::<QueryTestUser>::new().or_where(|q| {
+    let query = QueryBuilder::<QueryTestUser>::new().where_any(|q| {
         q.where_eq(QueryTestUser::columns.name, "alice")
             .where_eq(QueryTestUser::columns.id, 7)
     });
@@ -74,7 +91,7 @@ fn test_a_typed_column_of_another_model_keeps_its_table() {
         .where_eq(QueryProfile::columns.user_id, 7)
         .where_eq(QueryTestUser::columns.id, 7)
         .order_by(QueryProfile::columns.user_id, Order::Desc)
-        .build_sql_preview_for_db(DatabaseType::Postgres);
+        .build_sql_preview_for(DatabaseType::Postgres);
 
     assert!(
         sql.ends_with(
@@ -117,8 +134,9 @@ fn test_has_related_binds_its_condition_value() {
         "pub'lished",
     );
 
-    let (where_sql, params) =
-        query.build_where_clause_with_condition_for_db(DatabaseType::Postgres);
+    let (where_sql, params) = query
+        .build_where_clause_with_condition_for_db(DatabaseType::Postgres)
+        .unwrap();
     assert_eq!(
         where_sql,
         "EXISTS (SELECT 1 FROM \"posts\" WHERE \"posts\".\"user_id\" = \"query_test_users\".\"id\" AND \"posts\".\"status\" = $1)"
@@ -153,8 +171,9 @@ fn test_has_no_related_renders_not_exists_with_its_condition() {
         "NOT EXISTS (SELECT 1 FROM \"posts\" WHERE \"posts\".\"user_id\" = \"query_test_users\".\"id\" AND \"posts\".\"status\" = 'draft')"
     );
 
-    let (where_sql, params) =
-        query.build_where_clause_with_condition_for_db(DatabaseType::Postgres);
+    let (where_sql, params) = query
+        .build_where_clause_with_condition_for_db(DatabaseType::Postgres)
+        .unwrap();
     assert!(
         where_sql.contains("\"posts\".\"status\" = $1)"),
         "{where_sql}"
@@ -220,8 +239,9 @@ fn test_where_exists_binds_subquery_values_instead_of_inlining_them() {
         .ensure_query_is_valid()
         .expect("a bound subquery value may not trip the raw-SQL validator");
 
-    let (where_sql, params) =
-        query.build_where_clause_with_condition_for_db(DatabaseType::Postgres);
+    let (where_sql, params) = query
+        .build_where_clause_with_condition_for_db(DatabaseType::Postgres)
+        .unwrap();
 
     assert!(
         !where_sql.contains("o'brien") && !where_sql.contains("o''brien"),
@@ -246,8 +266,9 @@ fn test_where_in_subquery_renumbers_bound_values_after_earlier_conditions() {
                 .where_eq("name", "bob"),
         );
 
-    let (where_sql, params) =
-        query.build_where_clause_with_condition_for_db(DatabaseType::Postgres);
+    let (where_sql, params) = query
+        .build_where_clause_with_condition_for_db(DatabaseType::Postgres)
+        .unwrap();
 
     assert!(
         where_sql.contains("\"name\" = $1"),
@@ -280,7 +301,7 @@ fn test_where_not_exists_preview_inlines_the_bound_value() {
 
 #[test]
 fn test_subquery_carrying_a_like_escape_clause_stays_parameterized() {
-    // sea-query re-tokenizes a `cust_with_values` fragment to find placeholders,
+    // `sql_builder` re-tokenizes a `cust_with_values` fragment to find placeholders,
     // and its tokenizer treats `\` as an escape inside a string literal. A
     // backslash LIKE escape (`ESCAPE '\'`) would leave the literal
     // unterminated and swallow every later marker, forcing a fallback to
@@ -290,8 +311,9 @@ fn test_subquery_carrying_a_like_escape_clause_stays_parameterized() {
         .where_eq("id", 7);
     let query = QueryBuilder::<QueryTestUser>::new().where_exists(subquery);
 
-    let (where_sql, params) =
-        query.build_where_clause_with_condition_for_db(DatabaseType::Postgres);
+    let (where_sql, params) = query
+        .build_where_clause_with_condition_for_db(DatabaseType::Postgres)
+        .unwrap();
 
     assert!(
         where_sql.contains("ESCAPE '!'"),
@@ -299,7 +321,7 @@ fn test_subquery_carrying_a_like_escape_clause_stays_parameterized() {
     );
     assert!(
         !where_sql.contains('\\'),
-        "generated SQL must stay backslash-free so sea-query can re-tokenize it: {where_sql}"
+        "generated SQL must stay backslash-free so sql_builder can re-tokenize it: {where_sql}"
     );
     assert_eq!(
         params.len(),
@@ -318,13 +340,15 @@ fn test_bound_raw_expression_uses_question_mark_placeholders_on_mysql() {
     query.clauses.conditions.push(crate::query::WhereCondition {
         column: String::new(),
         operator: crate::query::Operator::Raw,
-        value: crate::query::ConditionValue::RawExprWithValues {
+        value: crate::query::ConditionValue::RawTemplate {
             sql: "EXISTS (SELECT 1 FROM `posts` WHERE `title` = ?)".to_string(),
             values: vec![Value::String(Some("it's -- fine".to_string()))],
         },
     });
 
-    let (where_sql, params) = query.build_where_clause_with_condition_for_db(DatabaseType::MySQL);
+    let (where_sql, params) = query
+        .build_where_clause_with_condition_for_db(DatabaseType::MySQL)
+        .unwrap();
 
     assert!(
         where_sql.contains("`title` = ?"),
@@ -405,12 +429,14 @@ fn test_build_select_sql_with_params_parameterizes_read_filters() {
     let query = QueryBuilder::<QueryTestUser>::new()
         .select_raw("COUNT(*) as total")
         .where_eq("status", "active")
-        .or_where(|q| q.where_eq("role", "admin").where_eq("role", "moderator"))
+        .where_any(|q| q.where_eq("role", "admin").where_eq("role", "moderator"))
         .where_in("department", vec!["engineering", "design"])
         .order_by("name", Order::Asc)
         .limit(10);
 
-    let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::Postgres);
+    let (sql, params) = query
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres)
+        .unwrap();
 
     assert_eq!(
         sql,
@@ -427,7 +453,9 @@ fn test_build_select_sql_with_params_uses_mysql_identifier_quoting() {
         .order_by("name", Order::Asc)
         .limit(5);
 
-    let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::MySQL);
+    let (sql, params) = query
+        .build_select_sql_with_params_for_db(DatabaseType::MySQL)
+        .unwrap();
 
     assert_eq!(
         sql,
@@ -445,7 +473,9 @@ fn test_build_select_sql_with_params_parameterizes_postgres_array_predicates() {
         .where_array_contains("scores", vec![5, 7])
         .where_array_overlaps("scores", vec![3, 5]);
 
-    let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::Postgres);
+    let (sql, params) = query
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres)
+        .unwrap();
 
     assert!(
         sql.contains("($1 = ANY(\"tags\") AND $2 = ANY(\"tags\"))"),
@@ -471,7 +501,7 @@ fn test_build_select_sql_with_params_parameterizes_postgres_array_predicates() {
         sql.contains("($9 = ANY(\"scores\") OR $10 = ANY(\"scores\"))"),
         "sql: {sql}"
     );
-    // The `ARRAY[..]` constructor would hide these markers from sea-query's
+    // The `ARRAY[..]` constructor would hide these markers from `sql_builder`'s
     // fragment tokenizer, which treats `[` as a string delimiter.
     assert!(!sql.contains("ARRAY["), "sql: {sql}");
     assert!(!sql.contains("ops'"), "sql: {sql}");
@@ -485,7 +515,9 @@ fn test_build_select_sql_with_params_parameterizes_postgres_json_predicates() {
         .where_json_key_exists("data", "unsafe'key")
         .where_json_path_exists("data", "$.user.name");
 
-    let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::Postgres);
+    let (sql, params) = query
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres)
+        .unwrap();
 
     assert!(sql.contains("(\"data\")::jsonb @> $1"));
     assert!(sql.contains("(\"data\")::jsonb ? $2"));
@@ -502,7 +534,9 @@ fn test_build_select_sql_with_params_parameterizes_mysql_json_predicates() {
         .where_json_key_exists("data", "unsafe'key")
         .where_json_path_exists("data", "$.user.name");
 
-    let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::MySQL);
+    let (sql, params) = query
+        .build_select_sql_with_params_for_db(DatabaseType::MySQL)
+        .unwrap();
 
     assert!(sql.contains("JSON_CONTAINS(`data`, ?)"));
     assert!(sql.contains("JSON_CONTAINS_PATH(`data`, 'one', ?)"));
@@ -522,7 +556,9 @@ fn test_build_select_sql_with_params_parameterizes_sqlite_json_predicates() {
         .where_json_contains("data", serde_json::json!("admin'"))
         .where_json_path_exists("data", "$.user.name");
 
-    let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::SQLite);
+    let (sql, params) = query
+        .build_select_sql_with_params_for_db(DatabaseType::SQLite)
+        .unwrap();
 
     // A top-level scalar is compared as the whole document and as an array
     // element, so the value is bound once for each.
@@ -541,7 +577,9 @@ fn test_build_select_sql_with_params_parameterizes_mysql_array_predicates() {
         .where_array_contains("tags", vec!["ops'", "core"])
         .where_array_overlaps("tags", vec!["ops'", "core"]);
 
-    let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::MySQL);
+    let (sql, params) = query
+        .build_select_sql_with_params_for_db(DatabaseType::MySQL)
+        .unwrap();
 
     assert!(sql.contains("JSON_CONTAINS(`tags`, ?)"));
     assert!(sql.contains("(JSON_CONTAINS(`tags`, ?) OR JSON_CONTAINS(`tags`, ?))"));
@@ -560,7 +598,9 @@ fn test_build_select_sql_with_params_parameterizes_sqlite_array_predicates() {
         .where_array_contained_by("tags", vec!["ops'", "core"])
         .where_array_overlaps("tags", vec!["ops'", "core"]);
 
-    let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::SQLite);
+    let (sql, params) = query
+        .build_select_sql_with_params_for_db(DatabaseType::SQLite)
+        .unwrap();
 
     // Like PostgreSQL's `<@`: a NULL array is not contained, and an element
     // must equal a listed value as JSON, its type included.
@@ -586,14 +626,17 @@ fn test_build_select_sql_with_params_quotes_reserved_identifiers() {
 
     let (postgres_sql, postgres_params) = query
         .clone()
-        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres)
+        .unwrap();
     assert_eq!(
         postgres_sql,
         "SELECT \"query_test_users\".\"order\" AS \"group\" FROM \"query_test_users\" WHERE \"group\" = $1 GROUP BY \"group\" ORDER BY \"order\" DESC LIMIT 5"
     );
     assert_eq!(postgres_params.len(), 1);
 
-    let (mysql_sql, mysql_params) = query.build_select_sql_with_params_for_db(DatabaseType::MySQL);
+    let (mysql_sql, mysql_params) = query
+        .build_select_sql_with_params_for_db(DatabaseType::MySQL)
+        .unwrap();
     assert_eq!(
         mysql_sql,
         "SELECT `query_test_users`.`order` AS `group` FROM `query_test_users` WHERE `group` = ? GROUP BY `group` ORDER BY `order` DESC LIMIT 5"
@@ -609,14 +652,31 @@ fn test_build_select_sql_with_params_uses_escape_clause_for_typed_literal_like_h
 
     let (postgres_sql, postgres_params) = query
         .clone()
-        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres)
+        .unwrap();
     assert!(
         postgres_sql.ends_with("WHERE \"name\" LIKE $1 ESCAPE '!'"),
         "postgres sql: {postgres_sql}"
     );
     assert_eq!(postgres_params, pattern);
 
-    let (mysql_sql, mysql_params) = query.build_select_sql_with_params_for_db(DatabaseType::MySQL);
+    // SQLite tests the literal itself, unescaped, where `LIKE` stops at a NUL.
+    let (sqlite_sql, sqlite_params) = query
+        .clone()
+        .build_select_sql_with_params_for_db(DatabaseType::SQLite)
+        .unwrap();
+    assert!(
+        sqlite_sql.contains("instr(hay, needle) > 0") && !sqlite_sql.contains("LIKE ?"),
+        "sqlite sql: {sqlite_sql}"
+    );
+    assert_eq!(
+        sqlite_params,
+        vec![Value::String(Some(r"100%_\done".to_string()))]
+    );
+
+    let (mysql_sql, mysql_params) = query
+        .build_select_sql_with_params_for_db(DatabaseType::MySQL)
+        .unwrap();
     assert!(
         mysql_sql.ends_with("WHERE `name` LIKE ? ESCAPE '!'"),
         "mysql sql: {mysql_sql}"
@@ -633,7 +693,9 @@ fn test_build_select_sql_with_params_uses_escape_clause_for_query_contains_helpe
         .or_where_ends_with("name", r"tail%_")
         .end_or();
 
-    let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::Postgres);
+    let (sql, params) = query
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres)
+        .unwrap();
 
     assert!(sql.contains("$1 ESCAPE '!'"), "sql: {sql}");
     assert!(sql.contains("$2 ESCAPE '!'"), "sql: {sql}");
@@ -713,7 +775,8 @@ fn test_window_function_sql_escapes_identifiers_per_backend() {
     ] {
         let (sql, params) = QueryBuilder::<QueryTestUser>::new()
             .first_value("first_name", column, "id", column, Order::Asc)
-            .build_select_sql_with_params_for_db(db_type);
+            .build_select_sql_with_params_for_db(db_type)
+            .unwrap();
 
         assert!(params.is_empty(), "{db_type:?}: {params:?}");
         assert!(sql.contains(expected), "{db_type:?}: {sql}");
@@ -783,20 +846,24 @@ fn test_consolidate_keeps_having_parameters_bound() {
         .having(crate::Aggregate::count().gt(3))
         .consolidate();
 
-    // The template survives verbatim instead of being flattened to a literal.
-    assert_eq!(
-        fragment.clauses.having_conditions,
-        vec!["COUNT(*) > ?".to_string()]
+    // The value survives as a value instead of being flattened to a literal.
+    assert!(
+        matches!(
+            fragment.clauses.having_conditions.as_slice(),
+            [crate::query::HavingClause::Aggregate { value: Some(_), .. }]
+        ),
+        "{:?}",
+        fragment.clauses.having_conditions
     );
-    assert_eq!(fragment.clauses.having_bindings.len(), 1);
-    assert_eq!(fragment.clauses.having_bindings[0].len(), 1);
 
     let rebuilt = QueryBuilder::<QueryTestUser>::new().apply(&fragment);
     rebuilt
         .ensure_query_is_valid()
         .expect("round-tripped HAVING clause should still validate");
 
-    let (sql, params) = rebuilt.build_select_sql_with_params_for_db(DatabaseType::Postgres);
+    let (sql, params) = rebuilt
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres)
+        .unwrap();
 
     assert!(sql.contains("HAVING COUNT(*) > $1"), "sql: {sql}");
     assert!(!sql.contains("COUNT(*) > 3"), "sql: {sql}");
@@ -809,8 +876,10 @@ fn test_having_placeholder_count_mismatch_is_rejected() {
     query
         .clauses
         .having_conditions
-        .push("COUNT(*) > ?".to_string());
-    query.clauses.having_bindings.push(Vec::new());
+        .push(crate::query::HavingClause::Raw {
+            sql: "COUNT(*) > ?".to_string(),
+            values: Vec::new(),
+        });
 
     let err = query
         .ensure_query_is_valid()
@@ -855,7 +924,7 @@ fn test_or_where_calls_are_anded_with_plain_filters() {
 fn test_or_where_calls_stay_apart_from_closure_groups() {
     let sql = QueryBuilder::<QueryTestUser>::new()
         .or_where_eq("role", "admin")
-        .or_where(|group| group.where_eq("team", "a").where_eq("team", "b"))
+        .where_any(|group| group.where_eq("team", "a").where_eq("team", "b"))
         .or_where_eq("role", "owner")
         .where_preview();
 
@@ -879,7 +948,7 @@ fn test_or_where_raw_joins_the_shared_or_group() {
 fn test_fragment_or_where_conditions_join_the_builders_or_group() {
     let fragment = QueryBuilder::<QueryTestUser>::new()
         .or_where_eq("name", "carol")
-        .or_where(|group| group.where_eq("id", 1).where_eq("id", 2))
+        .where_any(|group| group.where_eq("id", 1).where_eq("id", 2))
         .consolidate();
 
     let merged = QueryBuilder::<QueryTestUser>::new()
@@ -923,9 +992,38 @@ struct HashedRow {
 #[test]
 fn test_window_columns_take_rust_field_names() {
     let sql = QueryBuilder::<HashedRow>::new()
-        .row_number("rn", Some("sha256"), "sha256", Order::Asc)
+        .row_number("rn", "sha256", "sha256", Order::Asc)
         .build_select_sql_for_db(DatabaseType::Postgres);
     assert!(sql.contains("PARTITION BY \"sha_256\""), "{sql}");
     assert!(sql.contains("ORDER BY \"sha_256\" ASC"), "{sql}");
     assert!(!sql.contains("\"sha256\""), "{sql}");
+}
+
+#[test]
+fn test_window_shorthands_take_any_number_of_partition_columns() {
+    let none = QueryBuilder::<HashedRow>::new()
+        .ntile("bucket", 4, (), "id", Order::Asc)
+        .build_select_sql_for_db(DatabaseType::Postgres);
+    assert!(
+        none.contains("NTILE(4) OVER (ORDER BY \"id\" ASC)"),
+        "{none}"
+    );
+
+    let two = QueryBuilder::<HashedRow>::new()
+        .running_sum("total", "id", ("sha256", HashedRow::ID), "id", Order::Asc)
+        .build_select_sql_for_db(DatabaseType::Postgres);
+    assert!(
+        two.contains(
+            "SUM(\"id\") OVER (PARTITION BY \"sha_256\", \"hashed_rows\".\"id\" ORDER BY \"id\" ASC"
+        ),
+        "{two}"
+    );
+
+    let lag = QueryBuilder::<HashedRow>::new()
+        .lag("previous", "id", 2, (), "id", Order::Asc)
+        .build_select_sql_for_db(DatabaseType::Postgres);
+    assert!(
+        lag.contains("LAG(\"id\", 2) OVER (ORDER BY \"id\" ASC)"),
+        "{lag}"
+    );
 }

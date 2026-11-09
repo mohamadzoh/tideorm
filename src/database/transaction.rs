@@ -1,93 +1,44 @@
+use std::fmt::Write as _;
 use std::future::Future;
 use std::sync::Arc;
 
 use crate::error::{Error, Result};
-use crate::internal::Backend;
+use crate::internal::{ConnectionTrait, TransactionTrait};
 use crate::tide_warn;
 
-use super::Database;
 use super::state::with_connection_override;
+use super::{Database, TransactionOptions};
 use crate::cache::{PendingInvalidations, Record};
 
 /// Reported when a clone of the transaction handle outlived the closure.
 const LEAKED_TRANSACTION_MESSAGE: &str = "transaction handle leaked outside the transaction scope";
 
-/// Decide whether a leaked transaction can be ended with an explicit rollback.
-///
-/// `Arc::try_unwrap` failed, so `commit`/`rollback` — both of which consume the
-/// transaction — are unreachable and the engine will not run its drop-time
-/// rollback until the stray clone is released. Sending `ROLLBACK` over the
-/// shared handle ends the server-side transaction immediately, which is what
-/// releases the locks and lets the pooled connection go back once the clone
-/// drops. Two conditions have to hold before that is safe:
-///
-/// - The transaction must be top-level. A nested one is a SAVEPOINT whose name
-///   is private to the driver, so a bare `ROLLBACK` would abort the *enclosing*
-///   transaction instead of this one. A savepoint also shares the enclosing
-///   transaction's connection, so there is no separate connection to free.
-/// - The driver must resynchronize afterwards. Postgres and MySQL decrement
-///   their transaction-depth counter unconditionally when the engine later runs
-///   its queued drop-time rollback. A `BEGIN` follows the `ROLLBACK`, so the
-///   stray handle writes into a transaction of its own, which that drop-time
-///   rollback ends, instead of committing each statement on its own.
-///   SQLite only decrements when its own rollback succeeds, so a rollback issued
-///   behind its back would leave the pooled connection permanently off by one
-///   and turn later `BEGIN`s into savepoints that never close. SQLite (and any
-///   backend TideORM does not recognize) therefore keeps the drop-time rollback.
-fn can_rollback_leaked_transaction(backend: Option<Backend>, nested: bool) -> bool {
-    !nested && matches!(backend, Some(Backend::Postgres | Backend::MySql))
-}
-
-/// How far ending a leaked transaction actually got.
+/// How ending a leaked transaction went.
 ///
 /// Carried into the error the caller sees so a leak never reports a clean
 /// "handle leaked" while the transaction is, in fact, still holding locks.
 enum LeakedRollback {
-    /// `ROLLBACK` was issued and accepted, so the server-side transaction is
-    /// over and only the pooled connection waits on the stray handle.
+    /// The transaction, or the savepoint, was rolled back.
     RolledBack,
-    /// No explicit rollback was possible on this backend; the engine rolls the
-    /// transaction back when the stray handle finally drops.
-    DeferredToDrop,
-    /// `ROLLBACK` was issued and the engine rejected it.
+    /// The rollback failed.
     Failed(Error),
 }
 
-/// End a transaction whose handle escaped its closure, as far as that is
-/// possible without owning it.
+/// Roll back a transaction whose handle escaped its closure.
+///
+/// `Arc::try_unwrap` failed, so `commit`/`rollback`, which consume the
+/// transaction, are unreachable; it is rolled back through the shared handle
+/// instead, which ends the server-side transaction and its locks now, and the
+/// stray handle's statements are refused from then on. A savepoint rolls back
+/// to itself: the savepoints of one transaction take turns, so it is the
+/// innermost one open.
 ///
 /// Always reports the leak: it is a caller bug that otherwise only shows up as a
 /// stalled connection much later.
-async fn end_leaked_transaction(
-    txn: &crate::internal::OrmTransaction,
-    nested: bool,
-) -> LeakedRollback {
-    use crate::internal::ConnectionTrait;
-
-    let backend = Backend::from_orm_backend(txn.get_database_backend());
-
-    if !can_rollback_leaked_transaction(backend, nested) {
-        tide_warn!(
-            "{LEAKED_TRANSACTION_MESSAGE}. It cannot be rolled back explicitly here, so it stays \
-             open until the stray handle is dropped."
-        );
-        return LeakedRollback::DeferredToDrop;
-    }
-
+async fn end_leaked_transaction(txn: &crate::internal::OrmTransaction) -> LeakedRollback {
     tide_warn!("{LEAKED_TRANSACTION_MESSAGE}. Rolling it back explicitly.");
-
-    match txn.execute_unprepared("ROLLBACK").await {
-        Ok(_) => {
-            // Without a transaction open, a statement through the stray
-            // handle would commit by itself; a leaked transaction never does.
-            if let Err(err) = txn.execute_unprepared("BEGIN").await {
-                tide_warn!(
-                    "Reopening the leaked transaction failed, so statements through the stray handle commit on their own: {}",
-                    transaction_error(err)
-                );
-            }
-            LeakedRollback::RolledBack
-        }
+    match txn.rollback_by_ref().await {
+        Ok(()) => LeakedRollback::RolledBack,
         Err(err) => {
             let err = transaction_error(err);
             tide_warn!("Failed to roll back the leaked transaction: {err}");
@@ -109,7 +60,6 @@ fn leaked_transaction_error(rollback: LeakedRollback, closure_error: Option<Erro
     let mut source = None;
     let outcome = match rollback {
         LeakedRollback::RolledBack => "it was rolled back explicitly".to_string(),
-        LeakedRollback::DeferredToDrop => "it rolls back when the stray handle drops".to_string(),
         LeakedRollback::Failed(err) => {
             let detail = format!("rolling it back failed: {err}");
             source = err.into_db_failure();
@@ -120,38 +70,11 @@ fn leaked_transaction_error(rollback: LeakedRollback, closure_error: Option<Erro
     let mut message = format!("{LEAKED_TRANSACTION_MESSAGE}, so {outcome}");
 
     if let Some(closure_error) = closure_error {
-        message.push_str(&format!(
-            "; the closure had already failed: {closure_error}"
-        ));
+        let _ = write!(message, "; the closure had already failed: {closure_error}");
         source = source.or_else(|| closure_error.into_db_failure());
     }
 
     Error::Transaction { message, source }
-}
-
-/// Refuse to commit a PostgreSQL transaction that a failed statement aborted.
-///
-/// PostgreSQL answers the `COMMIT` of such a transaction with a rollback and
-/// no error, so a closure that caught the failure and returned `Ok` would
-/// report a commit that never happened. Any statement fails in an aborted
-/// transaction, so one is sent first; the other backends keep the transaction
-/// going after a failed statement.
-async fn ensure_transaction_can_commit(txn: &crate::internal::OrmTransaction) -> Result<()> {
-    use crate::internal::ConnectionTrait;
-
-    if Backend::from_orm_backend(txn.get_database_backend()) != Some(Backend::Postgres) {
-        return Ok(());
-    }
-    match txn.execute_unprepared("SELECT 1").await {
-        Ok(_) => Ok(()),
-        Err(err) => Err(Error::Transaction {
-            message: format!(
-                "the transaction cannot commit: a statement inside it failed, which aborted it, so it was rolled back ({})",
-                err
-            ),
-            source: transaction_error(err).into_db_failure(),
-        }),
-    }
 }
 
 /// Classify a transaction-control failure: a transaction error carrying the
@@ -183,23 +106,103 @@ impl Database {
     /// already failed.
     pub async fn transaction<F, T>(&self, f: F) -> Result<T>
     where
-        F: for<'c> FnOnce(
-                &'c Transaction,
-            )
-                -> std::pin::Pin<Box<dyn Future<Output = Result<T>> + Send + 'c>>
-            + Send,
-        T: Send,
+        F: AsyncFnOnce(&Transaction) -> Result<T>,
+    {
+        self.transaction_with(TransactionOptions::default(), f)
+            .await
+    }
+
+    /// Execute a closure within a database transaction begun with `options`,
+    /// as [`Database::transaction`] does.
+    ///
+    /// PostgreSQL and MySQL/MariaDB take the isolation level and access mode,
+    /// SQLite the `BEGIN` mode (`IMMEDIATE` takes the write lock up front);
+    /// SQLite refuses `AccessMode::ReadOnly`, since it cannot keep a
+    /// transaction from writing.
+    ///
+    /// ```ignore
+    /// let report = db.transaction_with(
+    ///     TransactionOptions {
+    ///         isolation_level: Some(IsolationLevel::Serializable),
+    ///         access_mode: Some(AccessMode::ReadOnly),
+    ///         ..TransactionOptions::default()
+    ///     },
+    ///     async |_| Report::build().await,
+    /// ).await?;
+    /// ```
+    ///
+    /// Inside a transaction on this database's pool it would open a
+    /// savepoint, which begins inside that transaction and so takes no
+    /// options: any is an error there.
+    pub async fn transaction_with<F, T>(&self, options: TransactionOptions, f: F) -> Result<T>
+    where
+        F: AsyncFnOnce(&Transaction) -> Result<T>,
     {
         let connection = self.__get_connection()?;
-        let scope = TransactionScope::begin(&connection)
+        let scope = TransactionScope::begin(&connection, options)
             .await
             .map_err(transaction_error)?;
         let tx = Transaction {
-            inner: scope.txn.clone(),
+            connection: scope.connection(),
         };
         let outcome = with_connection_override(scope.connection(), f(&tx)).await;
         drop(tx);
         scope.end(outcome, transaction_error).await
+    }
+
+    /// Run `future` inside a database transaction, committing when it returns
+    /// `Ok`.
+    ///
+    /// The same transaction as [`Database::transaction`], for a future rather
+    /// than a closure handed the transaction: every TideORM call inside joins
+    /// the transaction anyway, so nothing needs the handle. The future may
+    /// borrow local variables.
+    ///
+    /// ```ignore
+    /// let order = db.atomically(async {
+    ///     let order = Order::create(order).await?;
+    ///     Item::update_all().decrement("stock", 1).where_eq("id", item_id).execute().await?;
+    ///     Ok(order)
+    /// }).await?;
+    /// ```
+    ///
+    /// Inside a transaction on this database's pool, it opens a savepoint.
+    /// Use `require_db()?.atomically(..)` for the global database.
+    pub async fn atomically<F, T>(&self, future: F) -> Result<T>
+    where
+        F: Future<Output = Result<T>>,
+    {
+        let connection = self.__get_connection()?;
+        let scope = TransactionScope::begin(&connection, TransactionOptions::default())
+            .await
+            .map_err(transaction_error)?;
+        let outcome = with_connection_override(scope.connection(), future).await;
+        scope.end(outcome, transaction_error).await
+    }
+
+    /// Run `future` with this database as the ambient connection, without
+    /// opening a transaction.
+    ///
+    /// Every TideORM call inside it that names no handle — `Model::create`,
+    /// `save`, `update`, `delete`, `find`, `insert_all`, `Model::query()`,
+    /// `Database::raw` and the rest — runs on this database instead of the
+    /// global one, so a replica or a tenant database needs no handle threaded
+    /// through every call. Inside a transaction opened on this database's
+    /// pool, they join that transaction, as a statement on this handle does.
+    ///
+    /// ```ignore
+    /// let user = tenant.scope(async {
+    ///     let user = User::create(user).await?;
+    ///     Profile::create(Profile { user_id: user.id, ..Default::default() }).await?;
+    ///     Ok(user)
+    /// }).await?;
+    /// ```
+    pub async fn scope<F, T>(&self, future: F) -> Result<T>
+    where
+        F: Future<Output = Result<T>>,
+    {
+        let connection = self.__get_connection()?;
+        with_connection_override(connection, future).await
     }
 }
 
@@ -207,62 +210,38 @@ impl Database {
 /// its begin to its end: what `Database::transaction` and a batch insert
 /// share.
 ///
-/// Its fields drop in order: the record, which holds the savepoints opened
-/// inside this one, before this savepoint, and the slot last, so one opened
-/// beside it begins only once it is gone.
+/// The engine refuses the statements and the commit of a transaction a
+/// failure aborted, on every level of it, and makes savepoints opened side by
+/// side take turns.
 pub(crate) struct TransactionScope {
-    /// Its savepoint, left with the enclosing transaction if the scope is
-    /// dropped before it ends.
-    cancelled: CancelledSavepoint,
     txn: Arc<crate::internal::OrmTransaction>,
-    // Drop the driver transaction before its record: cancellation must queue
-    // rollback before releasing guards retained by that record.
+    /// The pool, or session, it was begun on.
+    pool: Arc<crate::internal::InternalConnection>,
     /// The record its statements mark, and that commits replay.
     record: Record,
-    /// The pool it runs on, for what is remembered per database, and its
-    /// record.
-    source: TransactionSource,
-    /// A savepoint inside a caller's transaction rather than a top-level
-    /// transaction, which decides how a leaked handle can be terminated.
-    nested: bool,
-    /// The enclosing transaction's savepoint slot; see `Executor::begin`.
-    slot: Option<futures_util::lock::OwnedMutexGuard<()>>,
 }
 
 impl TransactionScope {
-    /// Begin a transaction on `connection`'s pool, or a savepoint in its
-    /// transaction.
+    /// Begin a transaction with `options` on `connection`'s pool, or a
+    /// savepoint in its transaction, which refuses any.
     pub(crate) async fn begin(
         connection: &ConnectionRef,
+        options: TransactionOptions,
     ) -> std::result::Result<Self, crate::internal::OrmError> {
-        let nested = matches!(connection, ConnectionRef::Transaction(..));
-        let enclosing = connection.source();
-        let begun = connection.executor().begin().await?;
-        let txn = Arc::new(begun.transaction);
-        let record: Record = Arc::new(parking_lot::Mutex::new(PendingInvalidations::new(
-            enclosing.record.clone(),
-        )));
+        connection.observe_attach();
+        let txn = connection.executor().begin_with_options(options).await?;
         Ok(Self {
-            source: TransactionSource {
-                origin: enclosing.origin,
-                cache_scope: enclosing.cache_scope,
-                mariadb: enclosing.mariadb,
-                record: Some(record.clone()),
-            },
-            record,
-            cancelled: CancelledSavepoint {
-                savepoint: nested.then(|| txn.clone()),
-                enclosing: enclosing.record,
-            },
-            txn,
-            nested,
-            slot: begun.slot,
+            txn: Arc::new(txn),
+            pool: connection.pool().clone(),
+            record: Arc::new(parking_lot::Mutex::new(PendingInvalidations::new(
+                connection.record().cloned(),
+            ))),
         })
     }
 
     /// The connection the scope's statements run on.
     pub(crate) fn connection(&self) -> ConnectionRef {
-        ConnectionRef::Transaction(self.txn.clone(), self.source.clone())
+        ConnectionRef::Transaction(self.txn.clone(), self.pool.clone(), self.record.clone())
     }
 
     /// The record the scope's statements mark.
@@ -270,108 +249,48 @@ impl TransactionScope {
         &self.record
     }
 
-    /// Commit the transaction when `outcome` is a success, else roll it back,
-    /// holding its connection, so nothing runs there meanwhile, and rolling
-    /// back first the savepoints cancelled while it was held. A commit failure
-    /// is reported through `commit_error`.
+    /// Commit the transaction when `outcome` is a success, else roll it back.
+    /// A commit failure is reported through `commit_error`.
     pub(crate) async fn end<T>(
         self,
         outcome: Result<T>,
         commit_error: impl FnOnce(crate::internal::OrmError) -> Error,
     ) -> Result<T> {
-        let Self {
-            record,
-            mut cancelled,
-            txn,
-            nested,
-            slot,
-            ..
-        } = self;
-        let gate = record.lock().gate();
-        let held = gate.lock_owned().await;
-        let ending = cancelled.ending();
-        drop(record.lock().take_deferred());
-
-        let mut leaked = false;
-        let result = async {
-            match (Arc::try_unwrap(txn), outcome) {
-                (Ok(txn), Ok(result)) => {
-                    let (statement_failed, aborted) = {
-                        let record = record.lock();
-                        (record.statement_failed(), record.aborted())
-                    };
-                    if let Some(abort) = aborted {
-                        let _ = txn.rollback().await;
-                        return Err(Error::transaction(abort.commit_error()));
-                    }
-                    if statement_failed {
-                        ensure_transaction_can_commit(&txn).await?;
-                    }
-                    // A commit that fails or is cancelled may still have
-                    // committed: what the transaction invalidated is dropped
-                    // again either way.
-                    let unknown = UnknownCommit(Some(record.clone()));
-                    txn.commit().await.map_err(commit_error)?;
-                    unknown.disarm();
-                    std::mem::take(&mut *record.lock()).replay();
-                    Ok(result)
-                }
-                (Ok(txn), Err(e)) => {
-                    // The failure is the one the caller needs; a rollback
-                    // failure on top of it is reported, not swallowed.
-                    if let Err(rollback) = txn.rollback().await {
-                        tide_warn!(
-                            "Rolling back the failed transaction also failed: {}",
-                            transaction_error(rollback)
-                        );
-                    }
-                    Err(e)
-                }
-                (Err(txn), outcome) => {
-                    leaked = true;
-                    let rollback = end_leaked_transaction(txn.as_ref(), nested).await;
-                    Err(leaked_transaction_error(rollback, outcome.err()))
-                }
+        let Self { record, txn, .. } = self;
+        match (Arc::try_unwrap(txn), outcome) {
+            (Ok(txn), Ok(result)) => {
+                // A commit that fails or is cancelled may still have
+                // committed: what the transaction invalidated is dropped
+                // again either way.
+                let unknown = UnknownCommit(Some(record.clone()));
+                txn.commit().await.map_err(commit_error)?;
+                unknown.disarm();
+                std::mem::take(&mut *record.lock()).replay();
+                Ok(result)
+            }
+            (Ok(txn), Err(e)) => {
+                roll_back_failed(txn).await;
+                Err(e)
+            }
+            (Err(txn), outcome) => {
+                // A caller bug the enclosing transaction does not commit
+                // past.
+                txn.abort("a nested transaction's handle leaked outside its scope");
+                let rollback = end_leaked_transaction(txn.as_ref()).await;
+                Err(leaked_transaction_error(rollback, outcome.err()))
             }
         }
-        .await;
-        if leaked {
-            ending.leaked();
-        } else {
-            ending.disarm();
-        }
-        drop(held);
-        drop(slot);
-        result
     }
 }
 
-/// A savepoint, until it ends: a nested transaction's, or a batch's. Dropped
-/// with it while something else holds the connection, the driver could not
-/// roll it back (and panics trying), so the enclosing transaction holds it
-/// until the connection is free and refuses to commit, since what it would
-/// run next would run inside the savepoint.
-struct CancelledSavepoint {
-    /// `None` for a transaction of its own, which no other future shares.
-    savepoint: Option<Arc<crate::internal::OrmTransaction>>,
-    enclosing: Option<Record>,
-}
-
-impl CancelledSavepoint {
-    /// Let the savepoint end, once its connection is held: it is no longer
-    /// left behind if cancelled, but a cancellation while it commits or rolls
-    /// back leaves it in a state the driver no longer tracks, which the
-    /// returned guard marks in the enclosing transaction until disarmed.
-    fn ending(&mut self) -> SavepointEnd {
-        SavepointEnd(self.savepoint.take().and(self.enclosing.take()))
-    }
-}
-
-impl Drop for CancelledSavepoint {
-    fn drop(&mut self) {
-        if let (Some(savepoint), Some(enclosing)) = (self.savepoint.take(), &self.enclosing) {
-            PendingInvalidations::defer_or_drop(enclosing, vec![Box::new(savepoint)]);
-        }
+/// Roll back a transaction that failed. The failure is the one the caller
+/// needs; a rollback failure on top of it is reported, not swallowed.
+async fn roll_back_failed(txn: crate::internal::OrmTransaction) {
+    if let Err(rollback) = txn.rollback().await {
+        tide_warn!(
+            "Rolling back the failed transaction also failed: {}",
+            transaction_error(rollback)
+        );
     }
 }
 
@@ -389,38 +308,6 @@ impl Drop for UnknownCommit {
     fn drop(&mut self) {
         if let Some(pending) = self.0.take() {
             pending.lock().replay_invalidations();
-        }
-    }
-}
-
-/// Marks the enclosing transaction aborted when dropped armed: when a
-/// savepoint fails or is cancelled while it starts, commits or rolls back,
-/// which leaves it in a state the driver no longer tracks.
-pub(crate) struct SavepointEnd(Option<Record>);
-
-impl SavepointEnd {
-    /// Guard a savepoint of the transaction `enclosing` records.
-    pub(crate) fn new(enclosing: Option<Record>) -> Self {
-        Self(enclosing)
-    }
-
-    pub(crate) fn disarm(mut self) {
-        self.0 = None;
-    }
-
-    /// The savepoint's handle leaked, which leaves it open: the enclosing
-    /// transaction cannot go on.
-    fn leaked(mut self) {
-        if let Some(enclosing) = self.0.take() {
-            enclosing.lock().abort(crate::cache::Abort::Leaked);
-        }
-    }
-}
-
-impl Drop for SavepointEnd {
-    fn drop(&mut self) {
-        if let Some(enclosing) = self.0.take() {
-            enclosing.lock().abort(crate::cache::Abort::Savepoint);
         }
     }
 }
@@ -448,46 +335,63 @@ impl Database {
 
 /// A database transaction handle
 pub struct Transaction {
-    pub(super) inner: Arc<crate::internal::OrmTransaction>,
+    connection: ConnectionRef,
 }
 
 impl Transaction {
     /// Get a reference to the underlying connection.
+    ///
+    /// TideORM does not see the writes of statements run on it directly, so
+    /// once it is taken the transaction's commit drops this database's cached
+    /// reads.
+    #[doc(hidden)]
     pub fn connection(&self) -> &crate::internal::OrmTransaction {
-        self.inner.as_ref()
+        let ConnectionRef::Transaction(transaction, ..) = &self.connection else {
+            unreachable!("a transaction handle holds its transaction");
+        };
+        self.connection.drop_cached_reads();
+        transaction
     }
 }
 
 /// The connection a statement runs on: the pool, or the transaction an
-/// enclosing [`Database::transaction`] scope installed.
+/// enclosing [`Database::transaction`] scope installed, with the pool it was
+/// begun on and the record its statements mark.
 #[doc(hidden)]
 #[derive(Clone)]
 pub enum ConnectionRef {
     Database(Arc<crate::internal::InternalConnection>),
-    Transaction(Arc<crate::internal::OrmTransaction>, TransactionSource),
-}
-
-/// What a transaction's handle cannot tell: the identity of the pool it was
-/// begun on, whether that pool reaches MariaDB, which the driver reports as
-/// MySQL, and the record its statements mark.
-#[doc(hidden)]
-#[derive(Clone, Default)]
-pub struct TransactionSource {
-    pub(crate) origin: Option<u64>,
-    pub(crate) cache_scope: super::cache_scope::CacheScope,
-    pub(crate) mariadb: bool,
-    pub(crate) record: Option<Record>,
+    Transaction(
+        Arc<crate::internal::OrmTransaction>,
+        Arc<crate::internal::InternalConnection>,
+        Record,
+    ),
 }
 
 impl ConnectionRef {
     /// Borrow this connection as one executor, so a statement is written once
     /// whichever of the two it runs on.
-    pub fn executor(&self) -> crate::internal::Executor<'_> {
+    pub fn executor(&self) -> crate::orm::DatabaseExecutor<'_> {
         match self {
-            Self::Database(conn) => crate::internal::Executor::new(conn.connection().into()),
-            Self::Transaction(tx, source) => {
-                crate::internal::Executor::with_record(tx.as_ref().into(), source.record.clone())
-            }
+            Self::Database(conn) => conn.connection().into(),
+            Self::Transaction(tx, ..) => tx.as_ref().into(),
+        }
+    }
+
+    /// The pool this connection's statements run on: the pool itself, or the
+    /// one the transaction was begun on.
+    pub(crate) fn pool(&self) -> &Arc<crate::internal::InternalConnection> {
+        match self {
+            Self::Database(pool) | Self::Transaction(_, pool, _) => pool,
+        }
+    }
+
+    /// The record of the transaction this connection belongs to; none for a
+    /// pool.
+    pub(crate) fn record(&self) -> Option<&Record> {
+        match self {
+            Self::Database(_) => None,
+            Self::Transaction(.., record) => Some(record),
         }
     }
 
@@ -497,11 +401,7 @@ impl ConnectionRef {
     /// transaction. The innermost scope's transaction may be another
     /// database's.
     pub(crate) fn recording<T>(&self, note: impl FnOnce() -> T) -> T {
-        let record = match self {
-            Self::Database(_) => None,
-            Self::Transaction(_, source) => source.record.clone(),
-        };
-        let _scope = crate::cache::replace_pending_invalidations(record);
+        let _scope = crate::cache::replace_pending_invalidations(self.record().cloned());
         note()
     }
 
@@ -514,13 +414,7 @@ impl ConnectionRef {
 
         impl Drop for Clear<'_> {
             fn drop(&mut self) {
-                self.0.recording(|| {
-                    let cache = crate::cache::QueryCache::global();
-                    match self.0.cache_scope() {
-                        Some(database) => cache.invalidate_database(database),
-                        None => cache.clear(),
-                    }
-                });
+                self.0.drop_cached_reads();
             }
         }
 
@@ -528,55 +422,40 @@ impl ConnectionRef {
         future.await
     }
 
+    /// Drop this database's cached reads, recorded in the transaction this
+    /// connection belongs to so its commit drops them again.
+    fn drop_cached_reads(&self) {
+        self.recording(|| {
+            let cache = crate::cache::QueryCache::global();
+            match self.cache_scope() {
+                Some(database) => cache.invalidate_database(database),
+                None => cache.clear(),
+            }
+        });
+    }
+
     /// Whether `self` and `other` are the same pool or the same transaction,
     /// so statements on either run on one connection.
     pub(crate) fn is_same(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Database(a), Self::Database(b)) => Arc::ptr_eq(a, b),
-            (Self::Transaction(a, _), Self::Transaction(b, _)) => Arc::ptr_eq(a, b),
+            (Self::Transaction(a, ..), Self::Transaction(b, ..)) => Arc::ptr_eq(a, b),
             _ => false,
         }
     }
 
-    pub(crate) fn backend(&self) -> Backend {
-        use crate::internal::ConnectionTrait;
-
-        Backend::from(self.executor().get_database_backend())
-    }
-
-    /// The identity of the pool this connection's statements run on, read
-    /// without building the whole [`source`](Self::source).
-    pub(crate) fn origin(&self) -> Option<u64> {
-        match self {
-            Self::Database(pool) => Some(super::state::connection_identity(pool)),
-            Self::Transaction(_, source) => source.origin,
-        }
-    }
-
-    /// The pool this connection's statements run on: the pool itself, or the
-    /// one the transaction was begun on.
-    pub(crate) fn source(&self) -> TransactionSource {
-        match self {
-            Self::Database(pool) => TransactionSource {
-                origin: self.origin(),
-                cache_scope: pool.cache_scope.clone(),
-                mariadb: pool.is_mariadb(),
-                record: None,
-            },
-            Self::Transaction(_, source) => source.clone(),
-        }
-    }
-
     /// The backend the statements run on, MariaDB told apart from MySQL by
-    /// what the pool found when it opened.
-    pub(crate) fn database_type(&self) -> crate::config::DatabaseType {
-        let mariadb = match self {
-            Self::Database(pool) => pool.is_mariadb(),
-            Self::Transaction(_, source) => source.mariadb,
-        };
-        match self.backend() {
-            Backend::MySql if mariadb => crate::config::DatabaseType::MariaDB,
-            backend => backend.as_database_type(),
+    /// what the server said when the connection opened.
+    pub(crate) fn backend(&self) -> crate::config::DatabaseType {
+        self.executor().get_database_backend()
+    }
+
+    /// The identity of the pool this connection's statements run on; a
+    /// session lent its pool's has that one.
+    pub(crate) fn identity(&self) -> u64 {
+        match self {
+            Self::Database(pool) => pool.connection().identity(),
+            Self::Transaction(transaction, ..) => transaction.identity(),
         }
     }
 }

@@ -1,6 +1,6 @@
 //! Cache Benchmarks for TideORM
 //!
-//! Measures performance of query caching and prepared statement caching.
+//! Measures performance of query caching.
 //!
 //! Run with: `cargo bench --bench cache_benchmarks`
 
@@ -9,7 +9,7 @@ use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Duration;
 use tideorm::Database;
-use tideorm::cache::{CacheKeyBuilder, CacheStrategy, PreparedStatementCache, QueryCache};
+use tideorm::cache::{CacheKeyBuilder, CacheStrategy, QueryCache};
 use tideorm::internal::{ActiveModelTrait, ConnectionTrait, InternalModel};
 use tideorm::prelude::*;
 use tokio::runtime::Runtime;
@@ -20,15 +20,12 @@ mod complex;
 mod key_builder;
 #[path = "cache_benchmarks/models.rs"]
 mod models;
-#[path = "cache_benchmarks/prepared_statement.rs"]
-mod prepared_statement;
 #[path = "cache_benchmarks/query_cache.rs"]
 mod query_cache;
 
 use complex::*;
 use key_builder::*;
 use models::*;
-use prepared_statement::*;
 use query_cache::*;
 
 criterion_group!(
@@ -38,12 +35,6 @@ criterion_group!(
     benchmark_query_cache_get_miss,
     benchmark_query_cache_strategies,
     benchmark_query_cache_invalidation,
-);
-
-criterion_group!(
-    prepared_statement_benches,
-    benchmark_prepared_statement_cache_hit,
-    benchmark_prepared_statement_record_execution,
 );
 
 criterion_group!(key_builder_benches, benchmark_cache_key_builder,);
@@ -56,9 +47,4 @@ criterion_group!(
     benchmark_uncached_query_concurrency,
 );
 
-criterion_main!(
-    query_cache_benches,
-    prepared_statement_benches,
-    key_builder_benches,
-    complex_benches,
-);
+criterion_main!(query_cache_benches, key_builder_benches, complex_benches,);

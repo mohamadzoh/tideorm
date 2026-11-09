@@ -74,7 +74,10 @@ impl crate::callbacks::Callbacks for NestedTestLockedChild {
     }
 }
 
-async fn setup_nested_test_db() -> Database {
+/// Installs a fresh in-memory database as the global one. The guard keeps
+/// every other unit test that installs one waiting until the test ends.
+async fn setup_nested_test_db() -> tokio::sync::MutexGuard<'static, ()> {
+    let guard = crate::test_support::global_db_lock().lock().await;
     Database::reset_global();
     TideConfig::reset();
     GlobalProfiler::disable();
@@ -128,7 +131,7 @@ async fn setup_nested_test_db() -> Database {
         .await
         .expect("failed to create nested test schema");
 
-    db
+    guard
 }
 
 fn nested_children(names: &[&str]) -> Vec<NestedTestChild> {
@@ -192,7 +195,7 @@ async fn parent_count() -> usize {
 
 #[tokio::test]
 async fn save_with_many_persists_children_with_parent_fk() {
-    let _db = setup_nested_test_db().await;
+    let _guard = setup_nested_test_db().await;
 
     let (saved_parent, saved_children) = nested_parent()
         .save_with_many(nested_children(&["alpha", "beta"]), "parent_id")
@@ -211,11 +214,11 @@ async fn save_with_many_persists_children_with_parent_fk() {
 }
 
 /// The builder saves each relation pointed at the parent and hands back what
-/// it stored, `with_one` before `with_many` whatever order they were added in.
-/// It runs in a spawned task, which needs the builder to be `Send`.
+/// it stored, in the order the relations were added. It runs in a spawned
+/// task, which needs the builder to be `Send`.
 #[tokio::test]
 async fn nested_save_builder_persists_related_models_with_parent_fk() {
-    let _db = setup_nested_test_db().await;
+    let _guard = setup_nested_test_db().await;
 
     let builder = NestedSaveBuilder::new(nested_parent())
         .with_many(nested_children(&["alpha", "beta"]), "parent_id")
@@ -229,16 +232,16 @@ async fn nested_save_builder_persists_related_models_with_parent_fk() {
     assert!(saved_parent.id > 0);
     assert_eq!(saved_related.len(), 2);
 
-    let saved_profile = saved_related[0]
-        .clone()
-        .into_one::<NestedTestProfile>()
-        .expect("first saved relation should deserialize into profile");
-    assert_eq!(saved_profile.user_id, saved_parent.id);
-
-    let saved_children = saved_related[1]
+    let saved_children = saved_related[0]
         .clone()
         .into_many::<NestedTestChild>()
-        .expect("second saved relation should deserialize into children");
+        .expect("the first relation added holds the children");
+
+    let saved_profile = saved_related[1]
+        .clone()
+        .into_one::<NestedTestProfile>()
+        .expect("the second relation added holds the profile");
+    assert_eq!(saved_profile.user_id, saved_parent.id);
     assert_eq!(saved_children.len(), 2);
     assert!(
         saved_children
@@ -290,7 +293,7 @@ struct NestedTestQuietChild {
 /// result failed after the save had committed.
 #[tokio::test]
 async fn nested_save_builder_returns_the_saved_models_themselves() {
-    let _db = setup_nested_test_db().await;
+    let _guard = setup_nested_test_db().await;
 
     let (_, saved) = NestedSaveBuilder::new(nested_parent())
         .with_one(
@@ -343,7 +346,7 @@ fn apply_foreign_key_does_not_coerce_a_string_primary_key_to_an_integer() {
 
 #[tokio::test]
 async fn save_with_many_rejects_an_unknown_foreign_key_without_writing_the_parent() {
-    let _db = setup_nested_test_db().await;
+    let _guard = setup_nested_test_db().await;
 
     let error = nested_parent()
         .save_with_many(nested_children(&["alpha"]), "parnt_id")
@@ -356,7 +359,7 @@ async fn save_with_many_rejects_an_unknown_foreign_key_without_writing_the_paren
 
 #[tokio::test]
 async fn save_with_many_rolls_back_the_parent_when_a_child_fails() {
-    let _db = setup_nested_test_db().await;
+    let _guard = setup_nested_test_db().await;
 
     // `name` is UNIQUE, so the second child fails.
     nested_parent()
@@ -380,7 +383,7 @@ async fn save_with_many_rolls_back_the_parent_when_a_child_fails() {
 
 #[tokio::test]
 async fn update_with_one_rolls_back_the_parent_when_the_child_fails() {
-    let _db = setup_nested_test_db().await;
+    let _guard = setup_nested_test_db().await;
 
     let (parent, mut children) = nested_parent()
         .save_with_many(
@@ -409,7 +412,7 @@ async fn update_with_one_rolls_back_the_parent_when_the_child_fails() {
 
 #[tokio::test]
 async fn update_with_many_rolls_back_the_parent_when_a_child_fails() {
-    let _db = setup_nested_test_db().await;
+    let _guard = setup_nested_test_db().await;
 
     let (parent, children) = nested_parent()
         .save_with_many(
@@ -425,7 +428,7 @@ async fn update_with_many_rolls_back_the_parent_when_a_child_fails() {
             name: "alpha".to_string(),
             ..child
         })
-        .collect();
+        .collect::<Vec<_>>();
 
     NestedTestParent {
         name: "renamed".to_string(),
@@ -440,7 +443,7 @@ async fn update_with_many_rolls_back_the_parent_when_a_child_fails() {
 
 #[tokio::test]
 async fn delete_with_many_rolls_back_every_delete_when_a_child_fails() {
-    let _db = setup_nested_test_db().await;
+    let _guard = setup_nested_test_db().await;
 
     let unlocked = NestedTestLockedChild {
         id: 0,
@@ -475,7 +478,7 @@ async fn delete_with_many_rolls_back_every_delete_when_a_child_fails() {
 
 #[tokio::test]
 async fn delete_with_many_deletes_each_child_then_the_parent() {
-    let _db = setup_nested_test_db().await;
+    let _guard = setup_nested_test_db().await;
 
     let (saved_parent, saved_children) = nested_parent()
         .save_with_many(nested_children(&["alpha", "beta", "gamma"]), "parent_id")
@@ -501,7 +504,7 @@ async fn delete_with_many_deletes_each_child_then_the_parent() {
 
 #[tokio::test]
 async fn update_with_many_updates_each_related_model() {
-    let _db = setup_nested_test_db().await;
+    let _guard = setup_nested_test_db().await;
 
     let (saved_parent, saved_children) = nested_parent()
         .save_with_many(nested_children(&["alpha", "beta", "gamma"]), "parent_id")

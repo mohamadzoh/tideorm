@@ -82,7 +82,6 @@ mod profiling_report_stats {
     #[test]
     fn test_empty_profiler_report() {
         let profiler = Profiler::start();
-        std::thread::sleep(Duration::from_millis(5));
         let report = profiler.stop();
 
         assert_eq!(report.query_count(), 0);
@@ -179,7 +178,7 @@ mod profiling_global {
     fn test_global_stats_avg_and_slow_percentage() {
         GlobalProfiler::enable();
         GlobalProfiler::reset();
-        GlobalProfiler::set_slow_threshold(50);
+        GlobalProfiler::set_slow_threshold(std::time::Duration::from_millis(50));
 
         GlobalProfiler::record(Duration::from_millis(10));
         GlobalProfiler::record(Duration::from_millis(100));
@@ -196,7 +195,7 @@ mod profiling_global {
         assert!(display.contains("Total Queries:"));
         assert!(display.contains("Slow Queries:"));
 
-        GlobalProfiler::set_slow_threshold(100);
+        GlobalProfiler::set_slow_threshold(std::time::Duration::from_millis(100));
         GlobalProfiler::disable();
     }
 }

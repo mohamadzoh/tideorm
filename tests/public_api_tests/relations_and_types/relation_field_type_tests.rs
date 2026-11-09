@@ -1,4 +1,3 @@
-use serde_json::json;
 use tideorm::relations::{BelongsTo, HasMany, HasManyThrough, HasOne, MorphMany, MorphOne};
 
 #[tideorm::model(table = "relation_field_test_models")]
@@ -30,28 +29,25 @@ async fn an_unconfigured_relation_fails_to_load() {
     type Model = RelationFieldTestModel;
     assert_unconfigured(
         HasOne::<Model>::default()
-            .with_parent_pk(json!(1))
+            .with_parent_pk(1, false)
             .load()
             .await,
         "HasOne",
     );
     assert_unconfigured(
         HasMany::<Model>::default()
-            .with_parent_pk(json!(1))
+            .with_parent_pk(1, false)
             .load()
             .await,
         "HasMany",
     );
     assert_unconfigured(
-        BelongsTo::<Model>::default()
-            .with_fk_value(json!(1))
-            .load()
-            .await,
+        BelongsTo::<Model>::default().with_fk_value(1).load().await,
         "BelongsTo",
     );
     assert_unconfigured(
         HasManyThrough::<Model, RelationFieldPivotTestModel>::default()
-            .with_parent_pk(json!(1))
+            .with_parent_pk(1, false)
             .load()
             .await,
         "HasManyThrough",

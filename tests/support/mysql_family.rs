@@ -132,11 +132,8 @@ async fn raw_json_decodes_each_column_by_its_declaration() {
         .await
         .expect("typed raw-json probe query should succeed");
 
-    // MariaDB declares a JSON column as text, so raw SQL reads its text.
-    let payload = match backend::DATABASE_TYPE {
-        DatabaseType::MariaDB => serde_json::json!(r#"{"count":2,"kind":"probe"}"#),
-        _ => serde_json::json!({ "kind": "probe", "count": 2 }),
-    };
+    // MariaDB's JSON column is text on the wire, named JSON by its metadata.
+    let payload = serde_json::json!({ "kind": "probe", "count": 2 });
     assert_eq!(
         rows,
         vec![serde_json::json!({
@@ -333,7 +330,7 @@ async fn a_seeder_in_a_transaction_on_a_one_connection_pool_uses_its_ledger() {
         .expect("connect failed");
     let db = tideorm::require_db().expect("a global database");
     let seeded = db
-        .transaction(|_| Box::pin(async { Seeder::new().run().await }))
+        .transaction(async |_| Ok(Seeder::new().run().await?))
         .await;
     assert!(seeded.is_ok(), "{seeded:?}");
 }
@@ -390,7 +387,7 @@ async fn json_equality_follows_the_pool_not_the_configuration() {
             "configured {configured:?}"
         );
         let in_transaction = pool
-            .transaction(|_| Box::pin(async move { matching().get().await }))
+            .transaction(async move |_| matching().get().await)
             .await
             .unwrap_or_else(|error| panic!("configured {configured:?}: {error}"));
         assert_eq!(in_transaction.len(), 1, "configured {configured:?}");

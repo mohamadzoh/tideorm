@@ -74,7 +74,10 @@ impl FilesData {
             .entry(relation.to_string())
             .or_insert(serde_json::Value::Null);
         if !value.is_array() {
-            *value = serde_json::Value::Array(Self::entries(value).to_vec());
+            *value = serde_json::Value::Array(match value.take() {
+                serde_json::Value::Null => Vec::new(),
+                single => vec![single],
+            });
         }
         value.as_array_mut().expect("array initialized above")
     }
@@ -91,12 +94,19 @@ impl FilesData {
 
     /// Remove one key from a hasMany relation.
     pub fn remove_from_many(&mut self, relation: &str, file_key: &str) {
-        self.remove_many(relation, &[file_key]);
+        self.remove_many(relation, [file_key]);
     }
 
     /// Remove all matching keys in a single pass.
-    pub fn remove_many(&mut self, relation: &str, file_keys: &[&str]) {
-        let keys: std::collections::HashSet<&str> = file_keys.iter().copied().collect();
+    pub fn remove_many(
+        &mut self,
+        relation: &str,
+        file_keys: impl IntoIterator<Item = impl AsRef<str>>,
+    ) {
+        let keys: std::collections::HashSet<String> = file_keys
+            .into_iter()
+            .map(|key| key.as_ref().to_owned())
+            .collect();
         self.many_mut(relation).retain(|item| {
             !item
                 .get("key")

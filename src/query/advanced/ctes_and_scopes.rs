@@ -12,7 +12,6 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().with_cte(CTE::new("selected", "SELECT id FROM users".to_owned())).validate().unwrap();
     /// ```
-    #[must_use]
     pub fn with_cte(self, cte: CTE) -> Self {
         self.push_cte("with_cte", cte)
     }
@@ -34,18 +33,35 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().with_query("selected", User::query().select(vec!["id"])).validate().unwrap();
     /// ```
-    #[must_use]
     pub fn with_query<N: Model>(mut self, name: &str, query: QueryBuilder<N>) -> Self {
         self.absorb_operand_error("subquery", "with_query", &query);
+        // The body is the whole statement, ordering and limit included, which
+        // a CTE body may carry on every backend.
+        self.push_cte("with_query", CTE::of_query(name, query))
+    }
 
-        // The body is spliced into the outer statement and executed, so it goes
-        // through the parameterized renderer instead of the debug preview
-        // renderer: its values stay bound parameters rather than inline literals.
-        // It is the whole statement, ordering and limit included, which a CTE
-        // body may carry on every backend.
-        let db_type = self.db_type_for_sql();
-        let (query_sql, params) = query.build_select_sql_with_params_for_db(db_type);
-        self.push_cte("with_query", CTE::with_params(name, query_sql, params))
+    /// Add a CTE from another query builder, naming its output columns
+    ///
+    /// The `name (columns) AS (..)` form of [`with_query`](Self::with_query):
+    /// the list must have exactly as many entries as `query` selects.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().with_query_columns("picked", ["user_id"], User::query().select([User::ID])).validate().unwrap();
+    /// ```
+    pub fn with_query_columns<N: Model>(
+        self,
+        name: &str,
+        columns: impl crate::columns::IntoColumnNames,
+        query: QueryBuilder<N>,
+    ) -> Self {
+        let mut query = self.with_query(name, query);
+        if let Some(cte) = query.clauses.ctes.last_mut() {
+            cte.columns = Some(crate::columns::column_names(&columns));
+        }
+        query
     }
 
     /// Add a recursive CTE
@@ -56,13 +72,12 @@ impl<M: Model> QueryBuilder<M> {
     /// use tideorm::prelude::*;
     /// # #[tideorm::model(table = "users", soft_delete)]
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
-    /// User::query().with_recursive_cte("numbers", vec!["n"], "SELECT 1", "SELECT n + 1 FROM numbers WHERE n < 3").validate().unwrap();
+    /// User::query().with_recursive_cte("numbers", ["n"], "SELECT 1", "SELECT n + 1 FROM numbers WHERE n < 3").validate().unwrap();
     /// ```
-    #[must_use]
     pub fn with_recursive_cte(
         mut self,
         name: &str,
-        columns: Vec<&str>,
+        columns: impl crate::columns::IntoColumnNames,
         base_case: &str,
         recursive_case: &str,
     ) -> Self {
@@ -100,7 +115,6 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().with_trashed().validate().unwrap();
     /// ```
-    #[must_use]
     pub fn with_trashed(mut self) -> Self {
         self.clauses.include_trashed = true;
         self.clauses.only_trashed = false;
@@ -117,7 +131,6 @@ impl<M: Model> QueryBuilder<M> {
     /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
     /// User::query().only_trashed().validate().unwrap();
     /// ```
-    #[must_use]
     pub fn only_trashed(mut self) -> Self {
         if !M::soft_delete_enabled() {
             self.invalidate_query(

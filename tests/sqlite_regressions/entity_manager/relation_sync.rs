@@ -220,11 +220,9 @@ async fn a_rolled_back_flush_leaves_the_relations_to_flush_again() {
 
     let flushing = manager.clone();
     let rolled_back = db
-        .transaction(|_| {
-            Box::pin(async move {
-                flushing.flush().await?;
-                Err::<(), _>(tideorm::Error::query("roll back"))
-            })
+        .transaction(async move |_| {
+            flushing.flush().await?;
+            Err::<(), _>(tideorm::Error::query("roll back"))
         })
         .await;
     assert!(rolled_back.is_err());
@@ -263,13 +261,11 @@ async fn another_databases_rollback_leaves_the_managers_work() {
     let found = Arc::new(std::sync::Mutex::new(None));
     let (saving, keep) = (manager.clone(), found.clone());
     let rolled_back = other
-        .transaction(move |_| {
-            Box::pin(async move {
-                saving.save(&user).await?;
-                let handle = saving.find_managed::<SyncPost>(1).await?;
-                *keep.lock().unwrap() = handle;
-                Err::<(), _>(tideorm::Error::query("roll back"))
-            })
+        .transaction(async move |_| {
+            saving.save(&user).await?;
+            let handle = saving.find_managed::<SyncPost>(1).await?;
+            *keep.lock().unwrap() = handle;
+            Err::<(), _>(tideorm::Error::query("roll back"))
         })
         .await;
     assert!(rolled_back.is_err());

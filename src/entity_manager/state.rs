@@ -29,55 +29,55 @@ impl EntityManager {
         self.get_by_key(&identity_key::<T>(key))
     }
 
-    /// A tracked entity of `T` whose `field` holds `value`; the caller skips
-    /// a NULL value, which matches none, as SQL's comparison does.
-    pub(crate) fn find_by_field<T>(
-        &self,
-        field: &str,
-        value: &serde_json::Value,
-    ) -> crate::error::Result<Option<T>>
+    /// A tracked entity of `T` whose `field` holds `value`, both read as
+    /// keys of the field's column; the caller skips a NULL value, which
+    /// matches none, as SQL's comparison does.
+    pub(crate) fn find_by_field<T>(&self, field: &str, value: &crate::internal::Value) -> Option<T>
     where
-        T: crate::internal::InternalModel,
+        T: Model,
     {
+        let kind = crate::internal::column_type_of::<T>(field);
+        let key = |value: &crate::internal::Value| {
+            crate::orm::sql_builder::ValueKey::new(crate::internal::column_value(
+                value,
+                kind.as_ref(),
+            ))
+        };
+        let wanted = key(value);
         let map = self.identity_map.read();
-        for entry in map.values() {
-            let Some(model) = entry.downcast_ref::<T>() else {
-                continue;
-            };
-
-            if <T as crate::internal::InternalModel>::field_json_value(model, field)?.as_ref()
-                == Some(value)
-            {
-                return Ok(Some(model.clone()));
-            }
-        }
-
-        Ok(None)
+        map.values()
+            .filter_map(|entry| entry.downcast_ref::<T>())
+            .find(|model| {
+                model
+                    .field_value(field)
+                    .is_some_and(|held| key(&held) == wanted)
+            })
+            .cloned()
     }
 
     /// File a copy of `entity` in the identity map, attaching its relations to
     /// this manager's database first, so the caller's copy queries it too.
     pub(crate) fn put<T>(&self, entity: &mut T)
     where
-        T: TideEntityManagerMeta + Clone + Send + Sync + 'static,
+        T: Model,
     {
-        entity.tide_attach_entity_manager_database(self.database());
+        entity.__attach_query_database(self.database());
 
         // Same collision as `register`: an unsaved entity's default primary key
         // is not an identity, and filing several under it makes them alias.
-        if entity.tide_pk_is_new() {
+        if entity.is_new() {
             return;
         }
 
-        let key = identity_key::<T>(entity.tide_pk_key());
+        let key = identity_key::<T>(model_identity_key(entity));
         // A copy the map hands out carries only the relations its caller
         // loads: one filed with this entity's would serve those rows long
         // after other saves changed them, and saving it would write them back.
         let mut stored = entity.clone();
-        stored.tide_unload_relations();
-        stored.tide_attach_entity_manager_database(self.database());
+        stored.__unload_relations();
+        stored.__attach_query_database(self.database());
         let mut map = self.identity_map.write();
-        save::record_identity_map_rollback::<T>(self, &key, &map);
+        save::record_identity_map_rollback(self, &key, &map);
         map.insert(key, Arc::new(stored));
     }
 
@@ -87,7 +87,7 @@ impl EntityManager {
     {
         let key = identity_key::<T>(key);
         let mut map = self.identity_map.write();
-        save::record_identity_map_rollback::<T>(self, &key, &map);
+        save::record_identity_map_rollback(self, &key, &map);
         map.remove(&key);
     }
 

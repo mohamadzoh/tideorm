@@ -16,6 +16,8 @@ mod fixtures;
 #[cfg(feature = "attachments")]
 #[path = "sqlite_regressions/attachments.rs"]
 mod attachments;
+#[path = "sqlite_regressions/batch_insert.rs"]
+mod batch_insert;
 #[path = "sqlite_regressions/batch_updates.rs"]
 mod batch_updates;
 #[path = "sqlite_regressions/cache.rs"]
@@ -35,12 +37,18 @@ mod entity_manager;
 mod fulltext;
 #[path = "sqlite_regressions/migrations.rs"]
 mod migrations;
+#[path = "sqlite_regressions/orm.rs"]
+mod orm;
 #[path = "sqlite_regressions/queries.rs"]
 mod queries;
+#[path = "sqlite_regressions/relations.rs"]
+mod relations;
 #[path = "sqlite_regressions/seeding.rs"]
 mod seeding;
 #[path = "sqlite_regressions/tokenization.rs"]
 mod tokenization;
+#[path = "sqlite_regressions/transaction_state.rs"]
+mod transaction_state;
 #[path = "sqlite_regressions/transactions.rs"]
 mod transactions;
 #[cfg(feature = "translations")]

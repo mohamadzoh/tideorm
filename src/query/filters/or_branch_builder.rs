@@ -8,6 +8,7 @@ use super::*;
 /// `.begin_or().or_where_eq("a", 1).and_where_eq("b", 2).or_where_eq("c", 3).end_or()`
 /// adds `((a = 1 AND b = 2) OR c = 3)` to the query.
 #[derive(Debug)]
+#[must_use = "an OR branch joins its query only through `end_or()`"]
 pub struct OrBranchBuilder<M: Model> {
     query: QueryBuilder<M>,
     branches: Vec<OrGroup>,
@@ -21,7 +22,6 @@ impl<M: Model> crate::columns::ConditionOwner for OrBranchBuilder<M> {
 }
 
 impl<M: Model> OrBranchBuilder<M> {
-    #[must_use]
     ///
     /// ```
     /// use tideorm::prelude::*;
@@ -55,7 +55,6 @@ impl<M: Model> OrBranchBuilder<M> {
     ///
     /// A single-condition branch becomes a plain member of the OR group; a
     /// longer one becomes a nested AND group. An empty expression adds nothing.
-    #[must_use]
     ///
     /// ```
     /// use tideorm::prelude::*;

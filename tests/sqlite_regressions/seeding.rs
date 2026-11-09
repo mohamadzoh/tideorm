@@ -9,6 +9,9 @@ use tideorm::prelude::*;
 use tideorm::seeding::{Seed, Seeder, async_trait};
 use tokio::sync::Notify;
 
+#[path = "seeding/batches.rs"]
+mod batches;
+
 /// Counts its runs and writes one `seed_effects` row each time.
 struct CountedSeed(Arc<AtomicUsize>);
 
@@ -56,21 +59,19 @@ async fn stale_seed_snapshot_fails_before_repeating_a_committed_callback() {
         let scoped = db.clone();
         let outer_seeder = seeder.clone();
         let result: tideorm::Result<()> = db
-            .transaction(move |_| {
-                Box::pin(async move {
-                    scoped.query_raw_json("SELECT * FROM _seeds").await?;
-                    let other = outer_seeder.clone();
-                    assert_eq!(
-                        tokio::spawn(async move { other.run().await })
-                            .await
-                            .unwrap()?
-                            .executed
-                            .len(),
-                        1
-                    );
-                    outer_seeder.run().await?;
-                    Ok(())
-                })
+            .transaction(async move |_| {
+                scoped.query_raw_json("SELECT * FROM _seeds").await?;
+                let other = outer_seeder.clone();
+                assert_eq!(
+                    tokio::spawn(async move { other.run().await })
+                        .await
+                        .unwrap()?
+                        .executed
+                        .len(),
+                    1
+                );
+                outer_seeder.run().await?;
+                Ok(())
             })
             .await;
         assert!(result.is_err(), "a stale write snapshot must be restarted");
@@ -96,18 +97,16 @@ async fn outer_transactions_hold_seed_locks_until_commit_rollback_or_cancellatio
                 let (db, seeder, entered, release) =
                     (db.clone(), seeder.clone(), entered.clone(), release.clone());
                 tokio::spawn(async move {
-                    db.transaction(move |_| {
-                        Box::pin(async move {
-                            assert_eq!(seeder.run().await?.executed.len(), 1);
-                            // Reusing the guard must not deadlock a sequential call.
-                            assert_eq!(seeder.run().await?.skipped.len(), 1);
-                            entered.notify_one();
-                            release.notified().await;
-                            if outcome == "rollback" {
-                                return Err(tideorm::Error::query("rollback outer"));
-                            }
-                            Ok(())
-                        })
+                    db.transaction(async move |_| {
+                        assert_eq!(seeder.run().await?.executed.len(), 1);
+                        // Reusing the guard must not deadlock a sequential call.
+                        assert_eq!(seeder.run().await?.skipped.len(), 1);
+                        entered.notify_one();
+                        release.notified().await;
+                        if outcome == "rollback" {
+                            return Err(tideorm::Error::query("rollback outer"));
+                        }
+                        Ok(())
                     })
                     .await
                 })
@@ -153,29 +152,23 @@ async fn seed_locks_survive_committed_and_rolled_back_savepoints() {
                     (db.clone(), seeder.clone(), entered.clone(), release.clone());
                 tokio::spawn(async move {
                     let nested_db = db.clone();
-                    db.transaction(move |_| {
-                        Box::pin(async move {
-                            let nested_seeder = seeder.clone();
-                            let nested = nested_db
-                                .transaction(move |_| {
-                                    Box::pin(async move {
-                                        nested_seeder.run().await?;
-                                        if rollback {
-                                            return Err(tideorm::Error::query(
-                                                "rollback savepoint",
-                                            ));
-                                        }
-                                        Ok(())
-                                    })
-                                })
-                                .await;
-                            assert_eq!(nested.is_err(), rollback);
-                            let again = seeder.run().await?;
-                            assert_eq!(again.executed.len(), usize::from(rollback));
-                            entered.notify_one();
-                            release.notified().await;
-                            Ok(())
-                        })
+                    db.transaction(async move |_| {
+                        let nested_seeder = seeder.clone();
+                        let nested = nested_db
+                            .transaction(async move |_| {
+                                nested_seeder.run().await?;
+                                if rollback {
+                                    return Err(tideorm::Error::query("rollback savepoint"));
+                                }
+                                Ok(())
+                            })
+                            .await;
+                        assert_eq!(nested.is_err(), rollback);
+                        let again = seeder.run().await?;
+                        assert_eq!(again.executed.len(), usize::from(rollback));
+                        entered.notify_one();
+                        release.notified().await;
+                        Ok(())
                     })
                     .await
                 })
@@ -305,7 +298,10 @@ async fn complete_seed_rollbacks_and_refresh_exclude_other_runners() {
                     "steps" => rollback.rollback_steps(2).await,
                     "refresh" => rollback.refresh().await,
                     "rollback" => rollback.rollback().await,
-                    _ => rollback.rollback_seed("02").await,
+                    _ => rollback
+                        .rollback_seed("02")
+                        .await
+                        .map_err(SeedFailure::from),
                 }
             });
             gate.entered.notified().await;
@@ -431,4 +427,129 @@ async fn migration_callbacks_can_use_the_separate_seed_lock() {
     .unwrap()
     .unwrap();
     crate::fixtures::close_global(&db).await;
+}
+
+/// Writes one `tenant_rows` row through the ambient connection, as a model
+/// call would.
+struct TenantSeed;
+
+#[async_trait]
+impl Seed for TenantSeed {
+    fn name(&self) -> &str {
+        "tenant"
+    }
+    async fn run(&self, _db: &Database) -> tideorm::Result<()> {
+        Database::execute("INSERT INTO tenant_rows VALUES(1)").await?;
+        Ok(())
+    }
+}
+
+/// A seeder given a database seeds it, ledger and model calls included,
+/// with no global connection installed.
+#[tokio::test]
+async fn a_seeder_runs_on_the_database_it_is_given() {
+    Database::reset_global();
+    let db = crate::fixtures::memory_database("CREATE TABLE tenant_rows(value INTEGER)").await;
+    let seeder = Seeder::new().add(TenantSeed).database(&db);
+
+    assert_eq!(seeder.run().await.unwrap().executed.len(), 1);
+    assert_eq!(seeder.run().await.unwrap().skipped.len(), 1);
+    assert!(seeder.status().await.unwrap()[0].executed);
+    let rows = db
+        .query_raw_json("SELECT COUNT(*) AS n FROM tenant_rows")
+        .await
+        .unwrap();
+    assert_eq!(rows[0]["n"], 1);
+
+    assert!(Seeder::new().add(TenantSeed).run().await.is_err());
+}
+
+/// Depends on `tenant`.
+struct AfterTenant;
+
+#[async_trait]
+impl Seed for AfterTenant {
+    fn name(&self) -> &str {
+        "after_tenant"
+    }
+    async fn run(&self, _db: &Database) -> tideorm::Result<()> {
+        Database::execute("INSERT INTO tenant_rows VALUES(2)").await?;
+        Ok(())
+    }
+    async fn rollback(&self, _db: &Database) -> tideorm::Result<()> {
+        Database::execute("DELETE FROM tenant_rows").await?;
+        Ok(())
+    }
+    fn depends_on(&self) -> Vec<&str> {
+        vec!["tenant"]
+    }
+}
+
+/// A named seed runs only once its dependencies have, and rolls back only
+/// once the ledger records it, as `run` and `rollback` decide.
+#[tokio::test]
+async fn named_seed_operations_check_the_ledger() {
+    let db = crate::fixtures::memory_database("CREATE TABLE tenant_rows(value INTEGER)").await;
+    let seeder = Seeder::new().add(TenantSeed).add(AfterTenant).database(&db);
+    let count = async || crate::fixtures::row_count(&db, "tenant_rows").await;
+
+    let unrun = seeder.rollback_seed("after_tenant").await.unwrap_err();
+    assert!(unrun.to_string().contains("has not run"), "{unrun}");
+    let early = seeder.run_seed("after_tenant").await.unwrap_err();
+    assert!(early.to_string().contains("depends on 'tenant'"), "{early}");
+    assert_eq!(count().await, 0);
+    assert_eq!(crate::fixtures::row_count(&db, "_seeds").await, 0);
+
+    seeder.run_seed("tenant").await.unwrap();
+    seeder.run_seed("after_tenant").await.unwrap();
+    assert_eq!(count().await, 2);
+    seeder.rollback_seed("after_tenant").await.unwrap();
+    assert_eq!(count().await, 0);
+    assert_eq!(crate::fixtures::row_count(&db, "_seeds").await, 1);
+}
+
+/// A transaction's handle names the pool it was begun on, so a migrator and
+/// a seeder given it take their ledger locks and run inside the transaction.
+#[tokio::test]
+async fn a_transactions_handle_migrates_and_seeds() {
+    use tideorm::migration::{Migration, Migrator, Schema};
+    struct CreateTenantRows;
+    #[async_trait]
+    impl Migration for CreateTenantRows {
+        fn version(&self) -> &str {
+            "01"
+        }
+        fn name(&self) -> &str {
+            "tenant_rows"
+        }
+        async fn up(&self, schema: &mut Schema) -> tideorm::Result<()> {
+            schema.raw("CREATE TABLE tenant_rows(value INTEGER)").await
+        }
+        async fn down(&self, schema: &mut Schema) -> tideorm::Result<()> {
+            schema.raw("DROP TABLE tenant_rows").await
+        }
+    }
+    Database::reset_global();
+    let db = crate::fixtures::memory_database("").await;
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        db.transaction(async |_| {
+            let transaction = Database::current()?;
+            let migrator = Migrator::new().add(CreateTenantRows).database(&transaction);
+            assert_eq!(migrator.run().await?.applied.len(), 1);
+            let seeder = Seeder::new().add(TenantSeed).database(&transaction);
+            assert_eq!(seeder.run().await?.executed.len(), 1);
+            assert_eq!(seeder.rollback().await?.rolled_back.len(), 1);
+            assert_eq!(seeder.run_seed("tenant").await?.executed.len(), 1);
+            assert_eq!(migrator.rollback_steps(1).await?.rolled_back.len(), 1);
+            assert_eq!(migrator.run().await?.applied.len(), 1);
+            Ok(())
+        }),
+    )
+    .await
+    .expect("a ledger lock waited for the transaction's connection")
+    .unwrap();
+    assert_eq!(crate::fixtures::row_count(&db, "tenant_rows").await, 0);
+    assert_eq!(crate::fixtures::row_count(&db, "_seeds").await, 1);
+    assert_eq!(crate::fixtures::row_count(&db, "_migrations").await, 1);
 }

@@ -33,7 +33,7 @@ fn test_generate_cache_key_is_stable_for_equivalent_structured_queries() {
     let build = || {
         CacheKeyTestUser::query()
             .where_in("status", vec!["active", "pending"])
-            .or_where(|group| {
+            .where_any(|group| {
                 group
                     .where_eq("role", "admin")
                     .nested_and(|inner| inner.where_gt("score", 10).where_lt("score", 20))
@@ -117,8 +117,10 @@ fn test_operand_bound_values_participate_in_the_cache_key() {
     ] {
         assert_eq!(
             one.build_select_sql_with_params_for_db(DatabaseType::Postgres)
+                .unwrap()
                 .0,
             two.build_select_sql_with_params_for_db(DatabaseType::Postgres)
+                .unwrap()
                 .0,
             "{operand}"
         );
@@ -130,21 +132,67 @@ fn test_operand_bound_values_participate_in_the_cache_key() {
     }
 }
 
-#[test]
-fn test_rendered_filter_guard_rejects_constant_true_bodies() {
-    type Guard = QueryBuilder<CacheKeyTestUser>;
+/// Queries of `M` whose filters fold to TRUE, alone or as a branch of an OR.
+fn filters_that_fold_to_true<M: Model>() -> Vec<(&'static str, QueryBuilder<M>)> {
+    let no_ids: Vec<i64> = Vec::new();
+    vec![
+        ("no filter", M::query()),
+        ("raw TRUE", M::query().where_raw("TRUE")),
+        ("raw (1 = 1)", M::query().where_raw("(1 = 1)")),
+        ("empty NOT IN", M::query().where_not_in("id", no_ids)),
+        (
+            "OR with a TRUE branch",
+            M::query().or_where_eq("id", 1).or_where_raw("1 = 1"),
+        ),
+    ]
+}
 
-    for body in ["", "TRUE", "true", "1 = 1", "(TRUE)"] {
-        let err = Guard::ensure_rendered_filter_is_restrictive("delete", body).unwrap_err();
-        let message = err.to_string();
+fn guard_refuses<M: Model>(query: &QueryBuilder<M>, trash_scope_counts: bool) -> bool {
+    query
+        .mutation_where_bound(DatabaseType::Postgres, "delete", trash_scope_counts)
+        .is_err_and(|err| {
+            err.to_string()
+                .contains("unfiltered bulk mutations are blocked")
+        })
+}
+
+/// The guard folds the condition the filters build: a filter that folds to
+/// TRUE, alone or as a branch of an OR, cannot exclude a row. On a
+/// soft-delete model the default scope's `deleted_at IS NULL` is no filter of
+/// the caller's, and ANDed in it hid the TRUE; `only_trashed()` counts only
+/// where the trash may be restored or emptied as a whole (`restore()`,
+/// `force_delete()`), and any other mutation in the trash needs a filter.
+#[test]
+fn test_mutation_where_guard_rejects_conditions_that_fold_to_true() {
+    for (label, query) in filters_that_fold_to_true::<CacheKeyTestUser>() {
+        assert!(guard_refuses(&query, false), "{label}");
+    }
+    for (label, query) in filters_that_fold_to_true::<CacheKeyTestSoftDeleteUser>() {
+        for trash_scope_counts in [false, true] {
+            assert!(guard_refuses(&query, trash_scope_counts), "{label}");
+            assert!(
+                guard_refuses(&query.clone().with_trashed(), trash_scope_counts),
+                "{label}, with trashed rows"
+            );
+        }
+        let trash = query.only_trashed();
         assert!(
-            message.contains("unfiltered bulk mutations are blocked"),
-            "body: {body}"
+            !guard_refuses(&trash, true),
+            "{label}, the whole trash restored or emptied"
+        );
+        assert!(
+            guard_refuses(&trash, false),
+            "{label}, any other mutation of the whole trash"
         );
     }
 
-    let restrictive = Guard::ensure_rendered_filter_is_restrictive("delete", "\"id\" = $1");
-    assert!(restrictive.is_ok());
+    let (sql, params) = CacheKeyTestUser::query()
+        .where_eq("id", 1)
+        .mutation_where_bound(DatabaseType::Postgres, "delete", false)
+        .unwrap()
+        .build(DatabaseType::Postgres.dialect());
+    assert!(sql.contains("= $1"), "{sql}");
+    assert_eq!(params.len(), 1);
 }
 
 /// A write to any table a query reads must evict its cached result, so the
@@ -261,101 +309,82 @@ fn test_count_decoding_reports_missing_and_undecodable_values() {
     );
 }
 
-/// A connection that never dialled anything, for identity bookkeeping only.
-fn disconnected_connection() -> Arc<InternalConnection> {
-    Arc::new(InternalConnection::new(Default::default()))
+/// A lazy pool of the compiled backend that never dials, for identity
+/// bookkeeping only.
+async fn idle_connection() -> Arc<InternalConnection> {
+    let url = if cfg!(feature = "postgres") {
+        "postgres://tideorm@127.0.0.1:9/unused"
+    } else if cfg!(feature = "mysql") {
+        "mysql://tideorm@127.0.0.1:9/unused"
+    } else {
+        "sqlite::memory:"
+    };
+    let mut options = crate::internal::ConnectOptions::new(url);
+    options.connect_lazy(true);
+    let connection = crate::internal::OrmDatabase::connect(options)
+        .await
+        .expect("a lazy pool opens without dialling");
+    Arc::new(InternalConnection::new(connection))
 }
 
-#[test]
-fn test_connection_identity_is_stable_for_one_connection() {
-    let connection = disconnected_connection();
+#[tokio::test]
+async fn test_connection_identity_is_stable_for_one_connection() {
+    let connection = idle_connection().await;
     let same_connection = Arc::clone(&connection);
 
     assert_eq!(
-        crate::database::connection_identity(&connection),
-        crate::database::connection_identity(&same_connection),
+        connection.connection().identity(),
+        same_connection.connection().clone().identity(),
         "one connection must keep one identity, or its own cache entries never hit"
     );
 }
 
-#[test]
-fn test_connection_identity_is_never_inherited_from_a_recycled_address() {
-    let first = disconnected_connection();
-    let first_address = Arc::as_ptr(&first) as usize;
-    let first_identity = crate::database::connection_identity(&first);
+#[tokio::test]
+async fn test_connection_identity_is_never_inherited_from_a_dropped_pool() {
+    let first = idle_connection().await;
+    let first_identity = first.connection().identity();
     drop(first);
 
     // A batch of identically-sized allocations is exactly what lands on a
     // just-freed block, which is how hashing `Arc::as_ptr` served one
     // tenant's cached rows to the next tenant to connect.
-    let reopened: Vec<_> = (0..16).map(|_| disconnected_connection()).collect();
-
-    for connection in &reopened {
+    for _ in 0..16 {
         assert_ne!(
-            Arc::as_ptr(connection) as usize,
-            first_address,
-            "an identity on record must keep its connection's address reserved"
-        );
-        assert_ne!(
-            crate::database::connection_identity(connection),
+            idle_connection().await.connection().identity(),
             first_identity,
             "a new connection must never inherit a dropped connection's cache identity"
         );
     }
 }
 
-/// The soft-delete stamp is a UTC literal rather than the database clock, so
-/// it has to be spelled the way the backend the statement is heading for
-/// spells it. Rendering it for the ambient backend instead put an RFC3339
-/// literal — `T` separator, UTC offset — into statements bound for MySQL,
-/// which rejects both.
+/// The soft-delete stamp is bound, before the filter's values, so every
+/// soft delete of a model runs one statement text and a stamp is stored as
+/// any typed write of a `DateTime<Utc>` stores it.
 #[test]
-fn test_soft_delete_stamp_renders_for_the_statement_backend() {
-    let timestamp = chrono::DateTime::parse_from_rfc3339("2026-07-25T12:34:56.123456Z")
-        .expect("fixture is valid rfc3339")
-        .with_timezone(&chrono::Utc);
-    for (db_type, expected) in [
-        (DatabaseType::Postgres, "'2026-07-25T12:34:56.123456+00:00'"),
-        (DatabaseType::SQLite, "'2026-07-25T12:34:56.123456+00:00'"),
-        (DatabaseType::MySQL, "'2026-07-25 12:34:56.123456'"),
-        (DatabaseType::MariaDB, "'2026-07-25 12:34:56.123456'"),
-    ] {
-        assert_eq!(
-            QueryBuilder::<CacheKeyTestSoftDeleteUser>::utc_timestamp_literal(db_type, timestamp),
-            expected,
-            "{db_type:?}"
-        );
-    }
-
-    // The stamp is the only quoted token in the statement: every filter
-    // value travels beside it as a bound parameter.
-    fn stamp_of(sql: &str) -> &str {
-        sql.split('\'')
-            .nth(1)
-            .expect("the soft-delete statement embeds a quoted timestamp literal")
-    }
-
+fn test_soft_delete_binds_its_stamp() {
     let query = CacheKeyTestSoftDeleteUser::query().where_eq("id", 1);
-
-    let (mysql_sql, _) = query
-        .build_soft_delete_sql(DatabaseType::MySQL)
-        .expect("a filtered soft delete renders");
-    let mysql_stamp = stamp_of(&mysql_sql);
-    assert!(!mysql_stamp.contains('T'), "mysql stamp: {mysql_stamp}");
-    assert!(!mysql_stamp.contains('+'), "mysql stamp: {mysql_stamp}");
-
-    let (postgres_sql, _) = query
-        .build_soft_delete_sql(DatabaseType::Postgres)
-        .expect("a filtered soft delete renders");
-    let postgres_stamp = stamp_of(&postgres_sql);
-    assert!(
-        postgres_stamp.contains('T'),
-        "postgres stamp: {postgres_stamp}"
-    );
-    assert!(
-        postgres_stamp.ends_with("+00:00"),
-        "postgres stamp: {postgres_stamp}"
-    );
+    for (db_type, stamp_marker, id_marker) in [
+        (DatabaseType::Postgres, "= $1", "= $2"),
+        (DatabaseType::MySQL, "= ?", "= ?"),
+        (DatabaseType::MariaDB, "= ?", "= ?"),
+        (DatabaseType::SQLite, "= ?", "= ?"),
+    ] {
+        let (sql, params) = query
+            .build_soft_delete_sql(db_type)
+            .expect("a filtered soft delete renders");
+        assert!(!sql.contains('\''), "{db_type:?}: {sql}");
+        let (set, filter) = sql.split_once(" WHERE ").expect("an UPDATE with a WHERE");
+        assert!(set.ends_with(stamp_marker), "{db_type:?}: {sql}");
+        assert!(filter.contains(id_marker), "{db_type:?}: {sql}");
+        assert!(
+            matches!(
+                params.first(),
+                Some(crate::internal::Value::ChronoDateTimeUtc(Some(_)))
+            ),
+            "{db_type:?}: {params:?}"
+        );
+        assert_eq!(params.len(), 2, "{db_type:?}: {params:?}");
+    }
 }
 
 #[tokio::test]
@@ -381,4 +410,30 @@ fn a_distinct_aggregate_runs_over_the_distinct_rows() {
         })
         .expect("aggregate sql");
     assert!(sql.contains("FROM (SELECT DISTINCT"), "{sql}");
+}
+
+#[test]
+fn test_cache_keys_preserve_binding_representations() {
+    use crate::internal::Value;
+    let key = |value: Value| {
+        CacheKeyTestUser::query()
+            .where_raw_with("id = ?", vec![value])
+            .generate_cache_key()
+    };
+    let a = Value::from(rust_decimal::Decimal::new(10, 1));
+    let b = Value::from(rust_decimal::Decimal::new(100, 2));
+    assert_ne!(key(a.clone()), key(b));
+    assert_eq!(key(a.clone()), key(a));
+    let a = chrono::DateTime::parse_from_rfc3339("2026-11-01T12:00:00+00:00").unwrap();
+    let b = chrono::DateTime::parse_from_rfc3339("2026-11-01T14:00:00+02:00").unwrap();
+    assert_ne!(key(a.into()), key(b.into()));
+    assert_ne!(key(Value::Int(None)), key(Value::BigInt(None)));
+    #[cfg(feature = "postgres")]
+    {
+        use crate::orm::sql_builder::ArrayType;
+        assert_ne!(
+            key(Value::Array(ArrayType::Int, Some(Box::default()))),
+            key(Value::Array(ArrayType::BigInt, Some(Box::default())))
+        );
+    }
 }

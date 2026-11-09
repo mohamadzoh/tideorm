@@ -172,6 +172,100 @@ async fn review_postgres_complete_export_restores_cross_schema_dependencies() {
     destination_cleanup.unwrap();
 }
 
+/// A nested begin with an isolation level, a savepoint, is refused before it
+/// reaches the server, which leaves the enclosing transaction as it was.
+#[tokio::test]
+async fn review_refused_nested_begin_keeps_the_enclosing_transaction() {
+    use tideorm::orm::{
+        ConnectionTrait, IsolationLevel, Statement, TransactionOptions, TransactionTrait,
+    };
+    if !backend::connect().await {
+        return;
+    }
+    let db = tideorm::orm::Database::connect(backend::database_url())
+        .await
+        .unwrap();
+    db.execute_unprepared("DROP TABLE IF EXISTS review_nested_begin")
+        .await
+        .unwrap();
+    db.execute_unprepared("CREATE TABLE review_nested_begin (id INTEGER PRIMARY KEY)")
+        .await
+        .unwrap();
+    let outer = db.begin().await.unwrap();
+    outer
+        .execute_unprepared("INSERT INTO review_nested_begin VALUES (1)")
+        .await
+        .unwrap();
+    let nested = outer
+        .begin_with_options(TransactionOptions {
+            isolation_level: Some(IsolationLevel::Serializable),
+            ..TransactionOptions::default()
+        })
+        .await;
+    assert!(nested.is_err(), "an isolation level inside a transaction");
+    outer
+        .execute_unprepared("INSERT INTO review_nested_begin VALUES (2)")
+        .await
+        .unwrap();
+    outer.rollback().await.unwrap();
+    let select = Statement::from_string(
+        db.get_database_backend(),
+        "SELECT id FROM review_nested_begin",
+    );
+    let left = db.query_all_raw(select).await.unwrap().len();
+    db.execute_unprepared("DROP TABLE review_nested_begin")
+        .await
+        .unwrap();
+    assert_eq!(left, 0, "rows outlived the rolled-back transaction");
+}
+
+/// A statement run on a transaction's own handle that fails, its error
+/// swallowed, is seen when the transaction ends: on PostgreSQL it aborted
+/// the transaction, whose `COMMIT` would roll back unreported, so the commit
+/// is refused; MySQL and MariaDB keep the transaction and commit it.
+#[tokio::test]
+async fn review_a_failure_on_the_raw_handle_is_seen_at_commit() {
+    use tideorm::orm::ConnectionTrait;
+    if !backend::connect().await {
+        return;
+    }
+    let db = tideorm::require_db().unwrap();
+    db.exec_raw("DROP TABLE IF EXISTS review_raw_handle")
+        .await
+        .unwrap();
+    db.exec_raw("CREATE TABLE review_raw_handle (id INTEGER PRIMARY KEY)")
+        .await
+        .unwrap();
+    let committed = db
+        .transaction(async move |tx| {
+            let raw = tx.connection();
+            raw.execute_unprepared("INSERT INTO review_raw_handle VALUES (1)")
+                .await?;
+            let missing = raw
+                .execute_unprepared("INSERT INTO review_raw_handle_missing VALUES (1)")
+                .await;
+            assert!(missing.is_err(), "the table does not exist");
+            Ok(())
+        })
+        .await;
+    let rows = db
+        .query_raw_json("SELECT id FROM review_raw_handle")
+        .await
+        .unwrap()
+        .len();
+    db.exec_raw("DROP TABLE review_raw_handle").await.unwrap();
+    if backend::DATABASE_TYPE == DatabaseType::Postgres {
+        assert!(
+            matches!(committed, Err(Error::Transaction { .. })),
+            "{committed:?}"
+        );
+        assert_eq!(rows, 0);
+    } else {
+        committed.unwrap();
+        assert_eq!(rows, 1);
+    }
+}
+
 #[tokio::test]
 async fn review_concurrent_migrators_leave_a_single_connection_pool_available() {
     if !backend::connect().await {
@@ -321,15 +415,13 @@ async fn replay_review_schema(db: &Database, schema: &str) {
         })
         .map(str::to_owned)
         .collect();
-    db.transaction(move |_| {
-        Box::pin(async move {
-            for statement in statements {
-                Database::execute(&statement)
-                    .await
-                    .unwrap_or_else(|e| panic!("{e}\n{statement}"));
-            }
-            Ok(())
-        })
+    db.transaction(async move |_| {
+        for statement in statements {
+            Database::execute(&statement)
+                .await
+                .unwrap_or_else(|e| panic!("{e}\n{statement}"));
+        }
+        Ok(())
     })
     .await
     .unwrap();
@@ -432,12 +524,10 @@ async fn review_postgres_deferred_unique_and_referenced_constraints_survive_expo
         db.exec_raw(sql).await.unwrap();
     }
     replay_review_schema(&db, "review_deferred").await;
-    db.transaction(|_| {
-        Box::pin(async {
-            Database::execute("INSERT INTO review_deferred.deferred VALUES(1), (1)").await?;
-            Database::execute("DELETE FROM review_deferred.deferred").await?;
-            Ok(())
-        })
+    db.transaction(async |_| {
+        Database::execute("INSERT INTO review_deferred.deferred VALUES(1), (1)").await?;
+        Database::execute("DELETE FROM review_deferred.deferred").await?;
+        Ok(())
     })
     .await
     .unwrap();
@@ -517,7 +607,7 @@ async fn review_mysql_export_preserves_quotes_and_backslashes_in_expressions() {
         .unwrap();
 }
 
-// Array columns need sea-query's PostgreSQL arrays, which only the `postgres` feature enables.
+// Array columns need `sql_builder`'s PostgreSQL arrays, which only the `postgres` feature enables.
 #[cfg(feature = "postgres")]
 #[tokio::test]
 async fn review_postgres_bulk_null_assignments_keep_parameter_types() {
@@ -575,7 +665,7 @@ async fn review_postgres_bulk_null_assignments_keep_parameter_types() {
     db.exec_raw("DROP TABLE review_typed_nulls").await.unwrap();
 }
 
-// Array columns need sea-query's PostgreSQL arrays, which only the `postgres` feature enables.
+// Array columns need `sql_builder`'s PostgreSQL arrays, which only the `postgres` feature enables.
 #[cfg(feature = "postgres")]
 #[tokio::test]
 async fn review_postgres_empty_array_contains_excludes_sql_null() {
@@ -646,21 +736,19 @@ async fn review_postgres_failed_batch_commit_restores_snapshots() {
     assert_eq!(first.original_value("name").unwrap(), None);
     assert_eq!(Inserted::query().count().await.unwrap(), 0);
     let result = db
-        .transaction(|_| {
-            Box::pin(async {
-                Inserted::insert_all(vec![
-                    Inserted {
-                        id: 393,
-                        name: "one".into(),
-                    },
-                    Inserted {
-                        id: 394,
-                        name: "two".into(),
-                    },
-                ])
-                .await?;
-                Err::<(), _>(tideorm::Error::query("rollback outer transaction"))
-            })
+        .transaction(async |_| {
+            Inserted::insert_all(vec![
+                Inserted {
+                    id: 393,
+                    name: "one".into(),
+                },
+                Inserted {
+                    id: 394,
+                    name: "two".into(),
+                },
+            ])
+            .await?;
+            Err::<(), _>(tideorm::Error::query("rollback outer transaction"))
         })
         .await;
     assert!(result.is_err());
@@ -687,7 +775,7 @@ async fn review_postgres_failed_batch_commit_restores_snapshots() {
     .unwrap();
     assert_eq!(
         stored[0].original_value("name").unwrap(),
-        Some(Some(serde_json::json!("one")))
+        Some(Some(DbValue::from("one")))
     );
     db.exec_raw("DROP TABLE review_batch_commit").await.unwrap();
 }
@@ -713,18 +801,14 @@ async fn review_postgres_export_preserves_shared_sequences_and_ownership() {
     // block per session, so a pooled second call may legitimately skip ahead.
     let scoped = db.clone();
     let (first, second) = db
-        .transaction(move |_| {
-            Box::pin(async move {
-                let first = scoped
-                    .query_raw_json(
-                        "INSERT INTO review_sequences.alpha DEFAULT VALUES RETURNING id",
-                    )
-                    .await?;
-                let second = scoped
-                    .query_raw_json("INSERT INTO review_sequences.beta DEFAULT VALUES RETURNING id")
-                    .await?;
-                Ok((first, second))
-            })
+        .transaction(async move |_| {
+            let first = scoped
+                .query_raw_json("INSERT INTO review_sequences.alpha DEFAULT VALUES RETURNING id")
+                .await?;
+            let second = scoped
+                .query_raw_json("INSERT INTO review_sequences.beta DEFAULT VALUES RETURNING id")
+                .await?;
+            Ok((first, second))
         })
         .await
         .unwrap();
@@ -1024,7 +1108,7 @@ async fn review_mysql_native_table_definitions_round_trip() {
         .unwrap();
 }
 
-// Array columns need sea-query's PostgreSQL arrays, which only the `postgres` feature enables.
+// Array columns need `sql_builder`'s PostgreSQL arrays, which only the `postgres` feature enables.
 #[cfg(feature = "postgres")]
 #[tokio::test]
 async fn review_postgres_jsonb_array_primitives_use_json_parameters() {
@@ -1102,7 +1186,7 @@ async fn review_postgres_jsonb_array_primitives_use_json_parameters() {
         .unwrap();
 }
 
-// Array columns need sea-query's PostgreSQL arrays, which only the `postgres` feature enables.
+// Array columns need `sql_builder`'s PostgreSQL arrays, which only the `postgres` feature enables.
 #[cfg(feature = "postgres")]
 #[tokio::test]
 async fn review_postgres_array_equality_uses_native_parameters() {
@@ -1417,11 +1501,9 @@ async fn review_postgres_export_preserves_routine_execution_acl() {
     assert_eq!(permissions[0]["guest"], false);
     assert_eq!(permissions[0]["allowed"], true);
     let denied = db
-        .transaction(|_| {
-            Box::pin(async {
-                Database::execute("SET LOCAL ROLE \"review Routine Guest\"").await?;
-                Database::raw_json("SELECT review_routine_acl.reveal()").await
-            })
+        .transaction(async |_| {
+            Database::execute("SET LOCAL ROLE \"review Routine Guest\"").await?;
+            Database::raw_json("SELECT review_routine_acl.reveal()").await
         })
         .await;
     assert!(
@@ -1430,16 +1512,13 @@ async fn review_postgres_export_preserves_routine_execution_acl() {
             .to_string()
             .contains("permission denied")
     );
-    db.transaction(|_| {
-        Box::pin(async {
-            Database::execute("SET LOCAL ROLE \"review Routine Allowed\"").await?;
-            assert_eq!(
-                Database::raw_json("SELECT review_routine_acl.reveal() AS value").await?[0]
-                    ["value"],
-                "restricted"
-            );
-            Ok(())
-        })
+    db.transaction(async |_| {
+        Database::execute("SET LOCAL ROLE \"review Routine Allowed\"").await?;
+        assert_eq!(
+            Database::raw_json("SELECT review_routine_acl.reveal() AS value").await?[0]["value"],
+            "restricted"
+        );
+        Ok(())
     })
     .await
     .unwrap();
@@ -2437,8 +2516,9 @@ struct ReviewAbortRow {
 }
 
 /// After a caught failure PostgreSQL refuses the SAVEPOINT a nested
-/// transaction or `insert_all` opens, and the driver then rolls the enclosing
-/// transaction back: it must fail at commit, not commit what followed.
+/// transaction or `insert_all` opens. The enclosing transaction stays failed,
+/// not rolled back underneath it: what follows is refused, and it fails at
+/// commit instead of committing what followed.
 #[tokio::test]
 async fn review_postgres_savepoint_after_a_failed_statement_aborts_the_transaction() {
     if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
@@ -2452,40 +2532,36 @@ async fn review_postgres_savepoint_after_a_failed_statement_aborts_the_transacti
         db.exec_raw(&format!("DELETE FROM {table}")).await.unwrap();
         let (handle, name) = (db.clone(), table.clone());
         let result: tideorm::Result<()> = db
-            .transaction(move |_| {
-                Box::pin(async move {
+            .transaction(async move |_| {
+                handle
+                    .exec_raw(&format!("INSERT INTO {name} VALUES (1)"))
+                    .await?;
+                let duplicate = handle
+                    .exec_raw(&format!("INSERT INTO {name} VALUES (1)"))
+                    .await;
+                assert!(duplicate.is_err());
+                let nested = if nested_insert_all {
+                    ReviewAbortRow::insert_all(vec![
+                        ReviewAbortRow { id: 5 },
+                        ReviewAbortRow { id: 6 },
+                    ])
+                    .await
+                    .map(|_| ())
+                } else {
+                    let inner_handle = handle.clone();
                     handle
-                        .exec_raw(&format!("INSERT INTO {name} VALUES (1)"))
-                        .await?;
-                    let duplicate = handle
-                        .exec_raw(&format!("INSERT INTO {name} VALUES (1)"))
-                        .await;
-                    assert!(duplicate.is_err());
-                    let nested = if nested_insert_all {
-                        ReviewAbortRow::insert_all(vec![
-                            ReviewAbortRow { id: 5 },
-                            ReviewAbortRow { id: 6 },
-                        ])
+                        .transaction(async move |_| {
+                            inner_handle.exec_raw("SELECT 1").await?;
+                            Ok(())
+                        })
                         .await
-                        .map(|_| ())
-                    } else {
-                        let inner_handle = handle.clone();
-                        handle
-                            .transaction(move |_| {
-                                Box::pin(async move {
-                                    inner_handle.exec_raw("SELECT 1").await?;
-                                    Ok(())
-                                })
-                            })
-                            .await
-                    };
-                    assert!(nested.is_err(), "the nested savepoint opened: {nested:?}");
-                    let after = handle
-                        .exec_raw(&format!("INSERT INTO {name} VALUES (3)"))
-                        .await;
-                    assert!(after.is_err(), "a statement ran after the abort: {after:?}");
-                    Ok(())
-                })
+                };
+                assert!(nested.is_err(), "the nested savepoint opened: {nested:?}");
+                let after = handle
+                    .exec_raw(&format!("INSERT INTO {name} VALUES (3)"))
+                    .await;
+                assert!(after.is_err(), "a statement ran after the abort: {after:?}");
+                Ok(())
             })
             .await;
         assert!(result.is_err(), "the aborted transaction committed");
@@ -2510,27 +2586,23 @@ async fn review_postgres_failure_through_an_outer_handle_marks_its_own_transacti
     let (outer_handle, inner_handle) = (outer.clone(), inner.clone());
     let (name, inner_name) = (table.clone(), inner_table.clone());
     let result: tideorm::Result<()> = outer
-        .transaction(move |_| {
-            Box::pin(async move {
-                outer_handle
-                    .exec_raw(&format!("INSERT INTO {name} VALUES (1)"))
-                    .await?;
-                let (failing, writer) = (outer_handle.clone(), inner_handle.clone());
-                inner_handle
-                    .transaction(move |_| {
-                        Box::pin(async move {
-                            let missing = failing
-                                .exec_raw("SELECT * FROM review_outer_failure_missing")
-                                .await;
-                            assert!(missing.is_err());
-                            writer
-                                .exec_raw(&format!("INSERT INTO {inner_name} VALUES (2)"))
-                                .await?;
-                            Ok(())
-                        })
-                    })
-                    .await
-            })
+        .transaction(async move |_| {
+            outer_handle
+                .exec_raw(&format!("INSERT INTO {name} VALUES (1)"))
+                .await?;
+            let (failing, writer) = (outer_handle.clone(), inner_handle.clone());
+            inner_handle
+                .transaction(async move |_| {
+                    let missing = failing
+                        .exec_raw("SELECT * FROM review_outer_failure_missing")
+                        .await;
+                    assert!(missing.is_err());
+                    writer
+                        .exec_raw(&format!("INSERT INTO {inner_name} VALUES (2)"))
+                        .await?;
+                    Ok(())
+                })
+                .await
         })
         .await;
     assert!(result.is_err(), "the aborted transaction committed");
@@ -2615,35 +2687,33 @@ async fn review_postgres_raw_rows_read_types_without_a_typed_decoder() {
     ];
     let db = tideorm::require_db().unwrap();
     let rows = db
-        .transaction(move |_| {
-            Box::pin(async move {
-                Database::execute("SET LOCAL intervalstyle = 'iso_8601'").await?;
-                Database::execute("SET LOCAL timezone = 'UTC'").await?;
-                Database::execute("SET LOCAL datestyle = 'ISO, MDY'").await?;
-                let mut rows = Vec::new();
-                for (type_name, values) in checks {
-                    let values = values
-                        .iter()
-                        .map(|value| format!("('{value}'::{type_name})"))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    rows.extend(
-                        Database::raw_json(&format!(
-                            "SELECT v, format('%s', v) AS text FROM (VALUES {values}) AS t(v)"
-                        ))
-                        .await?,
-                    );
-                }
-                // A MONEY is its amount, which the server prints by locale.
+        .transaction(async move |_| {
+            Database::execute("SET LOCAL intervalstyle = 'iso_8601'").await?;
+            Database::execute("SET LOCAL timezone = 'UTC'").await?;
+            Database::execute("SET LOCAL datestyle = 'ISO, MDY'").await?;
+            let mut rows = Vec::new();
+            for (type_name, values) in checks {
+                let values = values
+                    .iter()
+                    .map(|value| format!("('{value}'::{type_name})"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 rows.extend(
-                    Database::raw_json(
-                        "SELECT v, v::numeric::text AS text FROM (VALUES ('1234.56'::money), \
-                         ('-0.01'::money), ('92233720368547758.07'::money)) AS t(v)",
-                    )
+                    Database::raw_json(&format!(
+                        "SELECT v, format('%s', v) AS text FROM (VALUES {values}) AS t(v)"
+                    ))
                     .await?,
                 );
-                Ok(rows)
-            })
+            }
+            // A MONEY is its amount, which the server prints by locale.
+            rows.extend(
+                Database::raw_json(
+                    "SELECT v, v::numeric::text AS text FROM (VALUES ('1234.56'::money), \
+                         ('-0.01'::money), ('92233720368547758.07'::money)) AS t(v)",
+                )
+                .await?,
+            );
+            Ok(rows)
         })
         .await
         .unwrap();
@@ -2691,18 +2761,15 @@ async fn review_postgres_raw_rows_read_types_without_a_typed_decoder() {
     // An enum's labels, which only their text names; the type lives and dies
     // inside the transaction.
     let rows = db
-        .transaction(|_| {
-            Box::pin(async {
-                Database::execute("CREATE TYPE review_decoded_mood AS ENUM ('happy', 'sad')")
-                    .await?;
-                let rows = Database::raw_json(
-                    "SELECT 'sad'::review_decoded_mood AS mood, \
+        .transaction(async |_| {
+            Database::execute("CREATE TYPE review_decoded_mood AS ENUM ('happy', 'sad')").await?;
+            let rows = Database::raw_json(
+                "SELECT 'sad'::review_decoded_mood AS mood, \
                      ARRAY['happy', NULL]::review_decoded_mood[] AS moods",
-                )
-                .await?;
-                Database::execute("DROP TYPE review_decoded_mood").await?;
-                Ok(rows)
-            })
+            )
+            .await?;
+            Database::execute("DROP TYPE review_decoded_mood").await?;
+            Ok(rows)
         })
         .await
         .unwrap();
@@ -2728,8 +2795,8 @@ struct ReviewSpecialMoment {
     at: chrono::DateTime<chrono::Utc>,
 }
 
-/// sqlx panics on a date or timestamp holding `infinity` and reads `TIME
-/// '24:00:00'` as midnight; JSON reads give PostgreSQL's own text for them,
+/// No Rust type holds a date or timestamp holding `infinity`, or `TIME
+/// '24:00:00'`, so typed reads refuse them; JSON reads give PostgreSQL's own text for them,
 /// raw and through a model, and other values as before.
 #[tokio::test]
 async fn review_postgres_special_dates_and_times_read_as_postgres_prints_them() {
@@ -2800,24 +2867,49 @@ async fn review_postgres_special_dates_and_times_read_as_postgres_prints_them() 
         .unwrap();
 }
 
-/// sqlx cannot read PostgreSQL's multirange types; the error says so and how
-/// to read one, and the text of one reads.
+#[path = "review_lossless_json.rs"]
+mod lossless_json;
+
+/// A raw parameter the driver cannot encode fails its statement before
+/// anything reaches the server: on PostgreSQL an unsigned value past its signed
+/// integer, which used to panic, and on MySQL and MariaDB a negative-year date,
+/// which used to be left out of the arguments. The transaction it ran in is
+/// not aborted and commits what followed.
 #[tokio::test]
-async fn review_postgres_multiranges_fail_with_a_way_to_read_them() {
-    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+async fn review_unencodable_raw_parameters_fail_their_statement() {
+    if !backend::connect().await {
         return;
     }
-    let db = tideorm::require_db().unwrap();
+    let (db, table) = private_table("review_unencodable").await;
+    let (marker, unencodable): (&str, fn() -> DbValue) =
+        if backend::DATABASE_TYPE == DatabaseType::Postgres {
+            ("$1", || u64::MAX.into())
+        } else {
+            ("?", || {
+                chrono::NaiveDate::from_ymd_opt(-1, 1, 1).unwrap().into()
+            })
+        };
+    let insert = format!("INSERT INTO {table}(id) VALUES ({marker})");
     let error = db
-        .query_raw_json("SELECT '{[1,3)}'::int4multirange AS m")
+        .exec_raw_with_params(&insert, vec![unencodable()])
         .await
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("multirange"), "{error}");
-    assert!(error.contains("::text"), "{error}");
-    let rows = db
-        .query_raw_json("SELECT '{[1,3)}'::int4multirange::text AS m")
-        .await
-        .unwrap();
-    assert_eq!(rows[0]["m"], "{[1,3)}");
+        .unwrap_err();
+    assert!(matches!(error, Error::Query { .. }), "{error:?}");
+
+    let (handle, sql) = (db.clone(), insert.clone());
+    db.transaction(async move |_| {
+        let error = handle
+            .exec_raw_with_params(&sql, vec![unencodable()])
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::Query { .. }), "{error:?}");
+        handle
+            .exec_raw_with_params(&sql, vec![DbValue::BigInt(Some(2))])
+            .await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(table_ids(&db, &table).await, vec![2]);
+    db.exec_raw(&format!("DROP TABLE {table}")).await.unwrap();
 }

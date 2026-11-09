@@ -1,5 +1,9 @@
 use super::*;
-use serde_json::json;
+use tideorm::DbValue;
+
+fn v(value: impl Into<DbValue>) -> DbValue {
+    value.into()
+}
 
 /// Each `where_*` method of an `OrGroup` records one condition with its
 /// column, operator and value.
@@ -12,70 +16,70 @@ fn test_or_group_condition_methods_record_their_condition() {
             OrGroup::new().where_eq("role", "admin"),
             "role",
             Operator::Eq,
-            single(json!("admin")),
+            single(v("admin")),
         ),
         (
             "where_not",
             OrGroup::new().where_not("status", "banned"),
             "status",
             Operator::NotEq,
-            single(json!("banned")),
+            single(v("banned")),
         ),
         (
             "where_gt",
             OrGroup::new().where_gt("age", 18),
             "age",
             Operator::Gt,
-            single(json!(18)),
+            single(v(18)),
         ),
         (
             "where_gte",
             OrGroup::new().where_gte("age", 18),
             "age",
             Operator::Gte,
-            single(json!(18)),
+            single(v(18)),
         ),
         (
             "where_lt",
             OrGroup::new().where_lt("age", 65),
             "age",
             Operator::Lt,
-            single(json!(65)),
+            single(v(65)),
         ),
         (
             "where_lte",
             OrGroup::new().where_lte("score", 100),
             "score",
             Operator::Lte,
-            single(json!(100)),
+            single(v(100)),
         ),
         (
             "where_like",
             OrGroup::new().where_like("email", "%@gmail.com"),
             "email",
             Operator::Like,
-            single(json!("%@gmail.com")),
+            single(v("%@gmail.com")),
         ),
         (
             "where_not_like",
             OrGroup::new().where_not_like("email", "%@spam.com"),
             "email",
             Operator::NotLike,
-            single(json!("%@spam.com")),
+            single(v("%@spam.com")),
         ),
         (
             "where_in",
             OrGroup::new().where_in("role", vec!["admin", "moderator", "editor"]),
             "role",
             Operator::In,
-            ConditionValue::List(vec![json!("admin"), json!("moderator"), json!("editor")]),
+            ConditionValue::List(vec![v("admin"), v("moderator"), v("editor")]),
         ),
         (
             "where_not_in",
             OrGroup::new().where_not_in("status", vec!["banned", "deleted"]),
             "status",
             Operator::NotIn,
-            ConditionValue::List(vec![json!("banned"), json!("deleted")]),
+            ConditionValue::List(vec![v("banned"), v("deleted")]),
         ),
         (
             "where_null",
@@ -96,7 +100,7 @@ fn test_or_group_condition_methods_record_their_condition() {
             OrGroup::new().where_between("price", 10, 100),
             "price",
             Operator::Between,
-            ConditionValue::Range(json!(10), json!(100)),
+            ConditionValue::Range(v(10), v(100)),
         ),
         (
             "where_raw",

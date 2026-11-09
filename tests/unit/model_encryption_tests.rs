@@ -1,44 +1,6 @@
 use super::*;
 use crate::tokenization::TokenConfig;
 
-/// Metadata whose two encrypted lists disagree. Macro-generated models
-/// cannot produce this, but the trait lets it be written by hand and the
-/// failure mode is silent plaintext, so it has to be rejected.
-#[derive(Clone)]
-struct MismatchedEncryptedMeta;
-
-impl ModelMeta for MismatchedEncryptedMeta {
-    type PrimaryKey = i64;
-
-    fn table_name() -> &'static str {
-        "mismatched_encrypted_models"
-    }
-
-    fn primary_key_names() -> &'static [&'static str] {
-        &["id"]
-    }
-
-    fn primary_key_display(primary_key: &Self::PrimaryKey) -> String {
-        primary_key.to_string()
-    }
-
-    fn column_names() -> &'static [&'static str] {
-        &["id", "secret_column", "other_column"]
-    }
-
-    fn field_names() -> &'static [&'static str] {
-        &["id", "secret", "other"]
-    }
-
-    fn encrypted_fields() -> Vec<&'static str> {
-        vec!["secret", "other"]
-    }
-
-    fn encrypted_column_names() -> Vec<&'static str> {
-        vec!["secret_column"]
-    }
-}
-
 /// `encrypted` names columns here; the metadata reports both spellings.
 #[tideorm::model(
     table = "model_test_encrypted_contacts",
@@ -54,43 +16,6 @@ struct EncryptedFieldModel {
 }
 
 const TEST_KEY: &str = "encrypted-field-model-test-key-32chars";
-
-#[test]
-fn mismatched_encrypted_metadata_is_rejected_instead_of_truncated() {
-    // `other` is the entry `zip` would drop, which would make it look like an
-    // unencrypted column and let plaintext through.
-    let mut rows = vec![serde_json::json!({ "other_column": "ciphertext" })];
-    let cases = [
-        (
-            "a batch update of the dropped field",
-            prepare_batch_update_value::<MismatchedEncryptedMeta>(
-                "other",
-                UpdateValue::Value(serde_json::Value::String("plaintext".to_string())),
-            )
-            .err(),
-            "encrypted column name",
-        ),
-        (
-            "a batch update of an unencrypted column",
-            prepare_batch_update_value::<MismatchedEncryptedMeta>(
-                "id",
-                UpdateValue::Value(serde_json::Value::from(1)),
-            )
-            .err(),
-            "encrypted field name",
-        ),
-        (
-            "decrypting rows, which would hand the dropped column back as ciphertext",
-            crate::model::decrypt_json_rows::<MismatchedEncryptedMeta>(&mut rows, &[]).err(),
-            "encrypted column name",
-        ),
-    ];
-
-    for (case, error, expected) in cases {
-        let error = error.unwrap_or_else(|| panic!("{case}: a metadata mismatch must be reported"));
-        assert!(error.to_string().contains(expected), "{case}: {error}");
-    }
-}
 
 #[test]
 fn crypto_errors_keep_their_class_and_name_the_field() {
@@ -122,11 +47,10 @@ fn crypto_errors_keep_their_class_and_name_the_field() {
 fn encrypted_field_metadata_uses_canonical_field_and_column_names() {
     assert_eq!(
         EncryptedFieldModel::encrypted_fields(),
-        vec!["phone_number", "backup_phone"]
-    );
-    assert_eq!(
-        EncryptedFieldModel::encrypted_column_names(),
-        vec!["customer_phone_number", "backup_phone"]
+        [
+            ("phone_number", "customer_phone_number"),
+            ("backup_phone", "backup_phone")
+        ]
     );
     assert!(EncryptedFieldModel::has_encrypted_fields());
 }
@@ -142,22 +66,18 @@ fn an_encrypted_field_decrypts_only_in_its_own_table_and_column() {
     let table = EncryptedFieldModel::table_name();
     let phone = "+15551234567".to_string();
 
-    let ciphertext = encrypt_model_field(
-        phone.clone(),
-        table,
-        "phone_number",
-        "customer_phone_number",
-    )
-    .expect("encrypting test ciphertext should succeed");
+    let ciphertext = encrypt_model_field(&phone, table, "phone_number", "customer_phone_number")
+        .expect("encrypting test ciphertext should succeed")
+        .expect("a string seals into a payload");
     assert_eq!(
         decrypt_model_field::<String>(
-            ciphertext.clone(),
+            Some(ciphertext.clone()),
             table,
             "phone_number",
             "customer_phone_number"
         )
         .expect("its own column should decrypt it"),
-        phone
+        Some(phone.clone())
     );
 
     let unscoped_key = TokenConfig::get_derived_encryption_key()
@@ -177,8 +97,8 @@ fn an_encrypted_field_decrypts_only_in_its_own_table_and_column() {
         ),
         ("the unscoped key", unscoped, table, "customer_phone_number"),
     ] {
-        let error =
-            decrypt_model_field::<String>(payload, table, "phone_number", column).expect_err(case);
+        let error = decrypt_model_field::<String>(Some(payload), table, "phone_number", column)
+            .expect_err(case);
         assert!(
             error
                 .to_string()
@@ -186,6 +106,29 @@ fn an_encrypted_field_decrypts_only_in_its_own_table_and_column() {
             "{case}: {error}"
         );
     }
+
+    TokenConfig::reset();
+}
+
+/// Any serde value seals and opens; `null` is NULL, which reads back only
+/// into a field that can hold it.
+#[test]
+fn any_serde_value_round_trips_and_null_stays_null() {
+    TokenConfig::reset();
+    TokenConfig::set_encryption_key(TEST_KEY);
+    let table = EncryptedFieldModel::table_name();
+
+    let sealed = encrypt_model_field(&1234_u32, table, "pin", "pin")
+        .expect("encrypting a number should succeed")
+        .expect("a number seals into a payload");
+    let opened = decrypt_model_field::<u32>(Some(sealed), table, "pin", "pin");
+    assert_eq!(opened.expect("its own column opens it"), Some(1234));
+    let null = encrypt_model_field(&None::<u32>, table, "pin", "pin");
+    assert_eq!(null.expect("encrypting null should succeed"), None);
+    let nullable = decrypt_model_field::<Option<u32>>(None, table, "pin", "pin");
+    assert_eq!(nullable.expect("NULL reads as None"), Some(None));
+    let required = decrypt_model_field::<u32>(None, table, "pin", "pin");
+    assert_eq!(required.expect("NULL is no error here"), None);
 
     TokenConfig::reset();
 }
@@ -399,6 +342,97 @@ mod stored {
             .expect("the row still loads")
             .expect("the row exists");
         assert_eq!(stored.phone, "555");
+
+        reset();
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+    struct Address {
+        street: String,
+        floor: u8,
+    }
+
+    #[tideorm::model(table = "encrypted_profiles", encrypted = "pin, address, backup_pin")]
+    struct EncryptedProfile {
+        #[tideorm(primary_key, auto_increment)]
+        id: i64,
+        pin: u32,
+        address: Address,
+        backup_pin: Option<u32>,
+    }
+
+    /// A field of any serde type is encrypted: its column holds the payload,
+    /// a decoded row holds the plaintext before any load step runs, and a
+    /// batch `set()` takes a value of the field's type and refuses another.
+    #[tokio::test]
+    async fn non_string_encrypted_fields_decode_into_plaintext() {
+        let _guard = crate::test_support::global_db_lock().lock().await;
+        let _db = install(&[
+            "CREATE TABLE encrypted_profiles (id INTEGER PRIMARY KEY AUTOINCREMENT, pin TEXT NOT NULL, address TEXT NOT NULL, backup_pin TEXT NULL)",
+        ])
+        .await;
+        let address = Address {
+            street: "Main".into(),
+            floor: 3,
+        };
+        let created = EncryptedProfile::create(EncryptedProfile {
+            pin: 1234,
+            address: address.clone(),
+            ..Default::default()
+        })
+        .await
+        .expect("create failed");
+        assert_eq!((created.pin, &created.address), (1234, &address));
+        assert_eq!(created.backup_pin, None);
+
+        let stored = Database::raw_json("SELECT pin, address, backup_pin FROM encrypted_profiles")
+            .await
+            .expect("reading the stored row should succeed");
+        assert_sealed(&stored[0]["pin"]);
+        assert_sealed(&stored[0]["address"]);
+        assert_eq!(stored[0]["backup_pin"], serde_json::Value::Null);
+
+        // `raw_as` only decodes the row: nothing runs after `FromQueryResult`.
+        let decoded: Vec<EncryptedProfile> = Database::raw_as("SELECT * FROM encrypted_profiles")
+            .await
+            .expect("decoding the row should succeed");
+        assert_eq!((decoded[0].pin, &decoded[0].address), (1234, &address));
+        assert!(
+            crate::internal::InternalModel::same_columns(&decoded[0], &created),
+            "the columns compare as plaintext"
+        );
+
+        EncryptedProfile::update_all()
+            .set("pin", 4321_u32)
+            .set("backup_pin", 7_u32)
+            .set(
+                "address",
+                serde_json::json!({ "street": "Side", "floor": 1 }),
+            )
+            .where_eq("id", created.id)
+            .execute()
+            .await
+            .expect("batch-setting values of the fields' types should succeed");
+        let updated = EncryptedProfile::find_or_fail(created.id)
+            .await
+            .expect("the updated row loads");
+        assert_eq!((updated.pin, updated.backup_pin), (4321, Some(7)));
+        assert_eq!(updated.address.street, "Side");
+        assert_sealed(
+            &Database::raw_json("SELECT pin FROM encrypted_profiles")
+                .await
+                .expect("reading the stored row should succeed")[0]["pin"],
+        );
+
+        for (field, value) in [("pin", crate::DbValue::from("4321")), ("address", 5.into())] {
+            let refused = EncryptedProfile::update_all()
+                .set(field, value)
+                .where_eq("id", created.id)
+                .execute()
+                .await
+                .expect_err(field);
+            assert!(refused.to_string().contains("cannot hold"), "{refused}");
+        }
 
         reset();
     }

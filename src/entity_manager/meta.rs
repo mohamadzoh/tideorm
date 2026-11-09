@@ -7,88 +7,8 @@ use crate::model::Model;
 
 use super::EntityManager;
 
-pub trait TideEntityManagerMeta {
-    fn tide_table_name() -> &'static str
-    where
-        Self: Sized;
-
-    fn tide_pk_key(&self) -> String;
-
-    /// Whether this entity's primary key is still the type's default, i.e. no
-    /// row has been inserted for it yet.
-    ///
-    /// [`Self::tide_pk_key`] is infallible and has no notion of "unsaved", so it
-    /// renders a default key as an ordinary string — `"0"` for an `i64`. Every
-    /// unsaved instance of a model therefore produces the *same* identity key,
-    /// and filing two of them in the identity map makes the second collide with
-    /// the first. Callers that key the map must skip an entity for which this
-    /// returns `true`: it has no identity to share yet.
-    ///
-    /// Defaults to `false` for hand-written implementations, which preserves the
-    /// previous behaviour for anyone not deriving `Model`.
-    fn tide_pk_is_new(&self) -> bool {
-        false
-    }
-
-    /// Tables a row of this model points at with a foreign key, so they have to
-    /// hold a row before this one can be inserted.
-    ///
-    /// Derived from the model's declared `belongs_to` relations. The flush
-    /// planner turns these into dependency edges and orders inserts
-    /// parent-first, deletes child-first. Only *declared* relations are
-    /// visible here: a bare foreign-key column with no relation attribute
-    /// contributes no edge, and a polymorphic (`MorphTo`) target has no
-    /// statically known table, so neither constrains the flush order.
-    ///
-    /// Defaults to empty for hand-written implementations, which then flush in
-    /// registration order within their operation kind.
-    fn tide_parent_tables() -> Vec<&'static str>
-    where
-        Self: Sized,
-    {
-        Vec::new()
-    }
-
-    /// Tables whose rows point back at this model with a foreign key, so they
-    /// can only be inserted once this one holds a row.
-    ///
-    /// Derived from the model's declared `has_one` and `has_many` relations;
-    /// see [`TideEntityManagerMeta::tide_parent_tables`] for what is and is not
-    /// visible. `has_many_through` contributes nothing because the pivot row is
-    /// written by relation sync, after both sides are saved.
-    fn tide_child_tables() -> Vec<&'static str>
-    where
-        Self: Sized,
-    {
-        Vec::new()
-    }
-
-    /// Each `(related table, foreign key, referenced column)` a declared
-    /// relation joins rows with: a row's `foreign key` holds the `referenced
-    /// column` of a row of the related table. The flush orders the rows of
-    /// one table by the ones whose related table is that table.
-    ///
-    /// Derived from `belongs_to`, `has_one`, `has_many` and the
-    /// self-referencing relations; empty for hand-written implementations.
-    fn tide_row_references() -> Vec<(&'static str, &'static str, &'static str)>
-    where
-        Self: Sized,
-    {
-        Vec::new()
-    }
-
-    fn tide_attach_entity_manager_database(&mut self, _database: &crate::database::Database) {}
-
-    /// Drop every relation's cached rows and load, keeping the relations
-    /// wired to this entity's keys: the identity map holds a row, not the
-    /// relations one copy of it loaded.
-    fn tide_unload_relations(&mut self) {}
-}
-
 #[doc(hidden)]
-pub trait TideEntityManagerSync:
-    TideEntityManagerMeta + Model + Clone + Send + Sync + 'static
-{
+pub trait TideEntityManagerSync: Model {
     fn tide_sync_entity_manager_relations<'a>(
         &'a mut self,
         entity_manager: &'a Arc<EntityManager>,
@@ -109,6 +29,22 @@ pub trait TideEntityManagerMergePersisted {
     }
 }
 
+/// A model an [`EntityManager`] can manage: every model the derive generates
+/// while the `entity-manager` feature is on. Generic code names this one
+/// bound to hand models to a manager.
+///
+/// ```
+/// use std::sync::Arc;
+/// use tideorm::prelude::*;
+///
+/// fn track<M: ManagedModel>(manager: &Arc<EntityManager>, model: M) -> Managed<M> {
+///     manager.persist(model)
+/// }
+/// ```
+pub trait ManagedModel: TideEntityManagerMergePersisted + TideEntityManagerSync {}
+
+impl<T: TideEntityManagerMergePersisted + TideEntityManagerSync> ManagedModel for T {}
+
 #[doc(hidden)]
 pub fn pk_to_entity_manager_key<T>(value: &T) -> Result<String>
 where
@@ -117,12 +53,11 @@ where
     serde_json::to_string(value).map_err(Error::from)
 }
 
-/// `model`'s identity key as a generated `tide_pk_key` and every relation
-/// wrapper's owner key write it, where nothing can fail: a key that does not
+/// `model`'s identity key as the identity maps file it and every relation
+/// wrapper's owner key writes it, where nothing can fail: a key that does not
 /// serialize falls back to the model's own rendering of it, which maps equal
 /// keys alike and holds " = ", so it never collides with a serialized key.
-#[doc(hidden)]
-pub fn __identity_key<M: Model>(model: &M) -> String {
+pub(crate) fn model_identity_key<M: Model>(model: &M) -> String {
     let primary_key = model.primary_key();
     pk_to_entity_manager_key(&primary_key).unwrap_or_else(|_| M::primary_key_display(&primary_key))
 }

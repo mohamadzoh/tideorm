@@ -12,11 +12,12 @@
 //! batch.
 
 use crate::error::Result;
+use crate::internal::Value;
 use crate::model::Model;
 use crate::query::QueryBuilder;
 
 use super::helpers::{
-    build_self_ref_tree_sql, owner_is_unsaved, require_scalar_relation_key, required_key, where_key,
+    build_self_ref_tree_sql, is_null_key, require_scalar_relation_key, required_key, where_key,
 };
 use super::state::{RelationState, relation_serde};
 
@@ -52,6 +53,7 @@ pub struct SelfRef<E: Model> {
 
 impl<E: Model> SelfRef<E> {
     /// Declare the two columns. Both name columns on the *same* table.
+    #[must_use]
     pub fn new(foreign_key: &'static str, local_key: &'static str) -> Self {
         Self {
             foreign_key,
@@ -63,16 +65,16 @@ impl<E: Model> SelfRef<E> {
     /// Supply this row's [`foreign_key`](Self::foreign_key) value, which is what
     /// the parent is looked up by.
     ///
-    /// A JSON `null` is treated as "no parent" and short-circuits every method
+    /// A NULL is treated as "no parent" and short-circuits every method
     /// to `Ok(None)` / `Ok(false)` without querying — the behaviour that makes a
     /// root row terminate cleanly. Leaving this unset entirely does the same.
     /// Must be a scalar; composite keys are rejected at load time.
-    pub fn with_fk_value(mut self, fk: serde_json::Value) -> Self {
-        self.state.key = Some(fk);
+    #[doc(hidden)]
+    pub fn with_fk_value(mut self, fk: impl Into<Value>) -> Self {
+        self.state.key = Some(fk.into());
         self
     }
 
-    #[cfg(feature = "entity-manager")]
     #[doc(hidden)]
     pub fn attach_query_database(&mut self, database: &crate::database::Database) {
         self.state.source.database = Some(database.clone());
@@ -94,7 +96,7 @@ impl<E: Model> SelfRef<E> {
     /// The query for the parent row, or `None` at a root.
     fn query(&self, context: &str) -> Result<Option<QueryBuilder<E>>> {
         match &self.state.key {
-            Some(fk) if !fk.is_null() => {
+            Some(fk) if !is_null_key(fk) => {
                 let fk = require_scalar_relation_key(fk, context)?;
                 Ok(Some(
                     self.state
@@ -151,10 +153,7 @@ impl<E: Model> SelfRef<E> {
         }
     }
 
-    /// The cached parent, if one is present. Never queries and never awaits.
-    pub fn get_cached(&self) -> Option<&E> {
-        self.state.cached().map(|model| &**model)
-    }
+    crate::relations::state::one_row_cache!(E);
 }
 
 impl<E: Model> Default for SelfRef<E> {
@@ -197,6 +196,7 @@ pub struct SelfRefMany<E: Model> {
 
 impl<E: Model> SelfRefMany<E> {
     /// Declare the two columns. Both name columns on the *same* table.
+    #[must_use]
     pub fn new(foreign_key: &'static str, local_key: &'static str) -> Self {
         Self {
             foreign_key,
@@ -206,17 +206,19 @@ impl<E: Model> SelfRefMany<E> {
     }
 
     /// Supply this row's [`local_key`](Self::local_key) value, which the
-    /// children's foreign key is matched against.
+    /// children's foreign key is matched against, and whether the row is new
+    /// (its `is_new()`), whose cached children carry over when saving it
+    /// rebuilds the relation.
     ///
-    /// Must be a scalar. Unlike [`SelfRef::with_fk_value`] there is no
+    /// Must be a scalar. Unlike `SelfRef::with_fk_value` there is no
     /// null-means-root short circuit here: leaving it unset makes every method
     /// error with "Parent primary key not set for relation".
-    pub fn with_parent_pk(mut self, pk: serde_json::Value) -> Self {
-        self.state.key = Some(pk);
+    #[doc(hidden)]
+    pub fn with_parent_pk(mut self, pk: impl Into<Value>, owner_is_new: bool) -> Self {
+        self.state.set_owner_key(pk.into(), owner_is_new);
         self
     }
 
-    #[cfg(feature = "entity-manager")]
     #[doc(hidden)]
     pub fn attach_query_database(&mut self, database: &crate::database::Database) {
         self.state.source.database = Some(database.clone());
@@ -229,11 +231,11 @@ impl<E: Model> SelfRefMany<E> {
             self.foreign_key == previous.foreign_key
                 && self.local_key == previous.local_key
                 && self.state.key == previous.state.key,
-            owner_is_unsaved(&previous.state.key),
+            previous.state.owner_is_new,
         );
     }
 
-    fn parent_key(&self, context: &str) -> Result<&serde_json::Value> {
+    fn parent_key(&self, context: &str) -> Result<&Value> {
         required_key(&self.state.key, "Parent primary key", context)
     }
 
@@ -280,13 +282,7 @@ impl<E: Model> SelfRefMany<E> {
         self.query("SelfRefMany::exists")?.exists().await
     }
 
-    /// The cached direct children, if populated. Never queries and never awaits.
-    ///
-    /// `Some(&[])` means "loaded, and this is a leaf"; `None` means nothing was
-    /// ever loaded.
-    pub fn get_cached(&self) -> Option<&[E]> {
-        self.state.cached().map(Vec::as_slice)
-    }
+    crate::relations::state::many_rows_cache!(E);
 
     /// Fetch the whole subtree below this row in one recursive-CTE query,
     /// stopping after `max_depth` levels.
@@ -318,7 +314,8 @@ impl<E: Model> SelfRefMany<E> {
             db.backend(),
         )?;
 
-        db.__raw_with_params::<E>(&sql, params).await
+        db.raw_models::<E>(&sql, params, crate::logging::EngineLog::On)
+            .await
     }
 }
 

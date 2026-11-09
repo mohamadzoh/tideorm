@@ -1,7 +1,5 @@
 //! Opt-in JPA-like entity manager and persistence-context support.
 
-#![allow(missing_docs)]
-
 mod managed;
 mod meta;
 mod save;
@@ -14,20 +12,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::RwLock;
 
+use crate::model::Model;
+
 pub use managed::{EntityState, Managed};
-pub use meta::{TideEntityManagerMergePersisted, TideEntityManagerMeta, TideEntityManagerSync};
+pub use meta::{ManagedModel, TideEntityManagerMergePersisted, TideEntityManagerSync};
 
 #[doc(hidden)]
-pub use meta::__identity_key;
-pub(crate) use meta::model_entity_manager_key;
-#[doc(hidden)]
 pub use meta::model_entity_manager_key as __model_entity_manager_key;
+pub(crate) use meta::{model_entity_manager_key, model_identity_key};
 pub(crate) use save::with_entity_manager_db;
 #[doc(hidden)]
-pub use save::{
-    __SyncOwner, __delete_detached_entities, __sync_has_many, __sync_has_many_through,
-    __sync_has_one, __sync_related_entity,
-};
+pub use save::{__SyncOwner, __sync_has_many, __sync_has_many_through, __sync_has_one};
 
 type IdentityKey = (TypeId, String);
 const MAX_FLUSH_PASSES: usize = 16;
@@ -45,12 +40,22 @@ impl std::fmt::Debug for EntityManager {
     }
 }
 
-#[doc(hidden)]
+/// A relation [`EntityManager::load`] can load: every relation wrapper a
+/// model declares implements it.
+///
+/// The relation's rows come from the manager's identity map when it holds
+/// them, so two relations reaching one row share its instance, and the
+/// manager records what the relation held, which a later
+/// [`save`](EntityManager::save) compares against.
 pub trait EntityManagerLoad {
+    /// What a load hands back: the cached row or rows, borrowed from the
+    /// relation.
     type Output<'a>
     where
         Self: 'a;
 
+    /// Load the relation through `entity_manager`; call
+    /// [`EntityManager::load`] rather than this.
     fn load_with_entity_manager<'a>(
         &'a mut self,
         entity_manager: &'a Arc<EntityManager>,
@@ -77,7 +82,7 @@ pub trait EntityManagerLoad {
 pub struct EntityManager {
     identity_map: Arc<RwLock<HashMap<IdentityKey, Arc<dyn Any + Send + Sync>>>>,
     /// Changed under the identity-map write lock when clear invalidates rollback snapshots.
-    identity_generation: AtomicU64,
+    identity_generation: Arc<AtomicU64>,
     managed_identity_map: RwLock<HashMap<IdentityKey, Arc<dyn Any + Send + Sync>>>,
     managed_entries: RwLock<Vec<Arc<dyn managed::ManagedOps>>>,
     /// Held by the flush or save running as this context's unit of work.
@@ -89,11 +94,13 @@ pub struct EntityManager {
 }
 
 impl EntityManager {
-    /// Create an empty context over `db`.
-    pub fn new(db: Arc<crate::database::Database>) -> Arc<Self> {
+    /// Create an empty context over `db`, a [`Database`](crate::database::Database)
+    /// or an `Arc` of one.
+    pub fn new(db: impl Into<Arc<crate::database::Database>>) -> Arc<Self> {
+        let db = db.into();
         Arc::new(Self {
             identity_map: Arc::new(RwLock::new(HashMap::new())),
-            identity_generation: AtomicU64::new(0),
+            identity_generation: Arc::new(AtomicU64::new(0)),
             managed_identity_map: RwLock::new(HashMap::new()),
             managed_entries: RwLock::new(Vec::new()),
             unit_of_work: futures_util::lock::Mutex::new(()),
@@ -112,9 +119,7 @@ impl EntityManager {
         pk: <T as crate::model::ModelMeta>::PrimaryKey,
     ) -> crate::error::Result<Option<Managed<T>>>
     where
-        T: TideEntityManagerMergePersisted + TideEntityManagerSync,
-        <<T as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
-            PartialEq,
+        T: ManagedModel,
     {
         let key = meta::pk_to_entity_manager_key(&pk)?;
         if let Some(existing) = self.get_managed_by_key::<T>(&key) {
@@ -138,7 +143,7 @@ impl EntityManager {
         pk: <T as crate::model::ModelMeta>::PrimaryKey,
     ) -> crate::error::Result<Option<T>>
     where
-        T: crate::model::Model + TideEntityManagerMeta,
+        T: crate::model::Model,
     {
         if let Some(cached) = self.get::<T>(&pk)? {
             return Ok(Some(cached));
@@ -146,7 +151,7 @@ impl EntityManager {
 
         let result = <T as crate::model::Model>::find_with(pk, self.database()).await?;
         match result {
-            Some(model) => Ok(Some(self.register(model).await)),
+            Some(model) => Ok(Some(self.register(model))),
             None => Ok(None),
         }
     }
@@ -157,19 +162,17 @@ impl EntityManager {
     /// manages is replaced in place, and its existing handle returned.
     pub fn persist<T>(self: &Arc<Self>, entity: T) -> Managed<T>
     where
-        T: TideEntityManagerMergePersisted + TideEntityManagerSync,
-        <<T as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
-            PartialEq,
+        T: ManagedModel,
     {
         let mut entity = entity;
-        entity.tide_attach_entity_manager_database(self.database());
+        entity.__attach_query_database(self.database());
 
         // Auto-increment models have no usable key until the insert flushes; a
         // client-assigned primary key can be tracked in the managed identity map
         // right away so a later `find_managed`/`merge` reuses this handle instead
-        // of opening a second one for the same row. `tide_pk_key` is the spelling
-        // every other path files the map under.
-        let key = (!entity.tide_pk_is_new()).then(|| entity.tide_pk_key());
+        // of opening a second one for the same row. `model_identity_key` is the
+        // spelling every other path files the map under.
+        let key = (!entity.is_new()).then(|| model_identity_key(&entity));
 
         let _registration = self.managed_registration.lock();
         // Persisting an entity this context was about to remove takes the
@@ -202,9 +205,7 @@ impl EntityManager {
         identity_key: Option<&str>,
     ) -> Managed<T>
     where
-        T: TideEntityManagerMergePersisted + TideEntityManagerSync,
-        <<T as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
-            PartialEq,
+        T: ManagedModel,
     {
         let entry = Arc::new(managed::ManagedEntry::new(
             entity,
@@ -228,12 +229,10 @@ impl EntityManager {
     /// [`persist`](Self::persist)ed instead.
     pub fn merge<T>(self: &Arc<Self>, entity: T) -> crate::error::Result<Managed<T>>
     where
-        T: TideEntityManagerMergePersisted + TideEntityManagerSync,
-        <<T as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
-            PartialEq,
+        T: ManagedModel,
     {
         let mut entity = entity;
-        entity.tide_attach_entity_manager_database(self.database());
+        entity.__attach_query_database(self.database());
 
         let Some(key) = meta::model_entity_manager_key(&entity)? else {
             return Ok(self.persist(entity));
@@ -377,29 +376,27 @@ impl EntityManager {
     /// saved aggregate.
     pub async fn save<T>(self: &Arc<Self>, entity: &T) -> crate::error::Result<T>
     where
-        T: TideEntityManagerMergePersisted + TideEntityManagerSync,
+        T: ManagedModel,
     {
         save::save_with_entity_manager(entity, self).await
     }
 
-    #[doc(hidden)]
+    /// The database this manager reads and writes through.
     pub fn database(&self) -> &crate::database::Database {
         self.db.as_ref()
     }
 
     fn attach_persisted_managed<T>(self: &Arc<Self>, entity: T) -> Managed<T>
     where
-        T: TideEntityManagerMergePersisted + TideEntityManagerSync,
-        <<T as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
-            PartialEq,
+        T: ManagedModel,
     {
         let mut entity = entity;
-        entity.tide_attach_entity_manager_database(self.database());
+        entity.__attach_query_database(self.database());
 
         let _registration = self.managed_registration.lock();
         // Another lookup of the same row finished first: its handle may hold
         // edits since, which the row as this lookup read it must not undo.
-        let key = entity.tide_pk_key();
+        let key = model_identity_key(&entity);
         if let Some(existing) = self.get_managed_by_key::<T>(&key) {
             return existing;
         }
@@ -415,7 +412,7 @@ impl EntityManager {
         // stop this newly attached handle from participating in later flushes.
         let manager = self.clone();
         let rollback_entry = managed.entry.clone();
-        self.on_rollback_of_read(move || {
+        self.on_rollback(move || {
             if manager
                 .get_managed_by_key::<T>(&key)
                 .is_some_and(|current| Arc::ptr_eq(&current.entry, &rollback_entry))
@@ -426,47 +423,51 @@ impl EntityManager {
         managed
     }
 
-    /// Run `undo` if the transaction of this manager's database that a read
-    /// just ran in does not commit; a read outside one is final, even inside
-    /// another database's transaction.
-    fn on_rollback_of_read(&self, undo: impl FnOnce() + Send + 'static) {
+    /// Run `undo` if the transaction of this manager's database that the
+    /// current work runs in does not commit; work outside one is final, even
+    /// inside another database's transaction.
+    fn on_rollback(&self, undo: impl FnOnce() + Send + 'static) {
         if let Ok(connection) = self.database().__get_connection() {
             connection.recording(|| crate::cache::undo_on_rollback(undo));
         }
     }
 
-    /// File `entity` in the identity map and return the instance the map holds
-    /// for its row — `entity` itself, unless the context already tracks that
-    /// row, in which case the tracked instance wins.
+    /// File a copy of `entity` in the identity map, without the relations it
+    /// loaded, and return the instance for its row — `entity` itself, unless
+    /// the context already tracks that row, in which case the tracked
+    /// instance wins.
     ///
     /// An entity with no primary key yet has no identity to share and is handed
     /// straight back.
-    pub async fn register<T>(&self, entity: T) -> T
+    pub fn register<T>(&self, entity: T) -> T
     where
-        T: TideEntityManagerMeta + Clone + Send + Sync + 'static,
+        T: Model,
     {
         let mut entity = entity;
-        entity.tide_attach_entity_manager_database(self.database());
+        entity.__attach_query_database(self.database());
 
-        // An unsaved entity has no identity to share. `tide_pk_key` renders its
+        // An unsaved entity has no identity to share. `model_identity_key` renders its
         // default primary key as an ordinary string, so every new instance of a
         // model keys to the same thing — file two of them and the second gets
         // handed the first one back, which silently drops it and inserts the
         // first twice. Hand it straight back instead; the flush files it under a
         // real key once the insert assigns one.
-        if entity.tide_pk_is_new() {
+        if entity.is_new() {
             return entity;
         }
 
-        let key = state::identity_key::<T>(entity.tide_pk_key());
+        let key = state::identity_key::<T>(model_identity_key(&entity));
 
         if let Some(existing) = self.get_by_key::<T>(&key) {
             return existing;
         }
 
         // Copied before taking the write lock, which every reader of the map
-        // waits on.
-        let stored: Arc<dyn Any + Send + Sync> = Arc::new(entity.clone());
+        // waits on, and without its relations, as `put` files a copy.
+        let mut stored = entity.clone();
+        stored.__unload_relations();
+        stored.__attach_query_database(self.database());
+        let stored: Arc<dyn Any + Send + Sync> = Arc::new(stored);
         let mut map = self.identity_map.write();
         if let Some(existing) = map.get(&key).and_then(|value| value.downcast_ref::<T>()) {
             return existing.clone();
@@ -475,7 +476,7 @@ impl EntityManager {
         map.insert(key.clone(), stored.clone());
         drop(map);
         let identity_map = self.identity_map.clone();
-        self.on_rollback_of_read(move || {
+        self.on_rollback(move || {
             let mut map = identity_map.write();
             if map
                 .get(&key)

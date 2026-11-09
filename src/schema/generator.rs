@@ -1,5 +1,7 @@
+use std::fmt::Write as _;
+
 use crate::config::DatabaseType;
-use crate::internal::sql_safety::{format_identifier_reference, quote_ident};
+use crate::internal::sql_safety::quote_qualified;
 use crate::migration::ColumnType;
 use crate::migration::ddl::{self, ColumnDefinition};
 
@@ -21,8 +23,15 @@ impl SchemaGenerator {
     }
 
     /// Add a table schema
-    pub fn add_table(&mut self, schema: TableSchema) {
+    pub fn add_table(&mut self, schema: TableSchema) -> &mut Self {
         self.tables.push(schema);
+        self
+    }
+
+    /// Add the table of the model `M`, typed as schema sync would create it
+    /// on this generator's backend.
+    pub fn add_model<M: crate::sync::SyncModel>(&mut self) -> &mut Self {
+        self.add_table(M::sync_schema().table_schema(self.database_type))
     }
 
     /// Generate complete SQL schema
@@ -30,11 +39,12 @@ impl SchemaGenerator {
         let mut sql = String::new();
 
         sql.push_str("-- TideORM Generated Schema\n");
-        sql.push_str(&format!("-- Database: {:?}\n", self.database_type));
-        sql.push_str(&format!(
-            "-- Generated at: {}\n\n",
+        let _ = writeln!(sql, "-- Database: {:?}", self.database_type);
+        let _ = writeln!(
+            sql,
+            "-- Generated at: {}\n",
             chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
-        ));
+        );
 
         for table in &self.tables {
             sql.push_str(&self.generate_create_table(table));
@@ -82,29 +92,26 @@ impl SchemaGenerator {
                     index.unique,
                     true,
                 );
-                format!("{};\n", statement)
+                statement + ";\n"
             })
             .collect()
     }
 
     fn table_reference(&self, table: &TableSchema) -> String {
         if let Some(schema_name) = &table.schema_name {
-            return format!(
-                "{}.{}",
-                quote_ident(self.database_type, schema_name),
-                quote_ident(self.database_type, &table.name)
-            );
+            return quote_qualified(self.database_type, Some(schema_name), &table.name);
         }
 
-        format_identifier_reference(self.database_type, &table.name)
-            .unwrap_or_else(|| quote_ident(self.database_type, &table.name))
+        crate::query::db_sql::format_column(self.database_type, &table.name)
     }
 }
 
 /// The DDL column a declared column becomes, its SQL type used verbatim.
 fn column_definition(column: &ColumnSchema) -> ColumnDefinition {
-    let mut definition =
-        ColumnDefinition::new(&column.name, ColumnType::Custom(column.sql_type.clone()));
+    let mut definition = ColumnDefinition::new(
+        &column.name,
+        ColumnType::Custom(column.sql_type.clone().into()),
+    );
     definition.nullable = column.nullable;
     definition.default = column.default.clone();
     definition.primary_key = column.primary_key;

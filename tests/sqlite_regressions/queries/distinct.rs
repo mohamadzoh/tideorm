@@ -39,7 +39,7 @@ async fn distinct_pluck_uses_database_equality_for_every_projection_shape() {
             let base = Name::query_with(&db).where_gt("id", 0);
             let query = match shape {
                 0 => base.select_raw("id AS extra"),
-                1 => base.row_number("extra", None, "id", Order::Asc),
+                1 => base.row_number("extra", (), "id", Order::Asc),
                 2 => base.select_raw("row_number() OVER (ORDER BY id) AS extra"),
                 3 => base.select_subquery(
                     Name::query_with(&db)

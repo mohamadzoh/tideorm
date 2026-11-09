@@ -12,7 +12,7 @@ pub(super) fn bench_or_vs_in_comparison(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 let _results = OrBenchUser::query()
-                    .or_where(|q| {
+                    .where_any(|q| {
                         q.where_eq("role", "admin")
                             .where_eq("role", "moderator")
                             .where_eq("role", "editor")
@@ -42,7 +42,7 @@ pub(super) fn bench_or_vs_in_comparison(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 let _results = OrBenchUser::query()
-                    .or_where(|q| {
+                    .where_any(|q| {
                         q.where_eq("role", "admin")
                             .where_like("email", "%@admin.com")
                             .where_gt("age", 40)

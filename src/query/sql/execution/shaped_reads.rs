@@ -32,6 +32,26 @@ impl<M> Paginated<M> {
     pub fn has_next_page(&self) -> bool {
         self.page < self.last_page()
     }
+
+    /// Whether a page precedes this one.
+    pub fn has_previous_page(&self) -> bool {
+        self.page > 1
+    }
+
+    /// This page with each item turned into another value, its counts kept:
+    /// models into response types, say.
+    ///
+    /// ```ignore
+    /// let page: Paginated<UserView> = User::query().paginate(1, 20).await?.map(UserView::from);
+    /// ```
+    pub fn map<U>(self, f: impl FnMut(M) -> U) -> Paginated<U> {
+        Paginated {
+            items: self.items.into_iter().map(f).collect(),
+            total: self.total,
+            page: self.page,
+            per_page: self.per_page,
+        }
+    }
 }
 
 impl<M: serde::Serialize> serde::Serialize for Paginated<M> {
@@ -195,7 +215,12 @@ impl<M: Model> QueryBuilder<M> {
 
     /// One column of every matching row, read as `T`, in the query's order.
     ///
+    /// A typed column reads as its field's type, so it needs no annotation;
+    /// a column named by a string reads as the type you ask for (see
+    /// [`ColumnRead`](crate::columns::ColumnRead)).
+    ///
     /// ```ignore
+    /// let ids = User::query().where_eq(User::ACTIVE, true).pluck(User::ID).await?; // Vec<i64>
     /// let emails: Vec<String> = User::query().where_eq("active", true).pluck("email").await?;
     /// ```
     ///
@@ -218,14 +243,14 @@ impl<M: Model> QueryBuilder<M> {
     /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
     /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User,)>().sync(true).connect().await?;
     /// # Database::execute("INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1)").await?;
-    /// let result = User::query().where_eq(User::ID, 1).pluck::<String>(User::NAME).await?;
+    /// let result = User::query().where_eq(User::ID, 1).pluck(User::NAME).await?;
     /// # Ok::<(), tideorm::Error>(())
     /// # }).unwrap();
     /// # }
     /// ```
     pub async fn pluck<T: serde::de::DeserializeOwned>(
         self,
-        column: impl crate::columns::IntoColumnName,
+        column: impl crate::columns::ColumnRead<T>,
     ) -> Result<Vec<T>> {
         let column = Self::own_column(&column);
         let union_distinct = (!self.clauses.unions.is_empty()).then(|| self.is_distinct());
@@ -308,7 +333,7 @@ impl<M: Model> QueryBuilder<M> {
         column: &str,
         output: &str,
     ) -> Result<(Vec<serde_json::Value>, String)> {
-        let db_type = self.db_type_for_sql();
+        let db_type = self.db_type_for_sql()?;
         let outputs = self.projection_outputs();
         let group = db_sql::unused_name("tideorm_pluck_group", |name| {
             outputs
@@ -326,44 +351,35 @@ impl<M: Model> QueryBuilder<M> {
             ));
             // The rank is a function of the selected scalar, so it cannot
             // split otherwise equal DISTINCT rows or alter their ordering.
-            ranked.build_select_sql_with_params_for_db(db_type)
+            ranked.build_select_sql_with_params_for_db(db_type)?
         } else {
             // Rank the complete compound result, not each UNION arm. Keep
             // its projection and parameter order intact in the derived table.
-            let (inner_sql, params) = self.build_select_sql_with_params_for_db(db_type);
-            let mut sql = db_sql::select_from_derived(
-                db_type,
-                &format!(
+            let mut select = db_sql::select_from_derived(
+                format!(
                     "*, DENSE_RANK() OVER (ORDER BY {}) AS {quoted_group}",
                     db_sql::quote_ident(db_type, output),
                 ),
-                &inner_sql,
+                self.select_statement(db_type)?,
                 "tideorm_pluck_rows",
             );
             // A window may reorder its input; repeat the compound query's
             // ordering on the outer SELECT, which sees output names only.
-            let ordering = self
-                .clauses
-                .order_by
-                .iter()
-                .map(|(column, direction)| {
+            for (column, direction) in &self.clauses.order_by {
+                let (expression, direction) =
                     match crate::query::builder::raw_order_by_expression(column) {
-                        Some(raw) => {
-                            let expression =
-                                self.raw_order_output(raw, &outputs, db_type).map_or_else(
-                                    || raw.to_string(),
-                                    |output| db_sql::quote_ident(db_type, &output),
-                                );
-                            format!("{expression} {}", direction.as_str())
-                        }
-                        None => self.format_order_by_for_db(db_type, column, *direction),
-                    }
-                })
-                .collect::<Vec<_>>();
-            if !ordering.is_empty() {
-                sql.push_str(&format!(" ORDER BY {}", ordering.join(", ")));
+                        Some(raw) => (
+                            self.raw_order_output(raw, &outputs, db_type).map_or_else(
+                                || raw.to_string(),
+                                |output| db_sql::quote_ident(db_type, &output),
+                            ),
+                            *direction,
+                        ),
+                        None => self.order_term(db_type, column, *direction),
+                    };
+                select.order_by_expr(Expr::cust(expression), direction.to_builder());
             }
-            (sql, params)
+            db_sql::built(db_type, &select)?
         };
         Ok((self.fetch_json(&sql, params).await?, group))
     }
@@ -402,9 +418,11 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// The column of the first matching row, read as `T`; `None` when no row
-    /// matches.
+    /// matches. A typed column reads as its field's type, as in
+    /// [`pluck()`](Self::pluck).
     ///
     /// ```ignore
+    /// let newest = Post::query().latest().value(Post::TITLE).await?; // Option<String>
     /// let newest: Option<String> = Post::query().latest().value("title").await?;
     /// ```
     ///
@@ -419,14 +437,14 @@ impl<M: Model> QueryBuilder<M> {
     /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
     /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User,)>().sync(true).connect().await?;
     /// # Database::execute("INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1)").await?;
-    /// let result = User::query().where_eq(User::ID, 1).value::<String>(User::NAME).await?;
+    /// let result = User::query().where_eq(User::ID, 1).value(User::NAME).await?;
     /// # Ok::<(), tideorm::Error>(())
     /// # }).unwrap();
     /// # }
     /// ```
     pub async fn value<T: serde::de::DeserializeOwned>(
         self,
-        column: impl crate::columns::IntoColumnName,
+        column: impl crate::columns::ColumnRead<T>,
     ) -> Result<Option<T>> {
         Ok(self.limit(1).pluck(column).await?.into_iter().next())
     }

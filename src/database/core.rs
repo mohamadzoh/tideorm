@@ -53,7 +53,7 @@ impl Database {
         }
     }
 
-    pub(super) fn from_handle(connection: ConnectionRef) -> Self {
+    pub(crate) fn from_handle(connection: ConnectionRef) -> Self {
         Self {
             inner: DatabaseInner::Handle(connection),
         }
@@ -69,20 +69,49 @@ impl Database {
         Self::from_handle(ConnectionRef::Database(Arc::new(inner)))
     }
 
-    /// A handle on `connection`, another pool reaching the database
-    /// `original` does, under `original`'s identity: a statement through a
-    /// handle on `original` joins a transaction opened on it, as one opened
-    /// on `original` itself.
+    /// A handle on one connection of its own to this handle's database,
+    /// opened with its pool's settings but outside the pool, so it takes none
+    /// of the pool's connections. What a statement sets for its session (a
+    /// `SET`, a `PRAGMA`, `GET_LOCK`) holds for every later statement through
+    /// the handle, which a pool, handing each statement whichever connection
+    /// is free, cannot promise. Transactions opened on it run on that
+    /// connection too.
+    ///
+    /// The connection closes with [`close`](Self::close) or once the last
+    /// clone of the handle drops, and is never replaced: once it is lost, the
+    /// handle's statements fail. On a session, this opens another one. Fails
+    /// on a handle to a transaction, which belongs to its scope, and on a
+    /// private SQLite database (in memory without a shared cache, or a
+    /// temporary one), where a new connection would open an empty database.
+    pub async fn pin_session(&self) -> Result<Database> {
+        self.session_beside(false).await
+    }
+
+    /// [`pin_session`](Self::pin_session) under this handle's identity: a
+    /// statement through a handle on this database joins a transaction opened
+    /// on the session, as one opened on the pool itself.
     #[cfg(feature = "sqlite")]
-    pub(crate) fn sharing_identity_of(
-        original: &Arc<InternalConnection>,
-        connection: crate::internal::OrmConnection,
-    ) -> Self {
-        let mut inner = InternalConnection::new(connection);
-        inner.cache_scope = original.cache_scope.clone();
-        let inner = Arc::new(inner);
-        super::state::alias_connection_identity(&inner, original);
-        Self::from_handle(ConnectionRef::Database(inner))
+    pub(crate) async fn pin_session_sharing_identity(&self) -> Result<Database> {
+        self.session_beside(true).await
+    }
+
+    /// A session on this handle's database, sharing its query-cache scope,
+    /// and its identity when `shared`.
+    async fn session_beside(&self, shared: bool) -> Result<Database> {
+        let pool = self.current_inner()?;
+        let session = if shared {
+            pool.connection().pin_session_sharing_identity().await
+        } else {
+            pool.connection().pin_session().await
+        }
+        .map_err(crate::internal::translate_connection_error)?;
+        let mut inner = InternalConnection::new(session);
+        inner.cache_scope = pool.cache_scope.clone();
+        #[cfg(feature = "sqlite")]
+        {
+            inner.sqlite_file = pool.sqlite_file.clone();
+        }
+        Ok(Self::from_internal_connection(inner))
     }
 
     /// The connection statements issued through this handle run on: the
@@ -93,15 +122,8 @@ impl Database {
     /// joined inside it.
     #[doc(hidden)]
     pub fn __get_connection(&self) -> Result<ConnectionRef> {
-        let own = self.own_handle();
-        let identity = match &own {
-            Ok(ConnectionRef::Database(inner)) => Some(super::state::connection_identity(inner)),
-            _ => None,
-        };
-        match super::state::enclosing_transaction(identity) {
-            Some(transaction) => Ok(transaction),
-            None => own,
-        }
+        let own = self.own_handle()?;
+        Ok(super::state::enclosing_transaction(own.identity()).unwrap_or(own))
     }
 
     /// The connection stored in `self`, ignoring any ambient scope.
@@ -124,6 +146,15 @@ impl Database {
         }
     }
 
+    /// A handle on the pool behind this one: this handle's own for a pool or
+    /// a session, the one its transaction was begun on for a transaction's,
+    /// whose own connection belongs to the transaction's scope.
+    pub(crate) fn pool_handle(&self) -> Result<Database> {
+        Ok(Self::from_handle(ConnectionRef::Database(Arc::clone(
+            self.own_handle()?.pool(),
+        ))))
+    }
+
     pub(super) fn is_connected(&self) -> bool {
         match &self.inner {
             DatabaseInner::Handle(_) => true,
@@ -144,15 +175,24 @@ impl Database {
         Self::set_global(db)
     }
 
+    /// The database a TideORM call that names no handle runs on here: the
+    /// enclosing transaction's, else [`scope`](Self::scope)'s, else the
+    /// global one. `Database::current()?.atomically(..)` opens a transaction
+    /// on it, a savepoint inside an enclosing transaction.
+    ///
+    /// Inside a transaction this is the transaction's handle: drop it before
+    /// the transaction ends, or the commit fails with "transaction handle
+    /// leaked outside the transaction scope". Fails as
+    /// [`require_db`](crate::require_db) does when there is no database.
+    pub fn current() -> Result<Self> {
+        super::__current_db()
+    }
+
     /// Set an existing database connection as the global connection
     pub fn set_global(db: Self) -> Result<&'static Self> {
-        let inner = db.current_inner()?;
-        if inner.is_mariadb() {
-            crate::config::note_detected_mariadb();
-        }
-        set_global_connection(Some(inner));
+        set_global_connection(Some(db.current_inner()?));
         #[cfg(feature = "dirty-tracking")]
-        crate::model::__clear_dirty_snapshots();
+        crate::model::clear_dirty_snapshots();
         Ok(global_db_handle())
     }
 
@@ -160,12 +200,29 @@ impl Database {
     pub fn reset_global() {
         set_global_connection(None);
         #[cfg(feature = "dirty-tracking")]
-        crate::model::__clear_dirty_snapshots();
+        crate::model::clear_dirty_snapshots();
     }
 
     /// Synchronize database schema with registered models
     pub async fn sync(&self) -> Result<()> {
         crate::sync::sync_database(self).await
+    }
+
+    /// Close the connection pool behind this handle, or its session's
+    /// connection ([`pin_session`](Self::pin_session)).
+    ///
+    /// Waits for checked-out connections to come back, then closes every
+    /// connection, so a process can shut down cleanly (and SQLite releases
+    /// its database file). Every clone of the handle shares the pool, so
+    /// statements on any of them fail with a connection error afterwards; on
+    /// the global handle, [`Database::reset_global`] also forgets the closed
+    /// pool. Fails on a handle to a transaction, which belongs to its scope.
+    pub async fn close(&self) -> Result<()> {
+        self.current_inner()?
+            .connection()
+            .close_by_ref()
+            .await
+            .map_err(crate::internal::translate_connection_error)
     }
 
     /// Get the raw internal connection (for internal use only)
@@ -179,10 +236,12 @@ impl Database {
     /// The handle's own connection is authoritative: a pool on a
     /// MySQL-protocol server asks it whether it is MariaDB when it opens, and
     /// a transaction carries its pool's answer. The configured type is only a
-    /// fallback when there is no usable handle at all.
+    /// fallback when there is no usable handle at all, and with none of those
+    /// either this answers `Postgres`; [`Database::try_backend`] reports that
+    /// case as an error instead.
     pub fn backend(&self) -> crate::config::DatabaseType {
         match self.own_handle() {
-            Ok(handle) => handle.database_type(),
+            Ok(handle) => handle.backend(),
             Err(err) => crate::config::TideConfig::get_database_type().unwrap_or_else(|| {
                 tide_warn!(
                     "Unable to inspect database backend for disconnected handle: {}. Defaulting to Postgres",
@@ -193,20 +252,23 @@ impl Database {
         }
     }
 
+    /// Get the database backend type, or the connection error of a handle
+    /// that has no connection.
+    ///
+    /// [`Database::backend`] without its guess: a disconnected handle is an
+    /// error here, even when `TideConfig` declares a type.
+    pub fn try_backend(&self) -> Result<crate::config::DatabaseType> {
+        Ok(self.own_handle()?.backend())
+    }
+
     /// The backend of the connection this handle's statements run on: the
     /// enclosing transaction's when there is one, since a handle used inside a
     /// transaction executes on it.
     pub(crate) fn execution_backend(&self) -> crate::config::DatabaseType {
         match self.__get_connection() {
-            Ok(connection) => connection.database_type(),
+            Ok(connection) => connection.backend(),
             Err(_) => self.backend(),
         }
-    }
-
-    /// Get TideORM's runtime backend identifier (for internal use only)
-    #[doc(hidden)]
-    pub fn __internal_backend(&self) -> Result<crate::internal::Backend> {
-        Ok(self.own_handle()?.backend())
     }
 }
 

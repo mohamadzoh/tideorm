@@ -2,7 +2,7 @@
 //! composed queries refuse operands bound to another one.
 
 use crate::fixtures::{
-    ChunkProjection, User, chunk_projection_database, memory_database, users_and_posts,
+    ChunkProjection, TempFile, User, chunk_projection_database, memory_database, users_and_posts,
 };
 use serde_json::json;
 use std::time::Duration;
@@ -79,19 +79,17 @@ async fn nested_relations_between_models_keep_the_explicit_database() {
         .unwrap();
     assert_eq!(ids, vec![2]);
     // Unpinned queries inside a database transaction still use that scope.
-    db.transaction(|_| {
-        Box::pin(async {
-            let ids = Doc::query()
-                .where_has("doc_id", "id", |q: QueryBuilder<Child>| {
-                    q.where_has("id", "doc_id", |q: QueryBuilder<Doc>| {
-                        q.where_json_contains("doc", json!({"a":1}))
-                    })
+    db.transaction(async |_| {
+        let ids = Doc::query()
+            .where_has("doc_id", "id", |q: QueryBuilder<Child>| {
+                q.where_has("id", "doc_id", |q: QueryBuilder<Doc>| {
+                    q.where_json_contains("doc", json!({"a":1}))
                 })
-                .pluck::<i64>("id")
-                .await?;
-            assert_eq!(ids, vec![1]);
-            Ok(())
-        })
+            })
+            .pluck::<i64>("id")
+            .await?;
+        assert_eq!(ids, vec![1]);
+        Ok(())
     })
     .await
     .unwrap();
@@ -120,17 +118,15 @@ async fn relations_keep_the_read_database_including_cache_and_transactions() {
     assert_eq!(user.posts.load().await.unwrap()[0].id, 10);
     // A different pool's ambient transaction cannot redirect the relation.
     global
-        .transaction(move |_| {
-            Box::pin(async move {
-                assert_eq!(user.posts.load().await?[0].id, 10);
-                Ok(())
-            })
+        .transaction(async move |_| {
+            assert_eq!(user.posts.load().await?[0].id, 10);
+            Ok(())
         })
         .await
         .unwrap();
     // Returned relations must retain a pool, not keep the transaction alive.
     let user = tenant
-        .transaction(|_| Box::pin(async { User::query().first_or_fail().await }))
+        .transaction(async |_| User::query().first_or_fail().await)
         .await
         .unwrap();
     assert_eq!(user.posts.load().await.unwrap()[0].id, 10);
@@ -150,10 +146,7 @@ async fn ranked_search_relations_keep_the_read_database() {
         .await
         .unwrap();
     Database::set_global(tenant.clone()).unwrap();
-    let ranked = User::search(&["name"], "tenant")
-        .get_ranked()
-        .await
-        .unwrap();
+    let ranked = User::search(["name"], "tenant").get_ranked().await.unwrap();
     assert_eq!(ranked.len(), 1);
     let global = users_and_posts("global", 20).await;
     Database::set_global(global).unwrap();
@@ -179,13 +172,17 @@ async fn read_and_written_rows_keep_their_database() {
         ("all", User::all().await.unwrap().remove(0)),
         ("first", User::first().await.unwrap().unwrap()),
         ("last", User::last().await.unwrap().unwrap()),
-        ("paginate", User::paginate(1, 10).await.unwrap().remove(0)),
+        (
+            "paginate",
+            User::paginate(1, 10).await.unwrap().items.remove(0),
+        ),
         (
             "paginate in a transaction",
             tenant
-                .transaction(|_| Box::pin(async { User::paginate(1, 10).await }))
+                .transaction(async |_| User::paginate(1, 10).await)
                 .await
                 .unwrap()
+                .items
                 .remove(0),
         ),
         (
@@ -195,7 +192,7 @@ async fn read_and_written_rows_keep_their_database() {
         (
             "upsert updating nothing",
             User::on_conflict(vec!["id"])
-                .update_columns(vec![])
+                .do_nothing()
                 .insert(user(1))
                 .await
                 .unwrap(),
@@ -203,9 +200,7 @@ async fn read_and_written_rows_keep_their_database() {
         (
             "upsert in a transaction",
             tenant
-                .transaction(move |_| {
-                    Box::pin(async move { User::on_conflict(vec!["id"]).insert(user(1)).await })
-                })
+                .transaction(async move |_| User::on_conflict(vec!["id"]).insert(user(1)).await)
                 .await
                 .unwrap(),
         ),
@@ -220,9 +215,7 @@ async fn read_and_written_rows_keep_their_database() {
     }
     tenant.exec_raw("DELETE FROM review_users").await.unwrap();
     let mut inserted = tenant
-        .transaction(move |_| {
-            Box::pin(async move { User::insert_all(vec![user(1), user(2)]).await })
-        })
+        .transaction(async move |_| User::insert_all(vec![user(1), user(2)]).await)
         .await
         .unwrap();
     rows.push(("batch insert in a transaction", inserted.remove(0)));
@@ -286,20 +279,18 @@ async fn composed_queries_reject_other_databases_before_mutation() {
             .is_err()
     );
     let inside = a.clone();
-    a.transaction(|_| {
-        Box::pin(async move {
-            assert_eq!(
-                ChunkProjection::query_with(&inside)
-                    .where_in_subquery(
-                        "id",
-                        ChunkProjection::query_with(&inside).select(vec!["id"])
-                    )
-                    .count()
-                    .await?,
-                2
-            );
-            Ok(())
-        })
+    a.transaction(async move |_| {
+        assert_eq!(
+            ChunkProjection::query_with(&inside)
+                .where_in_subquery(
+                    "id",
+                    ChunkProjection::query_with(&inside).select(vec!["id"])
+                )
+                .count()
+                .await?,
+            2
+        );
+        Ok(())
     })
     .await
     .unwrap();
@@ -351,14 +342,203 @@ async fn an_in_memory_pool_keeps_its_database_and_pool_sizes_are_checked() {
             .url("sqlite::memory:")
             .min_connections(3)
             .max_connections(2),
-        Database::builder()
-            .url("sqlite::memory:?cache=private")
-            .max_connections(2),
     ] {
         let error = builder.build().await.unwrap_err();
         assert!(
             matches!(error, tideorm::Error::Configuration { .. }),
             "{error:?}"
         );
+    }
+    // The driver refuses a pool of several connections to a database each
+    // connection would open privately: a temporary one has no name to share.
+    for builder in [
+        Database::builder()
+            .url("sqlite::memory:?cache=private")
+            .max_connections(2),
+        Database::builder()
+            .url("sqlite://?mode=memory")
+            .min_connections(2),
+        Database::builder().url("sqlite://").max_connections(2),
+    ] {
+        let error = builder.build().await.unwrap_err();
+        assert!(
+            matches!(error, tideorm::Error::Connection { .. }),
+            "{error:?}"
+        );
+        assert_eq!(
+            error.failure_kind(),
+            tideorm::error::DbFailureKind::InvalidConfiguration,
+            "{error:?}"
+        );
+    }
+}
+
+/// The builder takes the driver's own options, which name settings a URL
+/// does not; the pool is sized over them as over a URL's.
+#[tokio::test]
+async fn the_builder_connects_with_the_drivers_options() {
+    let file = TempFile::new("typed-options", "sqlite");
+    let db = Database::builder()
+        .sqlite_options(
+            SqliteConnectOptions::new()
+                .filename(&*file)
+                .create_if_missing(true)
+                .journal_mode(SqliteJournalMode::Wal)
+                .busy_timeout(Duration::from_millis(1234))
+                .statement_cache_capacity(7),
+        )
+        .max_connections(2)
+        .build()
+        .await
+        .unwrap();
+    let rows = db
+        .query_raw_json("SELECT * FROM pragma_journal_mode, pragma_busy_timeout")
+        .await
+        .unwrap();
+    assert_eq!(rows, [json!({"journal_mode": "wal", "timeout": 1234})]);
+
+    let error = Database::builder()
+        .sqlite_options(SqliteConnectOptions::new())
+        .max_connections(2)
+        .build()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.failure_kind(),
+        tideorm::error::DbFailureKind::InvalidConfiguration,
+        "a temporary database is private to its connection: {error:?}"
+    );
+    db.close().await.unwrap();
+}
+
+/// `raw_as` reads rows into a `FromQueryResult` struct, `try_backend` names
+/// the backend without panicking, and a closed pool refuses statements.
+#[tokio::test]
+async fn raw_rows_read_as_any_type_and_a_closed_pool_refuses_statements() {
+    #[derive(FromQueryResult, Debug, PartialEq)]
+    struct PostCount {
+        name: String,
+        posts: i64,
+    }
+
+    #[derive(FromQueryResult, Debug, PartialEq)]
+    struct Title {
+        title: String,
+        r#type: Option<String>,
+    }
+
+    let db = users_and_posts("tenant", 10).await;
+    let counts: Vec<PostCount> = db
+        .query_raw_as(
+            "SELECT u.name, COUNT(p.id) AS posts FROM review_users u \
+             LEFT JOIN review_posts p ON p.user_id = u.id GROUP BY u.name",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        counts,
+        vec![PostCount {
+            name: "tenant".into(),
+            posts: 1
+        }]
+    );
+    // Digits in text stay text, and NULL reads as `None`.
+    let titles: Vec<Title> = db
+        .query_raw_as_with_params(
+            "SELECT '00123' AS title, NULL AS type FROM review_posts WHERE id = ?",
+            [10_i64.into()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        titles,
+        vec![Title {
+            title: "00123".into(),
+            r#type: None
+        }]
+    );
+    let error = db
+        .query_raw_as::<PostCount>("SELECT name FROM review_users")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("raw_as()"), "{error}");
+    // The associated form reads the ambient database.
+    let scoped: Vec<PostCount> = db
+        .scope(Database::raw_as(
+            "SELECT name, 0 AS posts FROM review_users",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(scoped.len(), 1);
+
+    assert_eq!(db.try_backend().unwrap(), DatabaseType::SQLite);
+    db.close().await.unwrap();
+    assert!(db.exec_raw("SELECT 1").await.is_err());
+}
+
+/// A pinned session keeps what its statements set for its connection, runs
+/// its transactions there, and is a database of its own: a handle on the
+/// pool does not join its transaction.
+#[tokio::test]
+async fn a_pinned_session_keeps_its_connection_settings() {
+    let (db, _file) = crate::fixtures::file_database("pinned-session").await;
+    let session = db.pin_session().await.unwrap();
+    session.exec_raw("PRAGMA foreign_keys = OFF").await.unwrap();
+    let enforced = |db: Database| async move {
+        db.query_raw_json("PRAGMA foreign_keys").await.unwrap()[0]["foreign_keys"].as_i64()
+    };
+    assert_eq!(enforced(session.clone()).await, Some(0));
+    assert_eq!(enforced(db.clone()).await, Some(1));
+
+    let pool = db.clone();
+    let (inside, beside) = session
+        .transaction(async move |_| {
+            let inside = Database::raw_json("PRAGMA foreign_keys").await?;
+            let beside = pool.query_raw_json("PRAGMA foreign_keys").await?;
+            Ok((
+                inside[0]["foreign_keys"].as_i64(),
+                beside[0]["foreign_keys"].as_i64(),
+            ))
+        })
+        .await
+        .unwrap();
+    assert_eq!((inside, beside), (Some(0), Some(1)));
+
+    session.close().await.unwrap();
+    assert!(session.exec_raw("SELECT 1").await.is_err());
+    assert_eq!(enforced(db).await, Some(1));
+}
+
+#[tokio::test]
+async fn the_driver_keeps_a_parameterized_statement_prepared_for_reuse() {
+    let db = memory_database("").await;
+    let select = |id: i64| db.query_raw_json_with_params("SELECT ? AS id", [DbValue::from(id)]);
+    let before = db.cached_statements().await.unwrap();
+    select(1).await.unwrap();
+    let prepared = db.cached_statements().await.unwrap();
+    assert!(prepared > before, "{before} -> {prepared}");
+    select(2).await.unwrap();
+    select(3).await.unwrap();
+    assert_eq!(db.cached_statements().await.unwrap(), prepared);
+}
+
+/// A connection keeps at most `statement_cache_capacity` statements prepared,
+/// and none with 0.
+#[tokio::test]
+async fn the_statement_cache_keeps_at_most_its_capacity() {
+    for capacity in [0, 1] {
+        let db = Database::builder()
+            .url("sqlite::memory:")
+            .max_connections(1)
+            .statement_cache_capacity(capacity)
+            .build()
+            .await
+            .unwrap();
+        for sql in ["SELECT ? AS a", "SELECT ? AS b"] {
+            db.query_raw_json_with_params(sql, [DbValue::from(1_i64)])
+                .await
+                .unwrap();
+        }
+        assert_eq!(db.cached_statements().await.unwrap(), capacity);
     }
 }

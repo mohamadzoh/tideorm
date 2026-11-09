@@ -5,8 +5,7 @@ use crate::context::BuildContext;
 use crate::parse::{ModelField, RelationKind};
 
 /// For each relation, the statements that rebuild its wrapper from the
-/// model's own fields and keep the runtime state of the wrapper it replaces:
-/// `previous`'s when there is one, else its own.
+/// model's own fields and keep the runtime state of the wrapper it replaces.
 pub(crate) fn build_relation_wiring(ctx: &BuildContext) -> syn::Result<Vec<TokenStream2>> {
     ctx.relation_fields
         .iter()
@@ -16,8 +15,7 @@ pub(crate) fn build_relation_wiring(ctx: &BuildContext) -> syn::Result<Vec<Token
             Ok(quote! {
                 let own = ::std::mem::take(&mut self.#ident);
                 #assignment
-                self.#ident
-                    .preserve_runtime_state_from(previous.map_or(&own, |previous| &previous.#ident));
+                self.#ident.preserve_runtime_state_from(&own);
             })
         })
         .collect()
@@ -25,30 +23,23 @@ pub(crate) fn build_relation_wiring(ctx: &BuildContext) -> syn::Result<Vec<Token
 
 pub(crate) fn generate_with_relations_method(ctx: &BuildContext) -> TokenStream2 {
     let relation_wiring = &ctx.relation_wiring;
-    let previous = if relation_wiring.is_empty() {
-        quote!(_previous)
-    } else {
-        quote!(previous)
-    };
     quote! {
         pub fn with_relations(mut self) -> Self {
-            self.__wire_relations(None);
+            self.__wire_relations();
             self
         }
 
         /// Build every relation wrapper from the model's own fields, keeping
-        /// the runtime state of `previous`'s, or else of the one it replaces.
+        /// the runtime state of the one it replaces.
         #[doc(hidden)]
-        pub fn __wire_relations(&mut self, #previous: Option<&Self>) {
+        pub fn __wire_relations(&mut self) {
             #(#relation_wiring)*
         }
     }
 }
 
 /// Emit the statements that rebuild a relation wrapper from the model's own
-/// fields and assign it to `self.#ident`. Both `with_relations` (fresh init)
-/// and `refresh_runtime_relations_from` (post-serde refresh) reuse them and
-/// differ only in how they preserve prior runtime state.
+/// fields and assign it to `self.#ident`.
 fn build_relation_assignment(ctx: &BuildContext, field: &ModelField) -> syn::Result<TokenStream2> {
     let ident = field.ident();
     let kind = field
@@ -83,8 +74,10 @@ fn build_relation_assignment(ctx: &BuildContext, field: &ModelField) -> syn::Res
             };
             let relation_name = field.name();
             quote! {
-                let relation = #constructor
-                    .with_parent_pk(::tideorm::prelude::json!(self.#local_key_ident.clone()));
+                let relation = #constructor.with_parent_pk(
+                    self.#local_key_ident.clone(),
+                    <Self as ::tideorm::model::Model>::is_new(self),
+                );
                 ::tideorm::__if_entity_manager! {
                     let relation = relation
                         .with_metadata(#relation_name, <Self as ::tideorm::model::ModelMeta>::table_name());
@@ -97,7 +90,7 @@ fn build_relation_assignment(ctx: &BuildContext, field: &ModelField) -> syn::Res
             let foreign_key_ident = ctx.resolve_required_db_field_ident(foreign_key, ident)?;
             quote! {
                 let relation = ::tideorm::relations::BelongsTo::new(#foreign_key, #owner_key)
-                    .with_fk_value(::tideorm::prelude::json!(self.#foreign_key_ident.clone()));
+                    .with_fk_value(self.#foreign_key_ident.clone());
             }
         }
         RelationKind::MorphOne | RelationKind::MorphMany => {
@@ -112,8 +105,9 @@ fn build_relation_assignment(ctx: &BuildContext, field: &ModelField) -> syn::Res
             quote! {
                 let relation = ::tideorm::relations::#wrapper::new(#morph_name, #local_key)
                     .with_parent(
-                        ::tideorm::prelude::json!(self.#local_key_ident.clone()),
+                        self.#local_key_ident.clone(),
                         <Self as ::tideorm::model::ModelMeta>::table_name().to_string(),
+                        <Self as ::tideorm::model::Model>::is_new(self),
                     );
             }
         }
@@ -126,10 +120,7 @@ fn build_relation_assignment(ctx: &BuildContext, field: &ModelField) -> syn::Res
             quote! {
                 let relation = ::tideorm::relations::MorphTo::new(#type_column, #id_column)
                     .__on::<Self>()
-                    .with_values(
-                        self.#type_ident.clone(),
-                        ::tideorm::prelude::json!(self.#id_ident.clone()),
-                    );
+                    .with_values(self.#type_ident.clone(), self.#id_ident.clone());
             }
         }
         RelationKind::SelfRef => {
@@ -148,7 +139,7 @@ fn build_relation_assignment(ctx: &BuildContext, field: &ModelField) -> syn::Res
             let local_key = ctx.relation_local_field(field)?.column_name();
             quote! {
                 let relation = ::tideorm::relations::SelfRef::new(#foreign_key, #local_key)
-                    .with_fk_value(::tideorm::prelude::json!(self.#foreign_key_ident.clone()));
+                    .with_fk_value(self.#foreign_key_ident.clone());
             }
         }
         RelationKind::SelfRefMany => {
@@ -157,7 +148,10 @@ fn build_relation_assignment(ctx: &BuildContext, field: &ModelField) -> syn::Res
             let (local_key_ident, local_key) = (local.ident(), local.column_name());
             quote! {
                 let relation = ::tideorm::relations::SelfRefMany::new(#foreign_key, #local_key)
-                    .with_parent_pk(::tideorm::prelude::json!(self.#local_key_ident.clone()));
+                    .with_parent_pk(
+                        self.#local_key_ident.clone(),
+                        <Self as ::tideorm::model::Model>::is_new(self),
+                    );
             }
         }
     };

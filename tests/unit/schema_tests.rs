@@ -1,14 +1,37 @@
 use super::writer::{CatalogColumn, catalog_table};
 use super::*;
 use crate::config::DatabaseType;
+use crate::migration::{ColumnType, column_type_sql};
 use crate::model::IndexDefinition;
+use crate::orm::sql_builder::ValueType;
 
-/// What a Rust type renders to on `db_type` through the shared mapping table.
+/// The column type a field of type `T` gets: its `ValueType`'s, the one
+/// mapping the model's `Column::def()`, schema sync and migrations share.
+fn column<T: ValueType>() -> ColumnType {
+    T::column_type()
+}
+
+/// A newtype takes its inner type's column.
+#[derive(Clone, Debug, PartialEq, crate::orm::DeriveValueType)]
+struct Cents(i64);
+
+/// `rows` of a column type and its PostgreSQL, MySQL and SQLite SQL.
 #[track_caller]
-fn sql_for(rust_type: &str, db_type: DatabaseType) -> String {
-    rust_type_to_column_type(rust_type)
-        .unwrap_or_else(|| panic!("'{rust_type}' should be mapped"))
-        .to_sql(db_type)
+fn assert_renders(rows: &[(ColumnType, &str, &str, &str)]) {
+    for (column_type, postgres, mysql, sqlite) in rows {
+        for (db_type, expected) in [
+            (DatabaseType::Postgres, postgres),
+            (DatabaseType::MySQL, mysql),
+            (DatabaseType::MariaDB, mysql),
+            (DatabaseType::SQLite, sqlite),
+        ] {
+            assert_eq!(
+                column_type_sql(column_type, db_type),
+                *expected,
+                "{column_type:?} on {db_type:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -233,80 +256,92 @@ fn test_schema_generator_supports_composite_primary_keys() {
 
 #[test]
 fn test_rust_types_map_to_the_column_each_backend_reads_back() {
-    // MariaDB maps as MySQL does.
-    for (rust_type, postgres, mysql, sqlite) in [
-        ("i32", "INTEGER", "INT", "INTEGER"),
-        ("i64", "BIGINT", "BIGINT", "INTEGER"),
-        ("f64", "DOUBLE PRECISION", "DOUBLE", "REAL"),
-        ("bool", "BOOLEAN", "TINYINT(1)", "INTEGER"),
-        ("String", "TEXT", "LONGTEXT", "TEXT"),
-        ("Uuid", "UUID", "BINARY(16)", "TEXT"),
-        ("NaiveDate", "DATE", "DATE", "TEXT"),
-        ("NaiveTime", "TIME", "TIME(6)", "TEXT"),
-        ("serde_json::Value", "JSONB", "JSON", "TEXT"),
-        ("Vec<i32>", "INTEGER[]", "JSON", "TEXT"),
-        ("Vec<i64>", "BIGINT[]", "JSON", "TEXT"),
-        ("Vec<String>", "TEXT[]", "JSON", "TEXT"),
-        // PostgreSQL has no unsigned integers, so the mapping picks the signed
-        // type sea-orm's decoder actually accepts. `u32` is read as an `Oid`
-        // and then as an `i32`; widening it to BIGINT makes every read fail.
-        // `u64` is only decodable on MySQL, and the binder narrows it to `i64`
-        // on the way in, so an exact NUMERIC column buys nothing BIGINT does
-        // not already give. MySQL does have unsigned column types, so nothing
-        // widens there, and SQLite has one integer storage class for them all.
-        ("u8", "SMALLINT", "TINYINT UNSIGNED", "INTEGER"),
-        ("u16", "INTEGER", "SMALLINT UNSIGNED", "INTEGER"),
-        ("u32", "INTEGER", "INT UNSIGNED", "INTEGER"),
-        ("u64", "BIGINT", "BIGINT UNSIGNED", "INTEGER"),
-        // TEXT would be the lossless target on SQLite, but sea-orm decodes both
-        // Decimal and BigDecimal there through `try_get::<Option<f64>>`, and
-        // sqlx only yields an f64 from a REAL-affinity column - a TEXT column
-        // cannot be read at all.
-        ("Decimal", "DECIMAL", "DECIMAL(65,30)", "REAL"),
-        ("BigDecimal", "DECIMAL", "DECIMAL(65,30)", "REAL"),
-        // i128/u128 map to Decimal { precision: 39, scale: 0 }, so they inherit
-        // the decimal rendering - including SQLite's REAL, which cannot hold
-        // the range.
-        ("i128", "DECIMAL(39, 0)", "DECIMAL(39, 0)", "REAL"),
-        ("u128", "DECIMAL(39, 0)", "DECIMAL(39, 0)", "REAL"),
+    assert_renders(&[
+        (column::<i8>(), "SMALLINT", "TINYINT", "INTEGER"),
+        (column::<i16>(), "SMALLINT", "SMALLINT", "INTEGER"),
+        (column::<i32>(), "INTEGER", "INT", "INTEGER"),
+        (column::<i64>(), "BIGINT", "BIGINT", "INTEGER"),
+        (column::<f32>(), "REAL", "FLOAT", "REAL"),
+        (column::<f64>(), "DOUBLE PRECISION", "DOUBLE", "REAL"),
+        (column::<bool>(), "BOOLEAN", "TINYINT(1)", "INTEGER"),
+        (column::<String>(), "TEXT", "LONGTEXT", "TEXT"),
+        (
+            column::<Option<crate::types::Text>>(),
+            "TEXT",
+            "LONGTEXT",
+            "TEXT",
+        ),
+        (column::<Vec<u8>>(), "BYTEA", "LONGBLOB", "BLOB"),
+        (column::<uuid::Uuid>(), "UUID", "BINARY(16)", "TEXT"),
+        (column::<chrono::NaiveDate>(), "DATE", "DATE", "TEXT"),
+        (column::<chrono::NaiveTime>(), "TIME", "TIME(6)", "TEXT"),
+        (column::<serde_json::Value>(), "JSONB", "JSON", "TEXT"),
+        (column::<crate::types::Jsonb>(), "JSONB", "JSON", "TEXT"),
+        (column::<Cents>(), "BIGINT", "BIGINT", "INTEGER"),
+        // PostgreSQL has no unsigned integers, so each lands on the narrowest
+        // signed type holding all its values, which the driver reads it from;
+        // a `u64` past `i64::MAX` is refused when it is bound. MySQL does have
+        // unsigned column types, so nothing widens there, and SQLite has one
+        // integer storage class for them all.
+        (column::<u8>(), "SMALLINT", "TINYINT UNSIGNED", "INTEGER"),
+        (column::<u16>(), "INTEGER", "SMALLINT UNSIGNED", "INTEGER"),
+        (column::<u32>(), "BIGINT", "INT UNSIGNED", "INTEGER"),
+        (column::<u64>(), "BIGINT", "BIGINT UNSIGNED", "INTEGER"),
+        // TEXT would be the lossless target on SQLite, but a REAL column
+        // compares and sorts as a number.
+        (
+            column::<rust_decimal::Decimal>(),
+            "DECIMAL",
+            "DECIMAL(65,30)",
+            "REAL",
+        ),
         // A naive timestamp carries no offset, so it must not land in a column
-        // the server shifts by session timezone, although "NaiveDateTime"
-        // contains "DateTime". MySQL stores both in DATETIME(6): its TIMESTAMP
-        // only spans 1970-2038, and sqlx pins the session to UTC.
-        ("NaiveDateTime", "TIMESTAMP", "DATETIME(6)", "TEXT"),
-        ("DateTime<Utc>", "TIMESTAMPTZ", "DATETIME(6)", "TEXT"),
-    ] {
-        for (db_type, expected) in [
-            (DatabaseType::Postgres, postgres),
-            (DatabaseType::MySQL, mysql),
-            (DatabaseType::MariaDB, mysql),
-            (DatabaseType::SQLite, sqlite),
-        ] {
-            assert_eq!(
-                sql_for(rust_type, db_type),
-                expected,
-                "{rust_type} on {db_type:?}"
-            );
-        }
-    }
+        // the server shifts by session timezone. MySQL stores every timestamp
+        // in DATETIME(6): its TIMESTAMP only spans 1970-2038, and the driver
+        // pins the session to UTC.
+        (
+            column::<chrono::NaiveDateTime>(),
+            "TIMESTAMP",
+            "DATETIME(6)",
+            "TEXT",
+        ),
+        (
+            column::<chrono::DateTime<chrono::Utc>>(),
+            "TIMESTAMPTZ",
+            "DATETIME(6)",
+            "TEXT",
+        ),
+        (
+            column::<chrono::DateTime<chrono::FixedOffset>>(),
+            "TIMESTAMPTZ",
+            "DATETIME(6)",
+            "TEXT",
+        ),
+    ]);
 }
 
+#[cfg(feature = "postgres")]
 #[test]
-fn test_rust_type_to_column_type_reports_unknown_types() {
-    // The fallback belongs to the caller: sync warns and uses TEXT.
-    assert!(rust_type_to_column_type("MyCustomType").is_none());
-}
-
-#[test]
-fn test_rust_type_normalization_strips_paths_lifetimes_and_options() {
-    let pg = DatabaseType::Postgres;
-    assert_eq!(sql_for("chrono::DateTime<chrono::Utc>", pg), "TIMESTAMPTZ");
-    assert_eq!(sql_for("&'static str", pg), "TEXT");
-    assert_eq!(sql_for("Option < i32 >", pg), "INTEGER");
-    assert_eq!(sql_for("Option<Option<String>>", pg), "TEXT");
-    assert_eq!(sql_for("Option<NaiveDateTime>", pg), "TIMESTAMP");
-    assert_eq!(sql_for("rust_decimal::Decimal", pg), "DECIMAL");
-    assert_eq!(sql_for("Vec<serde_json::Value>", pg), "JSONB[]");
+fn test_array_types_map_to_postgres_arrays_and_json_elsewhere() {
+    assert_renders(&[
+        (column::<Vec<i32>>(), "INTEGER[]", "JSON", "TEXT"),
+        (column::<Vec<i64>>(), "BIGINT[]", "JSON", "TEXT"),
+        (column::<Vec<f64>>(), "DOUBLE PRECISION[]", "JSON", "TEXT"),
+        (column::<Vec<bool>>(), "BOOLEAN[]", "JSON", "TEXT"),
+        (column::<Vec<String>>(), "TEXT[]", "JSON", "TEXT"),
+        (
+            column::<crate::types::TextArray>(),
+            "TEXT[]",
+            "JSON",
+            "TEXT",
+        ),
+        (
+            column::<Vec<serde_json::Value>>(),
+            "JSONB[]",
+            "JSON",
+            "TEXT",
+        ),
+    ]);
 }
 
 fn catalog_column(name: &str, sql_type: &str) -> CatalogColumn {
@@ -386,25 +421,6 @@ fn test_catalog_table_auto_increments_key_columns_unless_any_column_counts() {
         true,
     );
     assert!(table.columns[0].auto_increment && table.columns[1].auto_increment);
-}
-
-#[test]
-fn qualified_generic_types_have_mapping_parity() {
-    // Keep this fixture aligned with the macro's generic-type parity test.
-    for (plain, qualified) in [
-        ("Vec<String>", "std::vec::Vec<std::string::String>"),
-        ("Vec<Json>", "Vec<tideorm::types::Json>"),
-        ("Vec<serde_json::Value>", "std::vec::Vec<serde_json::Value>"),
-        (
-            "Option<Vec<String>>",
-            "std::option::Option<std::vec::Vec<std::string::String>>",
-        ),
-    ] {
-        assert_eq!(
-            sql_for(plain, DatabaseType::Postgres),
-            sql_for(qualified, DatabaseType::Postgres)
-        );
-    }
 }
 
 #[test]

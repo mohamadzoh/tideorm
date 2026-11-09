@@ -183,27 +183,6 @@ fn with_relations_initializes_supported_relation_wrappers() {
     assert_eq!(member.team.owner_key, "team_uuid");
 }
 
-#[test]
-fn generated_related_impls_expose_relation_defs() {
-    use tideorm::internal::InternalModel;
-    use tideorm::orm::{Related, RelationType};
-
-    let posts = <<User as InternalModel>::Entity as Related<<Post as InternalModel>::Entity>>::to();
-    assert_eq!(posts.rel_type, RelationType::HasMany);
-
-    let profile =
-        <<User as InternalModel>::Entity as Related<<Profile as InternalModel>::Entity>>::to();
-    assert_eq!(profile.rel_type, RelationType::HasOne);
-
-    let author =
-        <<Article as InternalModel>::Entity as Related<<User as InternalModel>::Entity>>::to();
-    assert_eq!(author.rel_type, RelationType::HasOne);
-
-    let roles_via =
-        <<User as InternalModel>::Entity as Related<<Role as InternalModel>::Entity>>::via();
-    assert!(roles_via.is_some());
-}
-
 /// With no database reachable, `load()` serves what the wrapper holds.
 #[tokio::test]
 async fn eager_loaded_caches_back_wrapper_loads() {

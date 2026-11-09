@@ -13,7 +13,9 @@ impl<M: Model> QueryBuilder<M> {
             Operator::Lt => "<",
             Operator::Lte => "<=",
             Operator::Like => "LIKE",
-            Operator::LikeEscaped => "LIKE",
+            Operator::Contains => "CONTAINS",
+            Operator::StartsWith => "STARTS_WITH",
+            Operator::EndsWith => "ENDS_WITH",
             Operator::NotLike => "NOT LIKE",
             Operator::In => "IN",
             Operator::NotIn => "NOT IN",
@@ -36,13 +38,16 @@ impl<M: Model> QueryBuilder<M> {
 
     fn describe_condition(condition: &WhereCondition) -> String {
         match (&condition.operator, &condition.value) {
-            (Operator::Raw, ConditionValue::RawExpr(sql))
-            | (Operator::Raw, ConditionValue::RawExprWithValues { sql, .. })
-            | (Operator::Raw, ConditionValue::RawTemplate { sql, .. }) => {
+            (
+                Operator::Raw,
+                ConditionValue::RawExpr(_)
+                | ConditionValue::RawTemplate { .. }
+                | ConditionValue::Subquery(_),
+            ) => {
                 if condition.column.is_empty() {
-                    sql.clone()
+                    condition.value.to_string()
                 } else {
-                    format!("{} {}", condition.column, sql)
+                    format!("{} {}", condition.column, condition.value)
                 }
             }
             (Operator::IsNull | Operator::IsNotNull, ConditionValue::None) => {
@@ -61,16 +66,21 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
-    /// A HAVING template with each `?` replaced by the JSON value bound to it.
-    fn describe_having_clause(template: &str, bindings: &[crate::internal::Value]) -> String {
-        let mut values = bindings.iter();
-        db_sql::map_template_placeholders(template, || match values.next() {
-            // The value as the statement preview writes it.
-            Some(value) => {
-                db_sql::inline_parameters(DatabaseType::Postgres, "$1", std::slice::from_ref(value))
-            }
-            None => "?".to_string(),
-        })
+    /// A HAVING clause with its values written in, as `db_type`'s statement
+    /// preview writes it.
+    pub(in crate::query) fn describe_having_clause(
+        &self,
+        db_type: DatabaseType,
+        clause: &crate::query::HavingClause,
+    ) -> String {
+        let (sql, values) = self.having_bound(db_type, clause).build(db_type.dialect());
+        db_sql::inline_parameters(db_type, &sql, &values)
+    }
+
+    /// The backend a preview renders for: the one the query runs on, or
+    /// PostgreSQL's dialect for a query with no database to run on.
+    fn preview_db_type(&self) -> DatabaseType {
+        self.db_type_for_sql().unwrap_or(DatabaseType::Postgres)
     }
 
     fn describe_or_group(group: &OrGroup) -> String {
@@ -113,9 +123,12 @@ impl<M: Model> QueryBuilder<M> {
             .map(Self::describe_condition)
             .collect();
         let groups: Vec<String> = self.described_or_groups().collect();
+        let db_type = self.preview_db_type();
         let having: Vec<String> = self
-            .having_clauses()
-            .map(|(template, bindings)| Self::describe_having_clause(template, &bindings))
+            .clauses
+            .having_conditions
+            .iter()
+            .map(|clause| self.describe_having_clause(db_type, clause))
             .collect();
 
         let mut operator_chain = Vec::new();
@@ -157,14 +170,12 @@ impl<M: Model> QueryBuilder<M> {
     /// time and the real outcome instead of a `None` duration and an assumed
     /// success. `None` means nothing is observing this query — two atomic loads
     /// decide that, and no timer or SQL copy is allocated.
-    pub(super) fn start_query_log(&self, sql: &str) -> Option<crate::logging::QueryTimer> {
+    pub(super) fn start_query_log(sql: &str) -> Option<crate::logging::QueryTimer> {
         if crate::logging::query_logging_enabled() {
             crate::tide_debug!("Query: {}", sql);
         }
 
-        if crate::logging::QueryLogger::is_enabled()
-            || crate::cache::PreparedStatementCache::global().is_enabled()
-        {
+        if crate::logging::QueryLogger::is_enabled() {
             Some(crate::logging::QueryTimer::start(sql).with_table(M::table_name()))
         } else {
             None
@@ -176,8 +187,6 @@ impl<M: Model> QueryBuilder<M> {
     /// A failed statement is recorded as a failure, which is what makes
     /// `LogLevel::Error`/`Warn` emit anything at all, and the measured duration
     /// is what feeds the slow-query threshold and the aggregate timing counters.
-    /// The same measurement is handed to the prepared-statement cache so its
-    /// statistics describe real traffic.
     pub(super) fn finish_query_log<T>(
         timer: Option<crate::logging::QueryTimer>,
         result: &Result<T>,
@@ -191,11 +200,6 @@ impl<M: Model> QueryBuilder<M> {
             Ok(value) => timer.finish_with_rows(row_count(value)),
             Err(error) => timer.finish_with_error(error.to_string()),
         };
-
-        if let Some(duration) = entry.duration {
-            crate::cache::PreparedStatementCache::global()
-                .observe_execution(&entry.sql, duration.as_micros() as u64);
-        }
 
         crate::logging::QueryLogger::log(entry);
     }
@@ -211,10 +215,26 @@ impl<M: Model> QueryBuilder<M> {
     /// println!("{info:?}");
     /// ```
     pub fn debug(&self) -> crate::logging::QueryDebugInfo {
+        self.debug_for(self.preview_db_type())
+    }
+
+    /// [`debug()`](Self::debug) in `db_type`'s dialect: its parameterized SQL
+    /// has that backend's markers (`$1` or `?`) and quoting.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users")]
+    /// # struct User { #[tideorm(primary_key)] id: i64, active: bool }
+    /// let info = User::query().where_eq(User::ACTIVE, true).debug_for(DatabaseType::SQLite);
+    /// assert_eq!(info.params.len(), 1);
+    /// ```
+    pub fn debug_for(&self, db_type: DatabaseType) -> crate::logging::QueryDebugInfo {
         use crate::logging::QueryDebugInfo;
 
-        let db_type = self.db_type_for_sql();
-        let (sql, params) = self.build_select_sql_with_params_for_db(db_type);
+        let (sql, params, render_error) = match self.build_select_sql_with_params_for_db(db_type) {
+            Ok((sql, params)) => (sql, params, None),
+            Err(error) => (String::new(), Vec::new(), Some(error.to_string())),
+        };
         let preview = db_sql::inline_parameters(db_type, &sql, &params);
 
         let mut info = QueryDebugInfo::new(M::table_name()).with_sql(format!(
@@ -235,7 +255,11 @@ impl<M: Model> QueryBuilder<M> {
         {
             info.add_condition(condition);
         }
-        info.error = self.validate().err().map(|error| error.to_string());
+        info.error = self
+            .validate()
+            .err()
+            .map(|error| error.to_string())
+            .or(render_error);
 
         for (column, direction) in &self.clauses.order_by {
             info.add_order_by(format!("{} {}", column, direction.as_str()));
@@ -253,7 +277,7 @@ impl<M: Model> QueryBuilder<M> {
                 self.clauses
                     .subquery_select_expressions
                     .iter()
-                    .map(|subquery| format!("({}) AS {}", subquery.query_sql, subquery.alias)),
+                    .map(|subquery| format!("(subquery) AS {}", subquery.alias)),
             );
         } else if let Some(columns) = &self.clauses.select_columns {
             info.select = columns.clone();
@@ -289,7 +313,8 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// The statement [`get()`](Self::get) would run, with its bound values
-    /// written in as literals, under a banner marking it display-only.
+    /// written in as literals, under a banner marking it display-only. A
+    /// query with no database to run on is shown in PostgreSQL's dialect.
     ///
     /// ```
     /// use tideorm::prelude::*;
@@ -299,10 +324,20 @@ impl<M: Model> QueryBuilder<M> {
     /// assert!(sql.contains("SELECT"));
     /// ```
     pub fn build_sql_preview(&self) -> String {
-        self.build_sql_preview_for_db(self.db_type_for_sql())
+        self.build_sql_preview_for(self.preview_db_type())
     }
 
-    pub(crate) fn build_sql_preview_for_db(&self, db_type: DatabaseType) -> String {
+    /// [`build_sql_preview()`](Self::build_sql_preview) in `db_type`'s
+    /// dialect, whatever database the query would run on.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users")]
+    /// # struct User { #[tideorm(primary_key)] id: i64, active: bool }
+    /// let sql = User::query().where_eq(User::ACTIVE, true).build_sql_preview_for(DatabaseType::MySQL);
+    /// assert!(sql.contains("`users`"));
+    /// ```
+    pub fn build_sql_preview_for(&self, db_type: DatabaseType) -> String {
         format!(
             "{}\n{}",
             PREVIEW_BANNER,

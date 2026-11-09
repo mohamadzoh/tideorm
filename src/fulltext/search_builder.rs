@@ -1,5 +1,5 @@
 use super::*;
-use crate::internal::{EntityTrait, FromQueryResult, translate_error};
+use crate::internal::translate_error;
 
 mod mysql_sqlite;
 mod postgres;
@@ -59,6 +59,69 @@ impl Default for HighlightConfig {
 }
 
 impl HighlightConfig {
+    /// Mark matches with `start` and `end` instead of `<mark>` tags.
+    ///
+    /// ```
+    /// use tideorm::fulltext::HighlightConfig;
+    ///
+    /// let config = HighlightConfig::default()
+    ///     .tags("<b>", "</b>")
+    ///     .fragment_words(5)
+    ///     .max_length(200);
+    /// assert_eq!(config.start_tag, "<b>");
+    /// ```
+    pub fn tags(mut self, start: impl Into<String>, end: impl Into<String>) -> Self {
+        self.start_tag = start.into();
+        self.end_tag = end.into();
+        self
+    }
+
+    /// Cut each highlight to `characters`, followed by `...`.
+    pub fn max_length(mut self, characters: usize) -> Self {
+        self.max_length = Some(characters);
+        self
+    }
+
+    /// Keep `words` words on each side of the first match (10 by default).
+    pub fn fragment_words(mut self, words: usize) -> Self {
+        self.fragment_words = Some(words);
+        self
+    }
+
+    /// Mark the whole text instead of the words around the first match.
+    pub fn whole_text(mut self) -> Self {
+        self.fragment_words = None;
+        self
+    }
+
+    /// Choose whether the record's text is HTML-escaped around the tags
+    /// (`true` by default); turn it off for tags that are not HTML.
+    pub fn escape_html(mut self, escape: bool) -> Self {
+        self.escape_html = escape;
+        self
+    }
+
+    /// Mark each whole word of `query` in `text`, as a search's
+    /// [`highlight`](FullTextSearchBuilder::highlight) marks its results: the
+    /// words around the first match unless [`whole_text`](Self::whole_text),
+    /// cut to [`max_length`](Self::max_length), and HTML-escaped around the
+    /// tags unless [`escape_html`](Self::escape_html) is off. The way to mark
+    /// text bound for a page; [`highlight_text`](super::highlight_text) and
+    /// [`generate_snippet`](super::generate_snippet) escape nothing.
+    ///
+    /// ```
+    /// use tideorm::fulltext::HighlightConfig;
+    ///
+    /// let marked = HighlightConfig::default()
+    ///     .whole_text()
+    ///     .highlight("a <script> about the fox", "fox");
+    /// assert_eq!(marked, "a &lt;script&gt; about the <mark>fox</mark>");
+    /// ```
+    pub fn highlight(&self, text: &str, query: &str) -> String {
+        self.mark(text, super::index_helpers::term_pattern(query).as_ref())
+            .0
+    }
+
     /// `text` with each match of `pattern` marked, and the number marked: the
     /// words around the first match when `fragment_words` is set, cut to
     /// `max_length` characters, else the whole text.
@@ -97,22 +160,11 @@ impl<T: Model> FullTextSearchBuilder<T> {
         })
     }
 
-    /// Check the live schema, including columns omitted from the Rust model
-    /// and indexes installed by an older version of the library.
-    async fn check_sqlite_rowid(db: &crate::database::Database) -> Result<()> {
-        if db.execution_backend() == DatabaseType::SQLite {
-            let guard = super::index_helpers::sqlite_rowid_guard(T::table_name(), T::schema_name());
-            db.fetch_rows(&format!("SELECT {guard}"), Vec::new())
-                .await?;
-        }
-        Ok(())
-    }
-
-    /// Create a new search builder
-    pub fn new(columns: &[&str], query: &str) -> Self {
+    /// Create a new search builder, as [`FullTextSearch::search`] does.
+    pub fn new(columns: impl crate::columns::IntoColumnNames, query: impl Into<String>) -> Self {
         Self {
-            columns: columns.iter().map(|s| s.to_string()).collect(),
-            query: query.to_string(),
+            columns: crate::columns::column_names(&columns),
+            query: query.into(),
             config: FullTextConfig::default(),
             with_ranking: false,
             limit: None,
@@ -188,15 +240,14 @@ impl<T: Model> FullTextSearchBuilder<T> {
     pub async fn get(self) -> Result<Vec<T>> {
         let db = crate::database::__current_db()?;
         let (sql, params) = self.build_sql(db.execution_backend())?;
-        Self::check_sqlite_rowid(&db).await?;
-        db.__raw_with_params::<T>(&sql, params).await
+        db.raw_models::<T>(&sql, params, crate::logging::EngineLog::On)
+            .await
     }
 
     /// Execute the search and return ranked results
     pub async fn get_ranked(self) -> Result<Vec<SearchResult<T>>> {
         let db = crate::database::__current_db()?;
         let (sql, params) = self.build_ranked_sql(db.execution_backend())?;
-        Self::check_sqlite_rowid(&db).await?;
 
         // Only a search that marks its matches needs the pattern compiled.
         let pattern = self
@@ -208,13 +259,9 @@ impl<T: Model> FullTextSearchBuilder<T> {
         let connection = db.__get_connection()?;
         rows.iter()
             .map(|row| {
-                let model = <T::Entity as EntityTrait>::Model::from_query_result(row, "")
-                    .map_err(translate_error)?;
-                let rank = row.try_get("", &rank_alias).map_err(translate_error)?;
-                let record = crate::model::__loading_through(&connection, || {
-                    T::try_from_entity_model(model)
-                })?;
-                let mut result = SearchResult::new(record, rank);
+                let model = T::from_query_result(row).map_err(translate_error)?;
+                let rank = row.try_get(&rank_alias).map_err(translate_error)?;
+                let mut result = SearchResult::new(model.finish_load(&connection), rank);
                 if let Some(config) = &self.highlight {
                     result.highlights =
                         self.highlights_for(&result.record, config, pattern.as_ref());
@@ -235,13 +282,12 @@ impl<T: Model> FullTextSearchBuilder<T> {
     pub async fn count(self) -> Result<u64> {
         let db = crate::database::__current_db()?;
         let (sql, params) = self.build_count_sql(db.execution_backend())?;
-        Self::check_sqlite_rowid(&db).await?;
 
         let rows = db.fetch_rows(&sql, params).await?;
         let row = rows
             .first()
             .ok_or_else(|| Error::query("Database returned no row for the full-text count"))?;
-        let count: i64 = row.try_get("", "count").map_err(translate_error)?;
+        let count: i64 = row.try_get("count").map_err(translate_error)?;
         crate::internal::count_to_u64(count, "fulltext count")
     }
 
@@ -249,7 +295,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
     /// write, which no search text matches.
     fn refuse_encrypted_columns(&self) -> Result<()> {
         for column in &self.columns {
-            if let Some(encrypted) = crate::model::__encrypted_column::<T>(column)? {
+            if let Some(encrypted) = crate::model::__encrypted_column::<T>(column) {
                 return Err(encrypted.refuse(
                     "full-text search",
                     "an index over randomized ciphertext matches no search text",
@@ -361,15 +407,21 @@ impl<T: Model> FullTextSearchBuilder<T> {
 
     /// `predicate` restricted to the rows the soft-delete scope keeps, with
     /// the deleted-at column qualified by `table` when one is given.
-    fn scoped(&self, db_type: DatabaseType, predicate: String, table: Option<&str>) -> String {
+    fn scoped(
+        &self,
+        db_type: DatabaseType,
+        mut predicate: BoundSql,
+        table: Option<&str>,
+    ) -> BoundSql {
         if self.trashed == TrashedRows::Included {
             return predicate;
         }
         let only_trashed = self.trashed == TrashedRows::Only;
-        match crate::relations::soft_delete_clause::<T>(db_type, table, only_trashed) {
-            Some(test) => format!("{predicate} AND {test}"),
-            None => predicate,
+        if let Some(test) = crate::relations::soft_delete_clause::<T>(db_type, table, only_trashed)
+        {
+            predicate.push(format!(" AND {test}"));
         }
+        predicate
     }
 
     /// The searched columns as the database names them, so a Rust field name
@@ -378,51 +430,31 @@ impl<T: Model> FullTextSearchBuilder<T> {
         self.columns
             .iter()
             .map(|column| {
-                T::canonical_column_name(column)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| column.clone())
+                T::canonical_column_name(column).map_or_else(|| column.clone(), str::to_string)
             })
             .collect()
     }
 
-    fn append_limit_offset(
-        &self,
-        db_type: DatabaseType,
-        sql: &mut String,
-        params: &mut Vec<Value>,
-    ) {
-        crate::query::db_sql::append_limit_offset(sql, db_type, self.limit, self.offset, params);
-    }
-
     /// `SELECT <model columns> FROM <table> WHERE <predicate>`, paged.
-    fn select_where(
-        &self,
-        db_type: DatabaseType,
-        predicate: &str,
-        mut params: Vec<Value>,
-    ) -> (String, Vec<Value>) {
-        let mut sql = format!(
-            "SELECT {} FROM {} WHERE {}",
+    fn select_where(&self, db_type: DatabaseType, predicate: BoundSql) -> (String, Vec<Value>) {
+        let mut sql = BoundSql::sql(format!(
+            "SELECT {} FROM {} WHERE ",
             crate::query::db_sql::model_columns_sql::<T>(db_type, None),
-            crate::query::db_sql::quote_table::<T>(db_type),
-            predicate
-        );
-        self.append_limit_offset(db_type, &mut sql, &mut params);
-        (sql, params)
+            crate::query::db_sql::quote_table::<T>(db_type)
+        ));
+        sql.push(predicate)
+            .push(db_type.dialect().limit_offset(self.limit, self.offset));
+        sql.build(db_type.dialect())
     }
 
     /// `SELECT COUNT(*) as count FROM <table> WHERE <predicate>`.
-    fn count_where(
-        db_type: DatabaseType,
-        predicate: &str,
-        params: Vec<Value>,
-    ) -> (String, Vec<Value>) {
-        let sql = format!(
-            "SELECT COUNT(*) as count FROM {} WHERE {}",
-            crate::query::db_sql::quote_table::<T>(db_type),
-            predicate
-        );
-        (sql, params)
+    fn count_where(db_type: DatabaseType, predicate: BoundSql) -> (String, Vec<Value>) {
+        let mut sql = BoundSql::sql(format!(
+            "SELECT COUNT(*) as count FROM {} WHERE ",
+            crate::query::db_sql::quote_table::<T>(db_type)
+        ));
+        sql.push(predicate);
+        sql.build(db_type.dialect())
     }
 }
 

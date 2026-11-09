@@ -29,6 +29,12 @@ A Rust ORM with field-declared relations and a fluent query builder.
 
 ## Quick Start
 
+```toml
+[dependencies]
+tideorm = { version = "0.17.0", default-features = false, features = ["sqlite", "runtime-tokio"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+
 ```rust
 use tideorm::prelude::*;
 
@@ -39,13 +45,20 @@ pub struct User {
     pub email: String,
     pub name: String,
     pub active: bool,
-    
-    // Relations defined as struct fields
+
+    // Relations are struct fields, not columns
     #[tideorm(has_one = "Profile", foreign_key = "user_id")]
     pub profile: HasOne<Profile>,
-    
     #[tideorm(has_many = "Post", foreign_key = "user_id")]
     pub posts: HasMany<Post>,
+}
+
+#[tideorm::model(table = "profiles")]
+pub struct Profile {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub user_id: i64,
+    pub bio: String,
 }
 
 #[tideorm::model(table = "posts")]
@@ -54,71 +67,94 @@ pub struct Post {
     pub id: i64,
     pub user_id: i64,
     pub title: String,
-    
+
     #[tideorm(belongs_to = "User", foreign_key = "user_id")]
     pub author: BelongsTo<User>,
 }
 
 #[tokio::main]
 async fn main() -> tideorm::Result<()> {
-    // Connect with auto schema sync (development only!)
+    // An in-memory SQLite database; sync(true) creates the tables (development only)
     TideConfig::init()
-        .database("postgres://localhost/mydb")
-        .auto_models()
+        .database("sqlite::memory:")
+        .max_connections(1)
+        .models::<(User, Profile, Post)>()
         .sync(true)
         .connect()
         .await?;
 
-    // Create
+    // Create: a key of 0 is numbered by the database
     let user = User {
-        email: "john@example.com".into(),
-        name: "John Doe".into(),
+        email: "jane@example.com".into(),
+        name: "Jane".into(),
         active: true,
         ..Default::default()
-    };
-    let user = user.save().await?;
+    }
+    .save()
+    .await?;
+    let bio = "Writes about Rust".to_string();
+    Profile::create(Profile { user_id: user.id, bio, ..Default::default() }).await?;
+    for title in ["Hello", "Typed columns"] {
+        let title = title.to_string();
+        Post::create(Post { user_id: user.id, title, ..Default::default() }).await?;
+    }
 
-    // Query
-    let users = User::query()
-        .where_eq("active", true)
-        .order_desc("created_at")
+    // Query with the generated typed columns: a misspelled column or a value
+    // of the wrong type is a compile error
+    let found = User::query()
+        .where_eq(User::ACTIVE, true)
+        .where_any(|any| {
+            any.where_contains(User::NAME, "Jane")
+                .where_ends_with(User::EMAIL, "@example.org")
+        }) // active = true AND (name LIKE '%Jane%' OR email LIKE '%@example.org')
+        .order_desc(User::ID)
         .limit(10)
         .get()
         .await?;
+    println!("found {} user(s)", found.len());
 
-    // Complex queries with OR conditions
-    let matching_users = User::query()
-        .where_eq("active", true)
-        .begin_or()
-            .or_where_like("name", "%Jane%")
-            .or_where_like("email", "%@example.com")
-        .end_or()
-        .get()
-        .await?;
-
-    // Load relations lazily
+    // Load a relation lazily...
     let posts = user.posts.load().await?;
-    let profile = user.profile.load().await?;
+    println!("{} wrote {} posts", user.name, posts.len());
 
-    // Or batch-load them eagerly from the query itself
-    let users = User::query()
-        .where_eq("active", true)
-        .with("profile")
-        .with("posts")
-        .get()
-        .await?;
+    // ...or batch-load relations with the query
+    let users = User::query().with(User::PROFILE).with(User::POSTS).get().await?;
+    let profile = users[0].profile.get_cached();
+    println!("bio: {:?}", profile.map(|profile| profile.bio.as_str()));
 
-    // Update
-    let mut user = User::find(1).await?.unwrap();
+    // Update writes every column of the model
+    let mut user = User::find(user.id).await?.expect("Jane exists");
     user.name = "Jane Doe".into();
-    user.update().await?;
+    let user = user.update().await?;
+
+    // One column, read as its field's type (Vec<String>)
+    let titles = Post::query()
+        .where_eq(Post::USER_ID, user.id)
+        .order_asc(Post::ID)
+        .pluck(Post::TITLE)
+        .await?;
+    println!("titles: {titles:?}");
 
     // Delete
-    User::destroy(1).await?;
-
+    Post::query().where_eq(Post::USER_ID, user.id).delete().await?;
+    Profile::query().where_eq(Profile::USER_ID, user.id).delete().await?;
+    user.delete().await?;
+    println!("users left: {}", User::query().count().await?);
     Ok(())
 }
 ```
+
+It prints:
+
+```text
+found 1 user(s)
+Jane wrote 2 posts
+bio: Some("Writes about Rust")
+titles: ["Hello", "Typed columns"]
+users left: 0
+```
+
+Swap the `sqlite` feature and the URL for `postgres` (`postgres://user:pass@localhost/app`) or `mysql` to run the same program on another backend; [Installation](#installation) lists the feature sets.
 
 Relation helper fields like `HasOne<T>` and `HasMany<T>` are runtime-only wrappers, not persisted columns. TideORM's generated serde support serializes their cached payloads when present and rebuilds the runtime wrappers on deserialize, so round-tripped JSON can preserve loaded relations without turning the wrappers themselves into stored schema fields.
 
@@ -126,7 +162,7 @@ Composite primary keys are supported by marking multiple fields with `#[tideorm(
 
 For batch inserts, use `Model::insert_all(...)`. It is TideORM's single bulk-insert API and returns the inserted models with database-generated values populated when the active backend supports or emulates that behavior. Every model is validated before any is written, and a batch too large for one statement's bind parameters is split across several inside a transaction.
 
-For tests and reconfiguration-heavy workflows, TideORM's global state is resettable. Use `Database::reset_global()`, `TideConfig::reset()`, and `TokenConfig::reset()` before applying a fresh setup.
+For tests and reconfiguration-heavy workflows, TideORM's global state is resettable. Use `Database::reset_global()` and `TideConfig::reset()` (which also clears the tokenization settings) before applying a fresh setup.
 
 For aggregate workflows with an explicit persistence context, enable the `entity-manager` feature and see [docs/entity-manager.md](docs/entity-manager.md).
 
@@ -134,14 +170,14 @@ For aggregate workflows with an explicit persistence context, enable the `entity
 
 Enable the `encrypted-fields` Cargo feature before using model-level auto-encryption.
 
-Use model-level encrypted fields when you want selected persisted columns, such as phone numbers or other sensitive strings, to be stored encrypted in the database while remaining plain `String` or `Option<String>` values in Rust.
+Use model-level encrypted fields when you want selected persisted columns, such as phone numbers or other sensitive values, to be stored encrypted in the database while keeping their own plaintext type in Rust.
 
 ```toml
 [dependencies]
-tideorm = { version = "0.16.2", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
+tideorm = { version = "0.17.0", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
 ```
 
-```rust
+```rust,ignore
 use tideorm::prelude::*;
 
 #[tideorm::model(
@@ -172,7 +208,7 @@ Encrypted field notes:
 - TideORM decrypts these fields automatically when loading models through normal queries, eager loads, and raw model hydration.
 - Encrypted columns must contain TideORM encrypted payloads or `NULL`. Plaintext legacy rows and older global-scope payloads are rejected on load; migrate that data explicitly before enabling the feature.
 - Query predicates are not rewritten yet. Filters such as `where_eq("customer_phone_number", "...")` still compare against the stored database value, so plaintext lookups on encrypted columns are not currently transparent.
-- Supported encrypted field types are `String`, `Text`, `Option<String>`, and `Option<Text>`.
+- An encrypted field can have any type that implements `Serialize` and `Deserialize`; its column stores the encrypted JSON of the value as text (`TEXT`, whatever the field's type), and `None` as `NULL`.
 
 ## Installation
 
@@ -184,31 +220,31 @@ driver stack.
 ```toml
 [dependencies]
 # PostgreSQL
-tideorm = { version = "0.16.2", default-features = false, features = ["postgres", "runtime-tokio"] }
+tideorm = { version = "0.17.0", default-features = false, features = ["postgres", "runtime-tokio"] }
 
 # MySQL / MariaDB
-tideorm = { version = "0.16.2", default-features = false, features = ["mysql", "runtime-tokio"] }
+tideorm = { version = "0.17.0", default-features = false, features = ["mysql", "runtime-tokio"] }
 
 # SQLite
-tideorm = { version = "0.16.2", default-features = false, features = ["sqlite", "runtime-tokio"] }
+tideorm = { version = "0.17.0", default-features = false, features = ["sqlite", "runtime-tokio"] }
 
 # Enable attachments support explicitly
-tideorm = { version = "0.16.2", default-features = false, features = ["postgres", "runtime-tokio", "attachments"] }
+tideorm = { version = "0.17.0", default-features = false, features = ["postgres", "runtime-tokio", "attachments"] }
 
 # Enable translations support explicitly
-tideorm = { version = "0.16.2", default-features = false, features = ["postgres", "runtime-tokio", "translations"] }
+tideorm = { version = "0.17.0", default-features = false, features = ["postgres", "runtime-tokio", "translations"] }
 
 # Enable full-text search support explicitly
-tideorm = { version = "0.16.2", default-features = false, features = ["postgres", "runtime-tokio", "fulltext"] }
+tideorm = { version = "0.17.0", default-features = false, features = ["postgres", "runtime-tokio", "fulltext"] }
 
 # Enable the entity manager explicitly
-tideorm = { version = "0.16.2", default-features = false, features = ["postgres", "runtime-tokio", "entity-manager"] }
+tideorm = { version = "0.17.0", default-features = false, features = ["postgres", "runtime-tokio", "entity-manager"] }
 
 # Enable model dirty tracking explicitly
-tideorm = { version = "0.16.2", default-features = false, features = ["postgres", "runtime-tokio", "dirty-tracking"] }
+tideorm = { version = "0.17.0", default-features = false, features = ["postgres", "runtime-tokio", "dirty-tracking"] }
 
 # Enable model encrypted fields explicitly
-tideorm = { version = "0.16.2", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
+tideorm = { version = "0.17.0", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
 ```
 
 Swap `runtime-tokio` for `runtime-async-std` if you run on async-std.
@@ -263,9 +299,10 @@ Rust type; passing `"yes"` fails to compile. String column names remain supporte
 Use `.auto_models()` to discover linked models without depending on file layout,
 or `.models::<User>()` / `.models::<(User, Post)>()` to select a subset for schema sync.
 
-Rust **1.94** is required by the current SeaORM 2.0.2 / SQLx 0.9 dependencies and
-verified in CI. Select the toolchain with `cargo +1.94.0`; earlier test results
-against older dependency versions do not lower this dependency floor.
+Rust **1.94** is the minimum supported version, declared in the
+`rust-version` of every TideORM crate (macros, engine, SQL builder and drivers
+included) and verified in CI. Select the toolchain with
+`cargo +1.94.0`.
 
 
 The docs now ship as an mdBook.

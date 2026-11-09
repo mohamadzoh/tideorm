@@ -6,16 +6,13 @@ use crate::config::DatabaseType;
 use crate::database::Database;
 use crate::error::Result;
 use crate::internal::sql_safety::quote_ident;
-use crate::internal::{
-    ConnectionTrait, Value, build_statement_with_values, push_param, translate_error,
-};
+use crate::internal::{ConnectionTrait, Value, push_param, translate_error};
 
 /// A table recording which migrations or seeds have run.
 ///
 /// Every ledger has the same shape: a monotonic `id`, a unique key column
 /// naming each entry, any further text columns, and a timestamp. Existing
-/// databases carry these tables, and the CLI creates and writes the
-/// migrations ledger itself, so the shape is fixed.
+/// databases carry these tables, so the shape is fixed.
 pub(crate) struct Ledger<'a> {
     table: &'a str,
     /// The column naming an entry: a migration's version, a seed's name.
@@ -66,22 +63,11 @@ impl<'a> Ledger<'a> {
         if matches!(db_type, DatabaseType::MySQL | DatabaseType::MariaDB) {
             let connection = db.__get_connection()?;
             let executor = connection.executor();
-            let probe = build_statement_with_values(
-                executor.get_database_backend(),
-                "SELECT COUNT(*) > 0 FROM information_schema.tables \
-                 WHERE table_schema = DATABASE() AND table_name = ?",
-                vec![self.table.into()],
-            );
-            let present = match executor
-                .query_one_raw(probe)
-                .await
-                .map_err(translate_error)?
-            {
-                Some(row) => crate::sync::decode_table_exists(&row, self.table)?,
-                None => false,
-            };
-            if !present {
-                db.__internal_connection()?
+            let backend = executor.get_database_backend();
+            if !crate::schema::catalog::table_exists(&executor, backend, None, self.table).await? {
+                connection
+                    .pool()
+                    .connection()
                     .execute_unprepared(&sql)
                     .await
                     .map_err(translate_error)?;
@@ -106,7 +92,38 @@ impl<'a> Ledger<'a> {
             .await?;
 
         rows.iter()
-            .map(|row| row.try_get("", self.key_column).map_err(translate_error))
+            .map(|row| row.try_get(self.key_column).map_err(translate_error))
+            .collect()
+    }
+
+    /// Every entry of a migrations ledger, in the order the entries were
+    /// written, read on the ambient connection.
+    pub(crate) async fn applied_migrations(
+        &self,
+        db: &Database,
+    ) -> Result<Vec<super::AppliedMigration>> {
+        let db_type = db.execution_backend();
+        let quote = |identifier: &str| quote_ident(db_type, identifier);
+        let sql = format!(
+            "SELECT {}, {}, {} FROM {} ORDER BY {} ASC",
+            quote(self.key_column),
+            quote("name"),
+            quote(self.recorded_at_column),
+            quote(self.table),
+            quote("id")
+        );
+        let rows = db.fetch_rows(&sql, Vec::new()).await?;
+
+        rows.iter()
+            .map(|row| {
+                Ok(super::AppliedMigration {
+                    version: row.try_get(self.key_column).map_err(translate_error)?,
+                    name: row.try_get("name").map_err(translate_error)?,
+                    applied_at: row
+                        .try_get(self.recorded_at_column)
+                        .map_err(translate_error)?,
+                })
+            })
             .collect()
     }
 

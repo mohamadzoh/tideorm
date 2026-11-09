@@ -64,13 +64,16 @@ mod schema_script;
 #[path = "support/integration_parity.rs"]
 mod parity;
 
+#[path = "support/catalog_parity.rs"]
+mod catalog_parity;
+
 async fn assert_profiled_operation<T, Fut>(label: &str, future: Fut) -> T
 where
     Fut: Future<Output = tideorm::Result<T>>,
 {
     GlobalProfiler::enable();
     GlobalProfiler::reset();
-    GlobalProfiler::set_slow_threshold(0);
+    GlobalProfiler::set_slow_threshold(std::time::Duration::from_millis(0));
 
     let result = future
         .await
@@ -92,7 +95,7 @@ where
 
     GlobalProfiler::disable();
     GlobalProfiler::reset();
-    GlobalProfiler::set_slow_threshold(100);
+    GlobalProfiler::set_slow_threshold(std::time::Duration::from_millis(100));
 
     result
 }

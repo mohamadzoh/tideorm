@@ -31,13 +31,14 @@ impl QueryCache {
     ///
     /// Already-cached entries are kept; see [`QueryCache::apply_config`].
     pub fn init_global(config: CacheConfig) -> &'static QueryCache {
-        if GLOBAL_QUERY_CACHE
-            .set(QueryCache::with_config(config.clone()))
-            .is_err()
-        {
-            QueryCache::global().apply_config(config);
+        let mut config = Some(config);
+        let cache = GLOBAL_QUERY_CACHE
+            .get_or_init(|| QueryCache::with_config(config.take().unwrap_or_default()));
+        // Left over when the cache was already installed, by `global()` or a racing call.
+        if let Some(config) = config {
+            cache.apply_config(config);
         }
-        QueryCache::global()
+        cache
     }
 
     /// Enable the cache

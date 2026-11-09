@@ -57,7 +57,7 @@ pub(super) fn generate_eager_loader_impl(ctx: &BuildContext) -> TokenStream2 {
             }
 
             async fn __eager_load(
-                models: &mut [::tideorm::relations::WithRelations<Self>],
+                models: &mut [Self],
                 relation_tree: &::tideorm::relations::RelationTree,
             ) -> ::tideorm::Result<()> {
                 <Self as ::tideorm::relations::EagerLoadModel>::__validate_relations(relation_tree)?;
@@ -129,9 +129,8 @@ fn build_relation_arm(ctx: &BuildContext, field: &ModelField) -> TokenStream2 {
     quote! {
         #relation_name => {
             let related = #resolve_nested(#related, relation_tree.get_nested(#relation_name)).await?;
-            for (entry, related) in models.iter_mut().zip(related) {
-                entry.set_relation(#relation_name, &related)?;
-                entry.model.#ident.set_cached(related);
+            for (model, related) in models.iter_mut().zip(related) {
+                model.#ident.set_cached(related);
             }
         }
     }
@@ -142,7 +141,7 @@ fn parent_keys(parent_key_ident: &Ident) -> TokenStream2 {
     quote! {
         &models
             .iter()
-            .map(|entry| ::tideorm::prelude::json!(entry.model.#parent_key_ident))
+            .map(|model| ::tideorm::prelude::json!(model.#parent_key_ident))
             .collect::<Vec<_>>()
     }
 }

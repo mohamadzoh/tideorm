@@ -1,4 +1,4 @@
-use super::sql_lexer::{self, EscapeMode, QuotedRun, quoted_end};
+use super::sql_lexer::{EscapeMode, Kind, QuotedRun, Token, quoted_end};
 use crate::config::DatabaseType;
 
 #[cfg(feature = "fulltext")]
@@ -12,23 +12,13 @@ pub(crate) use fulltext::{
     sanitize_postgres_tsquery_literals, search_words,
 };
 
-/// Escape `value` for use inside a single-quoted SQL literal on `db_type`.
-pub(crate) fn escape_sql_literal_for_db(db_type: DatabaseType, value: &str) -> String {
-    let escaped = value.replace('\'', "''");
-    match db_type {
-        DatabaseType::MySQL | DatabaseType::MariaDB => escaped.replace('\\', "\\\\"),
-        DatabaseType::Postgres | DatabaseType::SQLite => escaped,
-    }
-}
+pub(crate) use crate::orm::sql_builder::is_plain_identifier as is_safe_identifier_segment;
 
-pub(crate) fn is_safe_identifier_segment(segment: &str) -> bool {
-    let mut chars = segment.chars();
-    match chars.next() {
-        Some(ch) if ch == '_' || ch.is_ascii_alphabetic() => {}
-        _ => return false,
-    }
-
-    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+/// The tokens of a raw fragment, read under PostgreSQL's rules whatever the
+/// backend: `[` quotes nothing there, so a bracket's contents are checked as
+/// SQL, and a dollar quote is a token of its own, which can be refused.
+fn fragment_tokens(sql: &str) -> impl Iterator<Item = Token<'_>> {
+    crate::orm::sql::tokens(sql, crate::orm::sql::Dialect::Postgres)
 }
 
 /// Scan a raw SQL fragment for statement separators and comment introducers that
@@ -43,76 +33,52 @@ pub(crate) fn is_safe_identifier_segment(segment: &str) -> bool {
 ///
 /// Being literal-aware means the scan has to agree with the server about where
 /// each literal *ends*, which is where backslashes come in — see
-/// [`consume_quoted_run`].
+/// [`quoted_run`].
 ///
 /// Returns a short description of the offending construct, or `None` when the
 /// fragment is free of them.
 fn find_forbidden_raw_sql_token(sql: &str) -> Option<&'static str> {
-    let chars: Vec<char> = sql.chars().collect();
-    let mut index = 0;
-
-    while index < chars.len() {
-        let ch = chars[index];
-        match ch {
-            '\'' => match consume_quoted_run(&chars, &mut index, '\'') {
-                QuotedRun::Closed => {}
-                QuotedRun::Unterminated => return Some("unterminated string literals"),
-                QuotedRun::AmbiguousEscape => {
-                    return Some("backslash-escaped quotes inside string literals");
-                }
-            },
-            '"' | '`' => match consume_quoted_run(&chars, &mut index, ch) {
-                QuotedRun::Closed => {}
-                QuotedRun::Unterminated => return Some("unterminated quoted identifiers"),
-                QuotedRun::AmbiguousEscape => {
-                    return Some("backslash-escaped quotes inside quoted identifiers");
-                }
-            },
+    let mut tokens = fragment_tokens(sql).peekable();
+    while let Some(token) = tokens.next() {
+        let literal = token.kind == Kind::Literal;
+        let reason = match token.kind {
             // Both quote a `'` the scan would read as a literal's quote, so
             // they would hide a comment from it; the backends disagree on them.
-            '$' if starts_dollar_quote(&chars, index) => return Some("dollar-quoted strings"),
-            '[' if bracket_holds_quote(&chars, index) => {
-                return Some("quotes inside square brackets");
+            Kind::Literal if token.text.starts_with('$') => "dollar-quoted strings",
+            Kind::Symbol if token.text == "[" && bracket_holds_quote(&sql[token.start..]) => {
+                "quotes inside square brackets"
             }
-            ';' => return Some("statement separators"),
-            '\0' => return Some("NUL bytes"),
-            '#' => return Some("SQL comments"),
-            '-' if chars.get(index + 1) == Some(&'-') => return Some("SQL comments"),
-            '/' if chars.get(index + 1) == Some(&'*') => return Some("SQL comments"),
-            '*' if chars.get(index + 1) == Some(&'/') => return Some("SQL comments"),
-            _ => index += 1,
-        }
+            Kind::Literal | Kind::Identifier => match quoted_run(&sql[token.start..]) {
+                QuotedRun::Closed => continue,
+                QuotedRun::Unterminated if literal => "unterminated string literals",
+                QuotedRun::Unterminated => "unterminated quoted identifiers",
+                QuotedRun::AmbiguousEscape if literal => {
+                    "backslash-escaped quotes inside string literals"
+                }
+                QuotedRun::AmbiguousEscape => "backslash-escaped quotes inside quoted identifiers",
+            },
+            Kind::Comment => "SQL comments",
+            Kind::Symbol => match token.text {
+                ";" => "statement separators",
+                "\0" => "NUL bytes",
+                "#" => "SQL comments",
+                "*" if tokens.peek().is_some_and(|next| next.text == "/") => "SQL comments",
+                _ => continue,
+            },
+            Kind::Word | Kind::Space | Kind::Parameter => continue,
+        };
+        return Some(reason);
     }
-
     None
 }
 
-/// Whether the `$` at `index` opens a PostgreSQL dollar-quoted string, `$$` or
-/// `$tag$`: one starting a token, since `$` inside a MySQL identifier
-/// (`a$b`) and a placeholder (`$1`) open none.
-fn starts_dollar_quote(chars: &[char], index: usize) -> bool {
-    let starts_token = index
-        .checked_sub(1)
-        .is_none_or(|previous| !sql_lexer::identifier_char(chars[previous]));
-    // Only the delimiter, which ends at the next `$`, is read, not the rest
-    // of the fragment: a builder-rendered PostgreSQL subquery has a `$n` per
-    // value.
-    starts_token
-        && chars[index + 1..]
-            .iter()
-            .position(|&ch| ch == '$')
-            .is_some_and(|close| {
-                let delimiter: String = chars[index..=index + 1 + close].iter().collect();
-                sql_lexer::dollar_tag_len(&delimiter).is_some()
-            })
-}
-
-/// Whether the `[` at `index` and the next `]` hold a quote: SQLite reads the
-/// brackets as a quoted identifier, in which a quote is an ordinary character.
-fn bracket_holds_quote(chars: &[char], index: usize) -> bool {
-    chars[index + 1..]
-        .iter()
-        .take_while(|ch| **ch != ']')
+/// Whether the `[` opening `sql` and the next `]` hold a quote: SQLite reads
+/// the brackets as a quoted identifier, in which a quote is an ordinary
+/// character.
+fn bracket_holds_quote(sql: &str) -> bool {
+    sql[1..]
+        .chars()
+        .take_while(|ch| *ch != ']')
         .any(|ch| matches!(ch, '\'' | '"' | '`'))
 }
 
@@ -132,8 +98,8 @@ pub(crate) fn validate_raw_sql_fragment(kind: &str, sql: &str) -> std::result::R
     Ok(())
 }
 
-/// Walk a quoted string literal or quoted identifier starting at its opening
-/// quote, leaving `index` just past the closing quote when the run is closed.
+/// How the quoted string literal or quoted identifier opening `sql` ends,
+/// read the way no backend disagrees with.
 ///
 /// A doubled quote (`''`, `""`, or a doubled backtick) always continues the run
 /// on every backend TideORM targets. Backslashes are the hard part, because
@@ -162,45 +128,39 @@ pub(crate) fn validate_raw_sql_fragment(kind: &str, sql: &str) -> std::result::R
 /// `\\` is consumed as a pair instead, because every reading agrees on where it
 /// ends — that keeps a value such as `'C:\\'` (as MySQL escapes it) and a plain
 /// `'C:\temp'` from being rejected for no reason.
-fn consume_quoted_run(chars: &[char], index: &mut usize, quote: char) -> QuotedRun {
-    let tail = &chars[*index..];
-    let (consumed, result) = quoted_end(
-        tail.iter().copied().enumerate().skip(1),
+fn quoted_run(sql: &str) -> QuotedRun {
+    let quote = sql.chars().next().unwrap_or('\'');
+    quoted_end(
+        sql.char_indices().skip(1),
         quote,
         EscapeMode::RejectAmbiguous,
-        tail.len(),
-        |_| 1,
-    );
-    *index += consumed;
-    result
+        sql.len(),
+        char::len_utf8,
+    )
+    .1
 }
 
-fn consume_numeric_literal(chars: &[char], index: &mut usize) {
-    *index += 1;
-
-    while *index < chars.len()
-        && (chars[*index].is_ascii_digit() || chars[*index] == '.' || chars[*index] == '_')
-    {
-        *index += 1;
-    }
-
-    if *index < chars.len() && (chars[*index] == 'e' || chars[*index] == 'E') {
-        let exponent_start = *index;
-        *index += 1;
-
-        if *index < chars.len() && (chars[*index] == '+' || chars[*index] == '-') {
-            *index += 1;
-        }
-
-        let exponent_digits_start = *index;
-        while *index < chars.len() && chars[*index].is_ascii_digit() {
-            *index += 1;
-        }
-
-        if exponent_digits_start == *index {
-            *index = exponent_start;
+/// The length of the number opening `sql`: digits, `.` and `_`, then an
+/// exponent when one with digits follows. The lexer has no number token; a
+/// number reads as digit symbols, and an exponent as a word (`1e5union` holds
+/// the word `union`).
+fn numeric_literal_len(sql: &str) -> usize {
+    let bytes = sql.as_bytes();
+    let mut end = 1 + bytes[1..]
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit() || matches!(byte, b'.' | b'_'))
+        .count();
+    if matches!(bytes.get(end), Some(b'e' | b'E')) {
+        let sign = usize::from(matches!(bytes.get(end + 1), Some(b'+' | b'-')));
+        let digits = bytes[end + 1 + sign..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        if digits > 0 {
+            end += 1 + sign + digits;
         }
     }
+    end
 }
 
 /// One top-level lexical unit of a raw fragment.
@@ -221,68 +181,50 @@ enum SqlToken {
 /// Quoted literals and identifiers, numbers, whitespace and parentheses are
 /// consumed here — parentheses only to track depth and to reject an imbalance.
 /// Callers run after `validate_raw_sql_fragment`, which already rejects
-/// `QuotedRun::AmbiguousEscape`.
+/// `QuotedRun::AmbiguousEscape`, comments and dollar quotes.
 fn scan_sql_tokens(
     sql: &str,
     kind: &str,
     mut visit: impl FnMut(SqlToken) -> std::result::Result<(), String>,
 ) -> std::result::Result<(), String> {
-    let chars: Vec<char> = sql.chars().collect();
-    let mut index = 0;
     let mut paren_depth = 0usize;
+    let mut number_end = 0;
 
-    while index < chars.len() {
-        let ch = chars[index];
-        match ch {
-            _ if ch.is_whitespace() => {
-                index += 1;
+    for token in fragment_tokens(sql) {
+        let end = token.start + token.text.len();
+        if end <= number_end {
+            continue;
+        }
+        // The rest of a word a number runs into.
+        let start = token.start.max(number_end);
+        let text = &sql[start..end];
+        match token.kind {
+            Kind::Literal | Kind::Identifier if !token.terminated => {
+                let what = if token.kind == Kind::Literal {
+                    "string literal"
+                } else {
+                    "quoted identifier"
+                };
+                return Err(format!("unsafe {}: unterminated {}", kind, what));
             }
-            '\'' => {
-                if consume_quoted_run(&chars, &mut index, '\'') != QuotedRun::Closed {
-                    return Err(format!("unsafe {}: unterminated string literal", kind));
-                }
-            }
-            '"' | '`' => {
-                if consume_quoted_run(&chars, &mut index, ch) != QuotedRun::Closed {
-                    return Err(format!("unsafe {}: unterminated quoted identifier", kind));
-                }
-            }
-            '(' => {
-                paren_depth += 1;
-                index += 1;
-            }
-            ')' => {
+            Kind::Space | Kind::Comment | Kind::Literal | Kind::Identifier => {}
+            Kind::Symbol if text == "(" => paren_depth += 1,
+            Kind::Symbol if text == ")" => {
                 if paren_depth == 0 {
                     return Err(format!("unsafe {}: unbalanced closing parenthesis", kind));
                 }
                 paren_depth -= 1;
-                index += 1;
             }
-            _ if ch.is_ascii_digit() => {
-                consume_numeric_literal(&chars, &mut index);
+            Kind::Symbol if text.starts_with(|ch: char| ch.is_ascii_digit()) => {
+                number_end = start + numeric_literal_len(&sql[start..]);
             }
-            _ if ch == '_' || ch.is_ascii_alphabetic() => {
-                let start = index;
-                index += 1;
-                while index < chars.len()
-                    && (chars[index] == '_' || chars[index].is_ascii_alphanumeric())
-                {
-                    index += 1;
-                }
-
-                let mut next = index;
-                while next < chars.len() && chars[next].is_whitespace() {
-                    next += 1;
-                }
-                visit(SqlToken::Word {
-                    text: chars[start..index].iter().collect(),
-                    depth: paren_depth,
-                    called: chars.get(next) == Some(&'('),
-                })?;
-            }
-            _ => {
-                visit(SqlToken::Symbol(ch))?;
-                index += 1;
+            Kind::Word => visit(SqlToken::Word {
+                text: text.to_string(),
+                depth: paren_depth,
+                called: sql[end..].trim_start().starts_with('('),
+            })?,
+            Kind::Symbol | Kind::Parameter => {
+                visit(SqlToken::Symbol(text.chars().next().unwrap_or_default()))?
             }
         }
     }
@@ -513,15 +455,29 @@ pub(crate) fn quote_ident(db_type: DatabaseType, name: &str) -> String {
 /// Every statement quotes each column it names, so this builds in place
 /// rather than allocating per identifier.
 pub(crate) fn push_quoted_ident(out: &mut String, db_type: DatabaseType, name: &str) {
-    let q = db_type.quote_char();
-    out.push(q);
-    for ch in name.chars() {
-        if ch == q {
-            out.push(q);
-        }
-        out.push(ch);
+    db_type.dialect().push_identifier(out, name);
+}
+
+/// `object` quoted and, when `schema` is given, qualified with it:
+/// `"schema"."object"`.
+pub(crate) fn quote_qualified(db_type: DatabaseType, schema: Option<&str>, object: &str) -> String {
+    let mut quoted = String::new();
+    push_quoted_qualified(&mut quoted, db_type, schema, object);
+    quoted
+}
+
+/// Append [`quote_qualified`]'s rendering to `out`.
+pub(crate) fn push_quoted_qualified(
+    out: &mut String,
+    db_type: DatabaseType,
+    schema: Option<&str>,
+    object: &str,
+) {
+    if let Some(schema) = schema {
+        push_quoted_ident(out, db_type, schema);
+        out.push('.');
     }
-    out.push(q);
+    push_quoted_ident(out, db_type, object);
 }
 
 /// `columns` quoted and joined for a key, index or insert column list, each

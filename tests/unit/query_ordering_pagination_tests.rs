@@ -11,7 +11,7 @@ struct PaginationUser {
 fn test_page_rejects_arguments_that_name_no_page() {
     for (page, per_page, field, message) in [
         (0, 10, "page", "at least 1"),
-        (1, 0, "per_page", ""),
+        (1, 0, "per_page", "greater than 0"),
         (u64::MAX, 2, "page", "exceeds i64::MAX"),
     ] {
         let err = PaginationUser::query()

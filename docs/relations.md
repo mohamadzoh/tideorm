@@ -128,7 +128,7 @@ for user in users {
 }
 ```
 
-Eager queries return `WithRelations<User>` wrappers that dereference to `User`, so the normal relation helper fields remain available and expose their cached payloads through `get_cached()`.
+Eager queries return the models themselves, each requested relation's rows in its wrapper: `get_cached()` reads them, and `is_loaded()` tells a relation the query loaded, even to no rows, from one it did not.
 
 Filter, order and page the query before `with()`; after it, `query(|q| ..)` reaches every query method:
 
@@ -224,6 +224,9 @@ user.roles.attach(role_id).await?;
 // Detach a role
 user.roles.detach(role_id).await?;
 
+// Detach every role, returning how many links were removed
+let removed = user.roles.detach_all().await?;
+
 // Sync roles (replace all with new set)
 user.roles.sync(vec![
     serde_json::json!(1),
@@ -285,7 +288,7 @@ Enable the feature first:
 
 ```toml
 [dependencies]
-tideorm = { version = "0.16.2", features = ["postgres", "attachments"] }
+tideorm = { version = "0.17.0", features = ["postgres", "attachments"] }
 ```
 
 ### Model Setup
@@ -403,7 +406,7 @@ product.sync("images", vec![
 ])?;
 
 // Clear all images
-product.sync("images", vec![])?;
+product.sync("images", Vec::<&str>::new())?;
 
 // Sync with metadata
 let attachments = vec![
@@ -566,10 +569,8 @@ TideConfig::init()
 
 #### Per-Model URL Routing
 
-There is no per-model override: the derive already emits the whole `ModelMeta`
-impl for a `#[tideorm::model]` struct, so a second hand-written
-`impl ModelMeta for Product` is a conflicting-implementation error. Every model
-resolves `file_url_generator()` to the one configured on `TideConfig`.
+There is no per-model override: every model renders its attachments with the
+one generator configured on `TideConfig`.
 
 Route per model inside that single generator instead — it receives the field
 name, and `FileAttachment::metadata` carries anything else you stashed at attach
@@ -614,9 +615,6 @@ let file = FileAttachment::with_metadata(
 );
 let url = file.url("video");
 
-// Using the model's generator (its `file_url_generator()` override, if any)
-let url = file.url_with_generator("thumbnail", Product::file_url_generator());
-
 // Using FileAttachment method directly
 let attachment = product.get_file("thumbnail")?;
 if let Some(thumb) = attachment {
@@ -633,10 +631,9 @@ if let Some(thumb) = attachment {
 
 URL generators are resolved in this order:
 
-1. **Model-specific generator** - If the model overrides `file_url_generator()`
-2. **Global custom generator** - If set via `TideConfig::file_url_generator()`
-3. **Global base URL** - If set via `TideConfig::file_base_url()`
-4. **Key as-is** - If no configuration, returns the key unchanged
+1. **Global custom generator** - If set via `TideConfig::file_url_generator()`
+2. **Field or global base URL** - If set via `TideConfig::file_base_url_for()` or `TideConfig::file_base_url()`
+3. **Key as-is** - If no configuration, returns the key unchanged
 
 ---
 
@@ -648,7 +645,7 @@ Enable the feature first:
 
 ```toml
 [dependencies]
-tideorm = { version = "0.16.2", features = ["postgres", "translations"] }
+tideorm = { version = "0.17.0", features = ["postgres", "translations"] }
 ```
 
 ### Model Setup
@@ -687,18 +684,15 @@ product.set_translation("name", "ar", "اسم المنتج")?;
 product.set_translation("name", "fr", "Nom du produit")?;
 product.set_translation("description", "ar", "وصف المنتج")?;
 
-// Set multiple translations at once
-let mut names = HashMap::new();
-names.insert("en", "Product Name");
-names.insert("ar", "اسم المنتج");
-names.insert("fr", "Nom du produit");
-product.set_translations("name", names)?;
+// Set multiple translations at once: a HashMap or any (language, value) pairs
+product.set_translations("name", [
+    ("en", "Product Name"),
+    ("ar", "اسم المنتج"),
+    ("fr", "Nom du produit"),
+])?;
 
 // Sync translations (replace all for a field)
-let mut new_names = HashMap::new();
-new_names.insert("en", "New Product Name");
-new_names.insert("de", "Neuer Produktname");
-product.sync_translations("name", new_names)?;
+product.sync_translations("name", [("en", "New Product Name"), ("de", "Neuer Produktname")])?;
 
 // Save to persist
 product.update().await?;
@@ -765,13 +759,17 @@ product.update().await?;
 
 ```rust
 // Get JSON with translated fields (removes raw translations column)
-let mut opts = HashMap::new();
-opts.insert("language".to_string(), "ar".to_string());
-let json = product.to_translated_json(Some(opts));
+let json = product.to_translated_json_in("ar");
 // Result: {"id": 1, "name": "اسم المنتج", "description": "وصف المنتج", "price": 99.99}
+// A field with no Arabic translation takes the fallback language's, and then
+// the model's own value.
 
-// Get JSON with fallback (if Arabic not available, uses fallback language)
-let json = product.to_translated_json(Some(opts));
+// In the fallback language
+let json = product.to_translated_json(None);
+
+// `to_json` with its translatable fields in one language, hidden attributes
+// applied as for any `to_json`; `try_to_json_in` reports a failure instead
+let json = product.to_json_in("ar");
 
 // Get JSON including all translations (for admin interfaces)
 let json = product.to_json_with_all_translations();

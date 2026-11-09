@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::error::{Error, Result};
-use crate::internal::InternalConnection;
+use crate::internal::{ConnectTarget, InternalConnection};
 
 use super::Database;
 
@@ -14,43 +14,30 @@ impl Database {
 
 /// Builder for connection-pool settings such as limits and timeouts.
 ///
+/// The database is named by a URL or, for settings a URL does not name, by
+/// the driver's own options ([`postgres_options`](Self::postgres_options),
+/// [`mysql_options`](Self::mysql_options), [`sqlite_options`](Self::sqlite_options)).
+/// `{:?}` masks a URL's credentials and leaves driver options out, since
+/// they hold the password.
+///
 /// A setting left unset keeps the driver's default, which is not always
 /// `TideConfig`'s: the driver keeps no idle connection and waits 30 seconds
 /// for a free one, where `TideConfig` keeps one and waits 8.
 ///
 /// An in-memory SQLite database lives only while a connection to it is open,
 /// so its pool keeps one open and closes none for being idle or old, whatever
-/// those settings say.
-#[derive(Clone, Default)]
+/// those settings say. One with `cache=private` gives each connection a
+/// database of its own, so its pool must hold one connection.
+#[derive(Clone, Debug, Default)]
 pub struct DatabaseBuilder {
-    url: Option<String>,
+    target: Option<ConnectTarget>,
     max_connections: Option<u32>,
     min_connections: Option<u32>,
     connect_timeout: Option<Duration>,
     idle_timeout: Option<Duration>,
     max_lifetime: Option<Duration>,
     acquire_timeout: Option<Duration>,
-}
-
-/// Masks the URL's credentials: `{:?}` is how configuration ends up in logs.
-impl std::fmt::Debug for DatabaseBuilder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DatabaseBuilder")
-            .field(
-                "url",
-                &self
-                    .url
-                    .as_deref()
-                    .map(crate::internal::mask_url_credentials),
-            )
-            .field("max_connections", &self.max_connections)
-            .field("min_connections", &self.min_connections)
-            .field("connect_timeout", &self.connect_timeout)
-            .field("idle_timeout", &self.idle_timeout)
-            .field("max_lifetime", &self.max_lifetime)
-            .field("acquire_timeout", &self.acquire_timeout)
-            .finish()
-    }
+    statement_cache_capacity: Option<usize>,
 }
 
 impl DatabaseBuilder {
@@ -61,7 +48,28 @@ impl DatabaseBuilder {
 
     /// Set the database connection URL.
     pub fn url(mut self, url: impl Into<String>) -> Self {
-        self.url = Some(url.into());
+        self.target = Some(ConnectTarget::Url(url.into()));
+        self
+    }
+
+    /// Connect to PostgreSQL with the driver's options instead of a URL.
+    #[cfg(feature = "postgres")]
+    pub fn postgres_options(mut self, options: crate::prelude::PgConnectOptions) -> Self {
+        self.target = Some(options.into());
+        self
+    }
+
+    /// Connect to MySQL or MariaDB with the driver's options instead of a URL.
+    #[cfg(feature = "mysql")]
+    pub fn mysql_options(mut self, options: crate::prelude::MySqlConnectOptions) -> Self {
+        self.target = Some(options.into());
+        self
+    }
+
+    /// Connect to SQLite with the driver's options instead of a URL.
+    #[cfg(feature = "sqlite")]
+    pub fn sqlite_options(mut self, options: crate::prelude::SqliteConnectOptions) -> Self {
+        self.target = Some(options.into());
         self
     }
 
@@ -77,36 +85,41 @@ impl DatabaseBuilder {
         self
     }
 
-    /// Set how long to wait while opening a connection.
-    ///
-    /// The driver has one timeout for handing out a connection, opening one
-    /// when the pool has room, so this and
-    /// [`acquire_timeout`](Self::acquire_timeout) set the same limit, and the
-    /// longer of the two applies.
+    /// Bound each attempt to open a connection, TLS, authentication and
+    /// connection hooks included. A checkout still ends at
+    /// [`acquire_timeout`](Self::acquire_timeout) if that comes first.
     pub fn connect_timeout(mut self, duration: Duration) -> Self {
         self.connect_timeout = Some(duration);
         self
     }
 
-    /// Set how long an idle pooled connection may stay open.
+    /// Close a connection left unused this long.
     pub fn idle_timeout(mut self, duration: Duration) -> Self {
         self.idle_timeout = Some(duration);
         self
     }
 
-    /// Set the maximum lifetime for a pooled connection before recycle.
+    /// Close a connection this old, however busy. Keep it under any idle
+    /// or lifetime limit the server, or a proxy in front of it, enforces.
     pub fn max_lifetime(mut self, duration: Duration) -> Self {
         self.max_lifetime = Some(duration);
         self
     }
 
-    /// Set how long to wait for a free connection when the pool is exhausted.
-    ///
-    /// The driver bounds checking one out and opening a new one with a single
-    /// timeout, so this and [`connect_timeout`](Self::connect_timeout) set
-    /// the same limit, and the longer of the two applies.
+    /// Bound a whole checkout: waiting for a free connection, its ping and
+    /// hooks, and opening a new one. Each attempt to open one is also
+    /// bounded by [`connect_timeout`](Self::connect_timeout).
     pub fn acquire_timeout(mut self, duration: Duration) -> Self {
         self.acquire_timeout = Some(duration);
+        self
+    }
+
+    /// Keep up to `capacity` prepared statements per connection, dropping the
+    /// least recently used past that; the default keeps 100. With 0 none is
+    /// kept and every statement is prepared for its run, as a proxy pooling
+    /// transactions (PgBouncer) needs.
+    pub fn statement_cache_capacity(mut self, capacity: usize) -> Self {
+        self.statement_cache_capacity = Some(capacity);
         self
     }
 
@@ -120,14 +133,13 @@ impl DatabaseBuilder {
             .acquire_timeout(pool.acquire_timeout)
     }
 
-    /// Connect using the configured URL and pool settings.
+    /// Connect using the configured URL or driver options and pool settings.
     ///
-    /// Returns a configuration error if no URL was provided.
+    /// Returns a configuration error if neither was provided.
     pub async fn build(self) -> Result<Database> {
-        let url = self
-            .url
-            .ok_or_else(|| Error::configuration("Database URL is required"))?;
-        let url = crate::config::rewrite_driver_url(&url);
+        let target = self
+            .target
+            .ok_or_else(|| Error::configuration("Database URL or driver options are required"))?;
         match (self.min_connections, self.max_connections) {
             (_, Some(0)) => {
                 return Err(Error::configuration(
@@ -141,99 +153,33 @@ impl DatabaseBuilder {
             }
             _ => {}
         }
-        let memory = sqlite_memory(&url);
-        let in_memory = memory.is_some();
-        let private_memory = memory == Some(Cache::Private);
-        if private_memory
-            && (self.max_connections.is_some_and(|max| max > 1)
-                || self.min_connections.is_some_and(|min| min > 1))
-        {
-            return Err(Error::configuration(
-                "an in-memory SQLite database with cache=private requires a pool size of one",
-            ));
-        }
-
-        let mut opts = crate::internal::ConnectOptions::new(url.clone());
-        crate::internal::quiet_driver_logging(&mut opts);
-
-        if private_memory {
-            opts.max_connections(1);
-        } else if let Some(max) = self.max_connections {
+        let mut opts = crate::internal::ConnectOptions::new(target);
+        if let Some(max) = self.max_connections {
             opts.max_connections(max);
         }
-        match self.min_connections {
-            Some(min) if in_memory => opts.min_connections(min.max(1)),
-            Some(min) => opts.min_connections(min),
-            None if in_memory => opts.min_connections(1),
-            None => &mut opts,
-        };
-        // sqlx has one checkout timeout, which also covers opening a
-        // connection when the pool has room, and SeaORM maps both settings
-        // onto it, the later one winning. The longer is passed, so neither
-        // cuts the other short.
-        let checkout_timeout = match (self.connect_timeout, self.acquire_timeout) {
-            (Some(connect), Some(acquire)) => Some(connect.max(acquire)),
-            (connect, acquire) => connect.or(acquire),
-        };
-        if let Some(timeout) = checkout_timeout {
+        if let Some(min) = self.min_connections {
+            opts.min_connections(min);
+        }
+        if let Some(timeout) = self.connect_timeout {
+            opts.connect_timeout(timeout);
+        }
+        if let Some(timeout) = self.acquire_timeout {
             opts.acquire_timeout(timeout);
         }
-        if in_memory {
-            opts.idle_timeout(None).max_lifetime(None);
-        } else {
-            if let Some(timeout) = self.idle_timeout {
-                opts.idle_timeout(timeout);
-            }
-            if let Some(lifetime) = self.max_lifetime {
-                opts.max_lifetime(lifetime);
-            }
+        if let Some(timeout) = self.idle_timeout {
+            opts.idle_timeout(timeout);
+        }
+        if let Some(lifetime) = self.max_lifetime {
+            opts.max_lifetime(lifetime);
+        }
+        if let Some(capacity) = self.statement_cache_capacity {
+            opts.statement_cache_capacity(capacity);
         }
         let conn = crate::internal::OrmDatabase::connect(opts)
             .await
-            .map_err(|err| crate::internal::translate_connect_error(err, &url))?;
+            .map_err(crate::internal::translate_connection_error)?;
 
         let connection = InternalConnection::open(conn).await?;
-        if private_memory {
-            // Named private-cache memory databases do not share data even
-            // when their filenames match another pool's.
-            *connection.cache_scope.write() =
-                Some(format!("sqlite-private:{}", uuid::Uuid::new_v4()).into());
-        }
         Ok(Database::from_internal_connection(connection))
     }
-}
-
-/// How an in-memory SQLite database shares its pages between connections.
-#[derive(PartialEq)]
-enum Cache {
-    Shared,
-    /// Each connection would see a database of its own.
-    Private,
-}
-
-/// The cache of the in-memory SQLite database `url` opens, as sqlx reads it
-/// (`:memory:`, an empty path, or `mode=memory`); `None` for any other URL.
-fn sqlite_memory(url: &str) -> Option<Cache> {
-    let (scheme, rest) = url.split_once(':')?;
-    if !scheme.eq_ignore_ascii_case("sqlite") {
-        return None;
-    }
-    let rest = rest.strip_prefix("//").unwrap_or(rest);
-    let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
-    let mut pairs = url::form_urlencoded::parse(query.as_bytes());
-    let in_memory = path.is_empty()
-        || path == ":memory:"
-        || pairs
-            .clone()
-            .any(|(key, value)| key == "mode" && value == "memory");
-    if !in_memory {
-        return None;
-    }
-    Some(
-        if pairs.any(|(key, value)| key == "cache" && value == "private") {
-            Cache::Private
-        } else {
-            Cache::Shared
-        },
-    )
 }

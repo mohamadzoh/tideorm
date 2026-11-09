@@ -1,29 +1,4 @@
-use super::{Backend, can_rollback_leaked_transaction};
 use super::{Error, LEAKED_TRANSACTION_MESSAGE, LeakedRollback, leaked_transaction_error};
-
-/// A leaked top-level transaction is rolled back explicitly where the driver
-/// resynchronizes the connection afterwards; SQLite and an unknown backend
-/// keep the drop-time rollback. A leaked savepoint never issues a bare
-/// `ROLLBACK`, which would abort the enclosing transaction.
-#[test]
-fn leaked_transactions_are_rolled_back_explicitly_only_where_that_is_safe() {
-    for (backend, savepoint, expected) in [
-        (Some(Backend::Postgres), false, true),
-        (Some(Backend::MySql), false, true),
-        (Some(Backend::Sqlite), false, false),
-        (None, false, false),
-        (Some(Backend::Postgres), true, false),
-        (Some(Backend::MySql), true, false),
-        (Some(Backend::Sqlite), true, false),
-        (None, true, false),
-    ] {
-        assert_eq!(
-            can_rollback_leaked_transaction(backend, savepoint),
-            expected,
-            "{backend:?}, savepoint: {savepoint}"
-        );
-    }
-}
 
 #[test]
 fn the_leak_report_names_the_rollback_outcome_and_keeps_the_closure_error() {
@@ -32,11 +7,6 @@ fn the_leak_report_names_the_rollback_outcome_and_keeps_the_closure_error() {
             LeakedRollback::RolledBack,
             None,
             vec!["rolled back explicitly"],
-        ),
-        (
-            LeakedRollback::DeferredToDrop,
-            None,
-            vec!["when the stray handle drops"],
         ),
         // A rejected rollback is never swallowed.
         (
@@ -56,4 +26,65 @@ fn the_leak_report_names_the_rollback_outcome_and_keeps_the_closure_error() {
             assert!(message.contains(fragment), "{fragment:?}: {message}");
         }
     }
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn an_aborted_transaction_refuses_every_executor_entry_point() {
+    use super::ConnectionRef;
+    use crate::Database;
+    use crate::orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
+
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    db.exec_raw("CREATE TABLE guarded (id INTEGER)")
+        .await
+        .unwrap();
+    let independent = Database::connect("sqlite::memory:").await.unwrap();
+    let result = db
+        .transaction(async move |_| {
+            // What a deadlock reported by the driver does; no live MySQL
+            // server is needed to verify the gate.
+            let connection = crate::database::__current_connection()?;
+            let ConnectionRef::Transaction(transaction, ..) = &connection else {
+                unreachable!("the transaction installs itself");
+            };
+            transaction.abort("a statement inside it deadlocked");
+            let executor = connection.executor();
+            let statement =
+                || Statement::from_string(DbBackend::SQLite, "INSERT INTO guarded VALUES (1)");
+            assert!(executor.execute_raw(statement()).await.is_err());
+            assert!(
+                executor
+                    .execute_unprepared("INSERT INTO guarded VALUES (2)")
+                    .await
+                    .is_err()
+            );
+            assert!(executor.query_one_raw(statement()).await.is_err());
+            assert!(executor.query_all_raw(statement()).await.is_err());
+            assert!(executor.begin().await.is_err());
+            // A separate pooled database remains usable in the failed scope.
+            independent
+                .exec_raw("CREATE TABLE independent (id INTEGER)")
+                .await?;
+            Ok(())
+        })
+        .await;
+    assert!(result.unwrap_err().to_string().contains("deadlocked"));
+    let rows = db
+        .query_raw_json("SELECT COUNT(*) AS n FROM guarded")
+        .await
+        .unwrap();
+    assert_eq!(rows[0]["n"], 0);
+    // The next transaction has no stale failure flag.
+    db.transaction(async |_| {
+        Database::execute("INSERT INTO guarded VALUES (3)").await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let rows = db
+        .query_raw_json("SELECT COUNT(*) AS n FROM guarded")
+        .await
+        .unwrap();
+    assert_eq!(rows[0]["n"], 1);
 }

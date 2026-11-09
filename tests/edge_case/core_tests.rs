@@ -6,9 +6,14 @@ mod error_conversions {
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file gone");
         let tide_err: Error = io_err.into();
         match &tide_err {
-            Error::Internal { message } => assert!(message.contains("file gone")),
+            Error::Internal { message, .. } => assert!(message.contains("file gone")),
             other => panic!("expected Internal, got {:?}", other),
         }
+        let source = std::error::Error::source(&tide_err).expect("the io::Error is kept");
+        let io = source
+            .downcast_ref::<std::io::Error>()
+            .expect("the source is the io::Error");
+        assert_eq!(io.kind(), std::io::ErrorKind::NotFound);
         assert_eq!(tide_err.code(), "TIDE_INTERNAL");
         assert_eq!(tide_err.http_status(), 500);
     }
@@ -19,9 +24,11 @@ mod error_conversions {
         let expected = serde_err.to_string();
         let tide_err: Error = serde_err.into();
         match &tide_err {
-            Error::Conversion { message } => assert_eq!(message, &expected),
+            Error::Conversion { message, .. } => assert_eq!(message, &expected),
             other => panic!("expected Conversion, got {:?}", other),
         }
+        let source = std::error::Error::source(&tide_err).expect("the serde_json::Error is kept");
+        assert!(source.downcast_ref::<serde_json::Error>().is_some());
         assert_eq!(tide_err.code(), "TIDE_CONVERSION");
         assert_eq!(tide_err.http_status(), 400);
     }

@@ -22,15 +22,14 @@ async fn direct_relation_load_refreshes_stale_cached_values() {
     .await;
 
     let mut has_one =
-        HasOne::<DirectRelationProfile>::new("user_id", "id").with_parent_pk(json!(1));
+        HasOne::<DirectRelationProfile>::new("user_id", "id").with_parent_pk(1, false);
     has_one.set_cached(Some(DirectRelationProfile {
         id: 10,
         user_id: 1,
         name: "Stale Profile".to_string(),
     }));
 
-    let mut belongs_to =
-        BelongsTo::<DirectRelationUser>::new("user_id", "id").with_fk_value(json!(1));
+    let mut belongs_to = BelongsTo::<DirectRelationUser>::new("user_id", "id").with_fk_value(1);
     belongs_to.set_cached(Some(DirectRelationUser {
         id: 1,
         name: "Stale User".to_string(),
@@ -38,7 +37,7 @@ async fn direct_relation_load_refreshes_stale_cached_values() {
         posts: Default::default(),
     }));
 
-    let mut has_many = HasMany::<DirectRelationPost>::new("user_id", "id").with_parent_pk(json!(1));
+    let mut has_many = HasMany::<DirectRelationPost>::new("user_id", "id").with_parent_pk(1, false);
     has_many.set_cached(vec![DirectRelationPost {
         id: 999,
         user_id: 1,
@@ -135,13 +134,9 @@ async fn eager_loading_caches_and_records_direct_relations() {
     assert_eq!(titles(posts), ["First Post", "Second Post"]);
 
     assert!(
-        users[0].has_relation("posts"),
+        users[0].posts.is_loaded(),
         "the eager loader must record what it fetched"
     );
-    let recorded: Vec<DirectRelationPost> = users[0]
-        .get_relation("posts")
-        .expect("the recorded payload should deserialize back");
-    assert_eq!(titles(&recorded), ["First Post", "Second Post"]);
 
     let users = DirectRelationUser::query()
         .where_eq("id", 1)
@@ -149,7 +144,7 @@ async fn eager_loading_caches_and_records_direct_relations() {
         .get()
         .await
         .expect("eager loading should succeed");
-    assert!(!users[0].has_relation("profile"));
+    assert!(!users[0].profile.is_loaded());
     assert!(users[0].profile.get_cached().is_none());
 
     crate::test_support::reset_globals();
@@ -176,20 +171,20 @@ async fn eager_loading_resolves_morph_one_relations() {
 
     let owner = employees
         .iter()
-        .find(|entry| entry.model.id == 1)
+        .find(|entry| entry.id == 1)
         .expect("employee 1 should be loaded");
     assert_eq!(
-        owner.model.avatar.get_cached().map(|image| image.id),
+        owner.avatar.get_cached().map(|image| image.id),
         Some(1),
         "the row whose imageable_type names another table must not match"
     );
-    assert!(owner.has_relation("avatar"));
+    assert!(owner.avatar.is_loaded());
 
     let without_avatar = employees
         .iter()
-        .find(|entry| entry.model.id == 2)
+        .find(|entry| entry.id == 2)
         .expect("employee 2 should be loaded");
-    assert!(without_avatar.model.avatar.get_cached().is_none());
+    assert!(without_avatar.avatar.get_cached().is_none());
 
     crate::test_support::reset_globals();
 }
@@ -332,8 +327,11 @@ async fn morph_load_does_not_serve_a_deserialized_payload() {
         owner: Default::default(),
     };
 
-    let mut one = MorphOne::<RelationTestImage>::new("imageable", "id")
-        .with_parent(json!(2), "relation_test_employees".to_string());
+    let mut one = MorphOne::<RelationTestImage>::new("imageable", "id").with_parent(
+        2,
+        "relation_test_employees".to_string(),
+        false,
+    );
     one.set_cached(Some(forged.clone()));
     let loaded = one
         .load()
@@ -341,8 +339,11 @@ async fn morph_load_does_not_serve_a_deserialized_payload() {
         .expect("loading the morph-one should succeed");
     assert_eq!(loaded.map(|image| image.id), Some(7));
 
-    let mut many = MorphMany::<RelationTestImage>::new("imageable", "id")
-        .with_parent(json!(2), "relation_test_employees".to_string());
+    let mut many = MorphMany::<RelationTestImage>::new("imageable", "id").with_parent(
+        2,
+        "relation_test_employees".to_string(),
+        false,
+    );
     many.set_cached(vec![forged]);
     let loaded = many
         .load()

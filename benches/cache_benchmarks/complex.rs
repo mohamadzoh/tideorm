@@ -185,7 +185,8 @@ fn seeded_users_db(rt: &Runtime, url: &str, rows: usize) -> Database {
                 name: format!("User {i}"),
                 active: i % 2 == 0,
             }
-            .into_active_model()
+            .try_into_active_model()
+            .expect("the model converts")
             .insert(&conn)
             .await
             .expect("failed to seed benchmark row");

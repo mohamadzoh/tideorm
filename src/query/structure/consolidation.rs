@@ -7,7 +7,15 @@ use std::hash::Hash;
 /// A join between one parent and N children returns the parent repeated once per
 /// child. These helpers collapse that repetition — `Vec<(Order, LineItem)>`
 /// becomes `Vec<(Order, Vec<LineItem>)>` — which is the shape application code
-/// almost always wants after `find_also_related()`.
+/// almost always wants from a join read as pairs.
+///
+/// ```
+/// use tideorm::prelude::*;
+///
+/// let rows = vec![(1, "a"), (2, "b"), (1, "c")];
+/// let grouped = JoinResultConsolidator::consolidate_two(rows, |order| *order);
+/// assert_eq!(grouped, vec![(1, vec!["a", "c"]), (2, vec!["b"])]);
+/// ```
 ///
 /// Three properties are worth relying on, and one is worth avoiding:
 ///

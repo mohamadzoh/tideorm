@@ -137,11 +137,13 @@ pub async fn global_memory_database(schema: &str) -> Database {
     db
 }
 
-/// Assert that `result` was refused because it would compare ciphertext.
+/// Assert that `result` was refused because it would compare ciphertext,
+/// and return the refusal's message.
 #[cfg(feature = "encrypted-fields")]
-pub fn encrypted_error<T: std::fmt::Debug>(result: tideorm::Result<T>) {
+pub fn encrypted_error<T: std::fmt::Debug>(result: tideorm::Result<T>) -> String {
     let error = result.unwrap_err().to_string();
     assert!(error.contains("encrypted"), "{error}");
+    error
 }
 
 #[tideorm::model(table = "review_users")]

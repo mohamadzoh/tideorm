@@ -174,12 +174,15 @@ fn test_composite_primary_key_metadata_and_accessors() {
 #[cfg(feature = "dirty-tracking")]
 #[test]
 fn test_original_value_resolves_field_and_column_names_and_rejects_unknown_ones() {
-    crate::model::__clear_dirty_snapshots();
+    crate::model::clear_dirty_snapshots();
 
-    crate::model::__remember_dirty_snapshot(&CustomPrimaryKeyColumnModel {
-        id: 7,
-        name: "Alice".to_string(),
-    });
+    crate::model::dirty_tracking::remember_model_from(
+        &CustomPrimaryKeyColumnModel {
+            id: 7,
+            name: "Alice".to_string(),
+        },
+        None,
+    );
     let changed = CustomPrimaryKeyColumnModel {
         id: 7,
         name: "Bob".to_string(),
@@ -189,13 +192,13 @@ fn test_original_value_resolves_field_and_column_names_and_rejects_unknown_ones(
         changed
             .original_value("name")
             .expect("field lookup should succeed"),
-        Some(Some(serde_json::json!("Alice")))
+        Some(Some(crate::DbValue::from("Alice")))
     );
     assert_eq!(
         changed
             .original_value("user_id")
             .expect("column lookup should succeed"),
-        Some(Some(serde_json::json!(7)))
+        Some(Some(crate::DbValue::from(7i64)))
     );
     let error = changed
         .original_value("missing")
@@ -207,7 +210,7 @@ fn test_original_value_resolves_field_and_column_names_and_rejects_unknown_ones(
         "{error}"
     );
 
-    crate::model::__clear_dirty_snapshots();
+    crate::model::clear_dirty_snapshots();
 }
 
 #[tideorm::model(table = "model_test_indexed")]

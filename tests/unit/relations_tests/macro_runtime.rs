@@ -60,7 +60,7 @@ fn morph_to_is_wired_to_its_columns_and_their_values() {
     assert_eq!(image.owner.type_column, "imageable_type");
     assert_eq!(image.owner.id_column, "imageable_id");
     assert_eq!(image.owner.type_value(), Some("relation_test_nodes"));
-    assert_eq!(image.owner.id_value(), Some(&serde_json::json!(4)));
+    assert_eq!(image.owner.id_value(), Some(&Value::BigInt(Some(4))));
     assert!(image.owner.is_type::<RelationTestNode>());
     assert!(!image.owner.is_type::<RelationTestPivot>());
 }
@@ -68,7 +68,7 @@ fn morph_to_is_wired_to_its_columns_and_their_values() {
 #[tokio::test]
 async fn morph_to_load_rejects_a_mismatched_target_type() {
     let error = MorphTo::<RelationTestNode>::new("imageable_type", "imageable_id")
-        .with_values("relation_test_pivots".to_string(), serde_json::json!(4))
+        .with_values("relation_test_pivots".to_string(), 4_i64)
         .load()
         .await
         .expect_err("a discriminator naming another table must not silently return None");
@@ -83,7 +83,7 @@ async fn morph_to_load_rejects_a_mismatched_target_type() {
 #[tokio::test]
 async fn morph_to_load_as_returns_none_for_another_target_type() {
     let owner = MorphTo::<RelationTestNode>::new("imageable_type", "imageable_id")
-        .with_values("relation_test_pivots".to_string(), serde_json::json!(4));
+        .with_values("relation_test_pivots".to_string(), 4_i64);
 
     assert!(
         owner
@@ -111,34 +111,44 @@ fn morph_to_rebuild_keeps_the_values_its_columns_now_hold() {
     // Rebuilding used to copy the previous wrapper's values back over the ones
     // just read from the columns, so the relation kept pointing at the old owner.
     assert_eq!(image.owner.type_value(), Some("relation_test_pivots"));
-    assert_eq!(image.owner.id_value(), Some(&serde_json::json!(5)));
+    assert_eq!(image.owner.id_value(), Some(&Value::BigInt(Some(5))));
 }
 
+/// A folder tree keyed by a path the folder holds, not by its primary key.
+#[tideorm::model(table = "relation_test_folders")]
+struct RelationTestFolder {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    path: String,
+    parent_path: Option<String>,
+    #[tideorm(foreign_key = "parent_path", local_key = "path")]
+    children: SelfRefMany<RelationTestFolder>,
+}
+
+/// The owner's own `is_new()`, not a guess from its key's value, says whether
+/// the rows cached in its relation are the caller's: they carry over to a
+/// wrapper rebuilt under another key only while the owner was new. A new
+/// folder's path is not a placeholder, yet its children are still unsaved.
 #[test]
-fn with_relations_round_trips_its_own_serialization() {
-    use crate::relations::WithRelations;
+fn the_owner_says_whether_a_rebuilt_relation_keeps_its_cached_rows() {
+    let folder = |id, path: &str| RelationTestFolder {
+        id,
+        path: path.to_string(),
+        ..Default::default()
+    };
+    let rebuilt_after_a_rename = |id| {
+        let mut owner = folder(id, "draft").with_relations();
+        owner.children.clear();
+        let children = owner.children.as_mut().expect("cleared is loaded");
+        children.push(folder(0, "draft/a"));
+        // A `before_create` hook may rename it; a stored row may be renamed.
+        owner.path = "docs".to_string();
+        owner.with_relations()
+    };
 
-    let mut wrapped = WithRelations::new(RelationTestNode {
-        id: 1,
-        slug: "root".to_string(),
-        parent_slug: None,
-    });
-    wrapped
-        .set_relation("children", &Vec::<RelationTestNode>::new())
-        .expect("recording a relation payload should succeed");
+    let created = rebuilt_after_a_rename(0);
+    assert_eq!(created.children.get_cached().map(<[_]>::len), Some(1));
 
-    let json = serde_json::to_value(&wrapped).expect("WithRelations should serialize");
-    let restored: WithRelations<RelationTestNode> =
-        serde_json::from_value(json).expect("WithRelations should deserialize its own output");
-    assert!(restored.has_relation("children"));
-
-    let bare = WithRelations::new(RelationTestNode {
-        id: 2,
-        slug: "leaf".to_string(),
-        parent_slug: None,
-    });
-    let json = serde_json::to_value(&bare).expect("WithRelations should serialize");
-    let restored: WithRelations<RelationTestNode> = serde_json::from_value(json)
-        .expect("an empty relation map is omitted and must deserialize back");
-    assert!(!restored.has_relation("children"));
+    let renamed = rebuilt_after_a_rename(9);
+    assert!(!renamed.children.is_loaded());
 }

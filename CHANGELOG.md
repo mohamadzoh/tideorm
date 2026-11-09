@@ -5,6 +5,62 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-11-10
+
+TideORM runs on its own execution engine, SQL builder and database drivers, published as the
+crates `tideorm-engine`, `tideorm-sql-builder` and `tideorm-driver`. Models are declared as before
+and the `tideorm::orm` paths are kept, but this release has breaking changes, listed first.
+`tideorm-macros` 0.17.0 emits items only the 0.17 runtime has, so pair it with `tideorm` 0.17.0.
+
+### Breaking
+
+- `DatabaseType` is the engine's `DbBackend { Postgres, MySQL, MariaDB, SQLite }`. MariaDB is read
+  from the server's handshake and has a variant of its own, so an exhaustive `match` needs a
+  `MariaDB` arm.
+- `raw_as` and `query_raw_as*` decode rows through `#[derive(FromQueryResult)]` (in the prelude);
+  a type that only implements `Deserialize` no longer works there.
+- `Migrator` and `Seeder` batch commands return `BatchFailure` (`MigrationFailure`,
+  `SeedFailure`) on error, which keeps the partial result beside the error; `?` still gives the
+  `Error`.
+- `EntityManager::register` is synchronous and files entities without their loaded relations.
+- A clause the backend lacks is an error when the query runs instead of being dropped or written
+  anyway (`DISTINCT ON` off PostgreSQL, `STRAIGHT_JOIN` off MySQL, PostgreSQL-only row locks, ..),
+  and SQLite refuses read-only transactions.
+- `tideorm::orm` re-exports TideORM's own engine; engine, driver, builder and transaction items
+  the ORM does not use are gone.
+
+### Added
+
+- `Database::catalog()` reads tables, views, sequences, enum types, columns, indexes and foreign
+  keys on every backend.
+- `Database::pin_session()` holds one connection of its own, so session settings stay in force.
+- `Migrator::run_steps`, `run_one`, `rollback_one`, `mark` and `pretend`.
+- `TideConfig::connect_only()` connects without sync, migrations, seeds or a schema file.
+- `QueryBuilder::debug_for` and `build_sql_preview_for` render a query in a chosen backend's
+  dialect.
+- `#[derive(FromQueryResult)]` for raw rows.
+
+### Changed
+
+- Statements render through the engine: a literal `LIMIT`, a one-row `exists`, and conditions
+  rendered without rewriting SQL text. The engine's metric callback feeds the query logger and
+  the profiler, and connect and acquire timeouts are separate.
+- Drivers: integer decoders take any integer column, range-checked; each driver classifies its
+  errors, tracks the server's transaction state and decodes cells losslessly for JSON reads;
+  SQLite binding is strict; zoned timestamps are sent as UTC `DATETIME` on MySQL and MariaDB;
+  malformed server messages are protocol errors, and MySQL packets are capped at 1 GiB.
+- Transactions: each one ends only its own level, SQLite savepoint levels are exact, leaked or
+  dropped transactions are rolled back, and the commit of a failed transaction is refused.
+- Query-builder reads build a `SelectStatement`, with subqueries, unions and CTEs kept as
+  builders until they render.
+- Mutation guards judge the caller's own filters on every mutation; only `restore()` and
+  `force_delete()` count `only_trashed()` as a filter.
+- Filters, batch updates, dirty tracking, relation keys and encrypted fields keep typed values.
+- `force_sync` drops referencing tables first, and additive sync refuses to add a `NOT NULL`
+  column without a default to a table that has rows.
+- `derive_more`, `derive-where`, `async-stream`, `itertools`, `heck` and `strum` are replaced by
+  small in-crate code.
+
 ## [0.16.2] - 2026-10-24
 
 A performance and maintenance release. Hot paths do less work, long functions are split, and

@@ -1,4 +1,3 @@
-use super::database::rewrite_driver_url;
 use super::*;
 use crate::sync::SyncRegistry;
 use std::time::Duration;
@@ -58,24 +57,6 @@ fn test_database_type_from_url() {
 }
 
 #[test]
-fn test_rewrite_driver_url_points_only_a_mariadb_scheme_at_the_mysql_driver() {
-    for (url, expected) in [
-        ("mariadb://localhost/test", "mysql://localhost/test"),
-        ("MariaDB://localhost/test", "mysql://localhost/test"),
-        // Malformed, so left for the driver to report.
-        ("mariadb:/localhost/test", "mariadb:/localhost/test"),
-        ("mariadb:localhost/test", "mariadb:localhost/test"),
-        // Only the scheme is read.
-        (
-            "postgres://localhost/mariadb://",
-            "postgres://localhost/mariadb://",
-        ),
-    ] {
-        assert_eq!(rewrite_driver_url(url), expected, "{url}");
-    }
-}
-
-#[test]
 fn test_database_type_capabilities() {
     for (db_type, arrays, returning, batch_size, quote, name) in [
         (DatabaseType::Postgres, true, true, 1000, '"', "PostgreSQL"),
@@ -118,7 +99,7 @@ fn test_tide_config_apply_replaces_the_global_configuration() {
     TideConfig::init()
         .database_type(DatabaseType::Postgres)
         .schema_file("first_schema.sql")
-        .languages(&["en", "fr"])
+        .languages(["en", "fr"])
         .fallback_language("fr")
         .apply();
     assert_eq!(
@@ -159,7 +140,7 @@ fn test_tide_config_reset_restores_defaults() {
     TideConfig::init()
         .database_type(DatabaseType::MariaDB)
         .schema_file("reset_schema.sql")
-        .languages(&["fr"])
+        .languages(["fr"])
         .fallback_language("fr")
         .apply();
 
@@ -178,7 +159,6 @@ async fn test_mariadb_detection_failure_fails_instead_of_assuming_mysql() {
     // Detection that cannot run must fail `connect()`, not quietly settle on
     // MySQL and turn MariaDB's RETURNING support off.
     let err = TideConfig::resolve_database_type(DatabaseType::MySQL, &disconnected)
-        .await
         .expect_err("a failed MariaDB probe must not be read as MySQL");
     assert!(
         matches!(err, crate::error::Error::Connection { .. }),
@@ -188,7 +168,6 @@ async fn test_mariadb_detection_failure_fails_instead_of_assuming_mysql() {
     // Only a MySQL declaration is probed; other backends are taken as declared.
     assert_eq!(
         TideConfig::resolve_database_type(DatabaseType::Postgres, &disconnected)
-            .await
             .expect("a Postgres declaration needs no probe"),
         DatabaseType::Postgres
     );
@@ -220,9 +199,9 @@ fn test_tide_config_full_chain() {
         .acquire_timeout(Duration::from_secs(5))
         .schema_file("schema.sql")
         .sync(false)
-        .languages(&["en", "fr", "ar"])
+        .languages(["en", "fr", "ar"])
         .fallback_language("en")
-        .hidden_attributes(&["password", "secret"]);
+        .hidden_attributes(["password", "secret"]);
 
     assert_eq!(config.database_type, Some(DatabaseType::Postgres));
     assert_eq!(
@@ -264,10 +243,9 @@ fn test_tide_config_apply_installs_tokenization_settings() {
         .token_decoder(apply_test_token_decoder)
         .apply();
 
-    assert_eq!(
-        crate::tokenization::TokenConfig::get_encryption_key()
-            .expect("apply() must install the encryption key, not only connect()"),
-        "apply-installs-the-encryption-key-32ch"
+    assert!(
+        crate::tokenization::TokenConfig::has_encryption_key(),
+        "apply() must install the encryption key, not only connect()"
     );
     assert_eq!(
         (crate::tokenization::TokenConfig::get_encoder())("7", "Post")
@@ -282,4 +260,84 @@ fn test_tide_config_apply_installs_tokenization_settings() {
 
     crate::tokenization::TokenConfig::reset();
     TideConfig::reset();
+}
+
+#[cfg(feature = "attachments")]
+#[test]
+fn a_file_url_generator_is_installed_by_apply_and_cleared_by_reset() {
+    use crate::attachments::FileAttachment;
+
+    TideConfig::reset();
+    let cdn = String::from("https://cdn.example.com");
+    let config = TideConfig::init()
+        .file_url_generator(move |field, file| format!("{cdn}/{field}/{}", file.key));
+    let file = FileAttachment::new("a.png");
+    assert_eq!(
+        file.url("thumb"),
+        "a.png",
+        "the builder alone installs nothing"
+    );
+
+    config.apply();
+    assert_eq!(file.url("thumb"), "https://cdn.example.com/thumb/a.png");
+    assert_eq!(
+        file.url_with_generator("thumb", |field, file| format!("{field}:{}", file.key)),
+        "thumb:a.png"
+    );
+
+    TideConfig::init().apply();
+    assert_eq!(
+        file.url("thumb"),
+        "a.png",
+        "an apply without one puts the default back"
+    );
+
+    TideConfig::init()
+        .file_url_generator(|_, _| "elsewhere".into())
+        .apply();
+    TideConfig::reset();
+    assert_eq!(file.url("thumb"), "a.png");
+}
+
+#[test]
+fn reset_clears_the_tokenization_settings_config_installed() {
+    TideConfig::reset();
+    TideConfig::init()
+        .encryption_key(String::from("reset-clears-the-key-it-installed"))
+        .token_encoder(|id, _| Ok(format!("t-{id}")))
+        .apply();
+    assert!(crate::tokenization::TokenConfig::has_encryption_key());
+    assert_eq!(
+        (crate::tokenization::TokenConfig::get_encoder())("7", "Post").unwrap(),
+        "t-7"
+    );
+
+    TideConfig::reset();
+    assert!(!crate::tokenization::TokenConfig::has_encryption_key());
+    assert!((crate::tokenization::TokenConfig::get_encoder())("7", "Post").is_err());
+}
+
+#[test]
+fn setters_take_owned_or_borrowed_text_and_a_whole_pool() {
+    let languages = vec![String::from("en"), String::from("fr")];
+    let config = TideConfig::init()
+        .languages(&languages)
+        .hidden_attributes(["token"])
+        .fallback_language(String::from("fr"))
+        .database(format!("sqlite:{}", "memory"))
+        .pool(PoolConfig {
+            max_connections: 3,
+            min_connections: 2,
+            ..PoolConfig::default()
+        })
+        .max_connections(4);
+
+    assert_eq!(config.config.languages, ["en", "fr"]);
+    assert_eq!(config.config.hidden_attributes, ["token"]);
+    assert_eq!(config.config.fallback_language, "fr");
+    assert_eq!(config.database_url.as_deref(), Some("sqlite:memory"));
+    assert_eq!(
+        (config.pool.max_connections, config.pool.min_connections),
+        (4, 2)
+    );
 }

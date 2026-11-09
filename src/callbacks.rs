@@ -62,6 +62,16 @@ use crate::error::Result;
 ///
 /// If any `before_*` callback returns `Err`, the operation is aborted
 /// and the error is returned to the caller.
+///
+/// # After the Write
+///
+/// Callbacks are synchronous: they cannot query the database. An `after_*`
+/// callback runs once the statement has run, so an `Err` it returns reaches
+/// the caller but does not undo the write; to make the two succeed or fail
+/// together, run the call inside
+/// [`Database::transaction`](crate::Database::transaction) and let the error
+/// roll it back. Work that needs the database, such as creating related
+/// records, belongs after the call returns.
 pub trait Callbacks: Sized {
     /// Called before validation runs
     ///
@@ -77,18 +87,19 @@ pub trait Callbacks: Sized {
         Ok(())
     }
 
-    /// Called before both create and update operations
+    /// Called before both create and update operations, after validation
     ///
-    /// Use this for common pre-save logic like setting timestamps
-    /// or normalizing data.
+    /// Use this for common pre-save logic such as normalizing data. What it
+    /// changes is not validated, and a managed `created_at`/`updated_at` is
+    /// stamped after it, replacing any value it sets there.
     fn before_save(&mut self) -> Result<()> {
         Ok(())
     }
 
     /// Called after both create and update operations complete
     ///
-    /// Use this for post-save actions like sending notifications
-    /// or updating caches.
+    /// Use this for synchronous follow-ups like recording a metric or
+    /// queueing a notification; see [After the Write](Self#after-the-write).
     fn after_save(&self) -> Result<()> {
         Ok(())
     }
@@ -103,8 +114,9 @@ pub trait Callbacks: Sized {
 
     /// Called after inserting a new record
     ///
-    /// Use this for post-create actions like creating related records
-    /// or triggering welcome emails.
+    /// Use this for synchronous follow-ups like queueing a welcome email.
+    /// It cannot query, so create related records after `create()` returns;
+    /// see [After the Write](Self#after-the-write).
     fn after_create(&self) -> Result<()> {
         Ok(())
     }
@@ -119,8 +131,8 @@ pub trait Callbacks: Sized {
 
     /// Called after updating an existing record
     ///
-    /// Use this for post-update actions like audit logging
-    /// or cache invalidation.
+    /// Use this for synchronous follow-ups like audit logging or cache
+    /// invalidation; see [After the Write](Self#after-the-write).
     fn after_update(&self) -> Result<()> {
         Ok(())
     }
@@ -157,6 +169,23 @@ pub trait Callbacks: Sized {
 // Generic code must therefore drive writes through `Model::create`,
 // `Model::update`, `Model::save`, or `Model::delete` instead of dispatching
 // callbacks itself.
+
+#[doc(hidden)]
+pub trait HasCallbacksDispatch<T> {
+    fn has_callbacks(self) -> bool;
+}
+
+impl<T: Callbacks> HasCallbacksDispatch<T> for &T {
+    fn has_callbacks(self) -> bool {
+        true
+    }
+}
+
+impl<T> HasCallbacksDispatch<T> for &&T {
+    fn has_callbacks(self) -> bool {
+        false
+    }
+}
 
 #[doc(hidden)]
 pub trait AfterCreateDispatch<T> {

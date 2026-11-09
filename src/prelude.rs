@@ -8,8 +8,18 @@ pub use crate::callbacks::Callbacks;
 #[cfg(feature = "attachments")]
 pub use crate::config::FileUrlGenerator;
 pub use crate::config::{Config, DatabaseType, PoolConfig, TideConfig};
+pub use crate::database::{AccessMode, IsolationLevel, SqliteTransactionMode, TransactionOptions};
 pub use crate::database::{Database, DatabaseBuilder, Transaction};
 pub use crate::database::{db, has_global_db, require_db};
+// The drivers' connection options, for `DatabaseBuilder` settings a URL does not name.
+#[cfg(feature = "mysql")]
+pub use crate::internal::driver::mysql::{MySqlConnectOptions, MySqlSslMode};
+#[cfg(feature = "postgres")]
+pub use crate::internal::driver::postgres::{PgConnectOptions, PgSslMode};
+#[cfg(feature = "sqlite")]
+pub use crate::internal::driver::sqlite::{
+    SqliteAutoVacuum, SqliteConnectOptions, SqliteJournalMode, SqliteLockingMode, SqliteSynchronous,
+};
 // Bound parameter values for `Database::raw_with_params` and friends. Exported
 // here so raw SQL never sends callers into the hidden `internal` module.
 pub use crate::internal::DbValue;
@@ -18,32 +28,32 @@ pub use crate::model::{
     OnConflictBuilder, UpdateValue,
 };
 pub use crate::query::{
-    Aggregate, AggregateCondition, CTE, FrameBound, FrameType, HavingCondition, JoinClause,
+    Aggregate, AggregateCondition, CTE, Chunks, FrameBound, FrameType, HavingCondition,
     JoinResultConsolidator, JoinType, LogicalOp, OrBranchBuilder, OrGroup, Order, Paginated,
-    QueryBuilder, QueryFragment, SortOrder, UnionClause, UnionType, WindowFunction,
-    WindowFunctionType,
+    QueryBuilder, QueryFragment, SortOrder, WindowFunction, WindowFunctionType,
 };
 pub use crate::schema::{
     ColumnSchema, SchemaGenerator, SchemaWriter, TableSchema, TableSchemaBuilder,
 };
 pub use crate::soft_delete::SoftDelete;
-pub use crate::sync::{RegisterModels, SyncModel};
+pub use crate::sync::{RegisterModels, SyncMode, SyncModel};
 
 // `Result` is deliberately left out: it would shadow `std::result::Result` in
 // every module that glob-imports the prelude. Spell it `tideorm::Result`.
-pub use crate::error::Error;
+pub use crate::error::{DbFailureKind, Error};
 
 // Migrations
 pub use crate::migration::{
-    ColumnType, DefaultValue, Migration, MigrationInfo, MigrationResult, MigrationStatus, Migrator,
-    Schema, async_trait,
+    AppliedMigration, BatchFailure, ColumnType, DefaultValue, ForeignKeyAction, Migration,
+    MigrationFailure, MigrationInfo, MigrationResult, MigrationStatus, Migrator, Schema, StringLen,
+    async_trait,
 };
 
 // Relations. `relations::EagerLoadModel` is left out on purpose: it is
 // `#[doc(hidden)]` machinery that generated code names by its full path.
 pub use crate::relations::{
     BelongsTo, EagerQueryBuilder, HasMany, HasManyThrough, HasOne, MorphMany, MorphOne, MorphTo,
-    RelationPath, RelationTree, SelfRef, SelfRefMany, WithRelations,
+    RelationPath, RelationTree, SelfRef, SelfRefMany,
 };
 
 // File Attachments
@@ -68,14 +78,13 @@ pub use crate::profiling::{
     QueryComplexity, QuerySuggestion, SuggestionLevel,
 };
 
-// Query and statement caching
+// Query caching
 pub use crate::cache::{
-    CacheConfig, CacheKeyBuilder, CacheOptions, CacheStats, CacheStrategy, CachedStatementInfo,
-    PreparedStatementCache, PreparedStatementConfig, PreparedStatementStats, QueryCache,
+    CacheConfig, CacheKeyBuilder, CacheOptions, CacheStats, CacheStrategy, QueryCache,
 };
 
 // Database seeding
-pub use crate::seeding::{Seed, SeedInfo, SeedResult, SeedStatus, Seeder};
+pub use crate::seeding::{Seed, SeedFailure, SeedInfo, SeedResult, SeedStatus, Seeder};
 
 // Validation
 pub use crate::validation::{
@@ -95,18 +104,18 @@ pub use crate::fulltext::{
 
 // Strongly-typed columns
 pub use crate::columns::{
-    Column, ColumnCondition, ColumnEq, ColumnIn, ColumnLike, ColumnNullable, ColumnOrd,
-    ColumnValue, IntoColumnName,
+    Column, ColumnCondition, ColumnEq, ColumnIn, ColumnLike, ColumnNullable, ColumnOrd, ColumnRead,
+    ColumnValue, IntoColumnName, IntoColumnNames,
 };
 
 // JPA-like entity manager / persistence context
 #[cfg(feature = "entity-manager")]
 pub use crate::entity_manager::{
-    EntityManager, EntityManagerLoad, EntityState, Managed, TideEntityManagerMeta,
+    EntityManager, EntityManagerLoad, EntityState, Managed, ManagedModel,
 };
 
-// Derive macro
-pub use tideorm_macros::Model;
+// Derive macros
+pub use tideorm_macros::{FromQueryResult, Model};
 
 // Attribute macro
 pub use tideorm_macros::model;

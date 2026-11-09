@@ -64,6 +64,39 @@
 //! User::query().begin_or().or_where_eq(User::ACTIVE, "yes");
 //! ```
 //!
+//! # Typed assignments and reads
+//!
+//! A batch update's `set()` takes the values a filter takes, and `pluck()`
+//! and `value()` read a typed column as its field's type:
+//!
+//! ```
+//! use tideorm::prelude::*;
+//! #[tideorm::model(table = "users")]
+//! struct User { #[tideorm(primary_key)] id: i64, active: bool, nickname: Option<String> }
+//! let _update = User::update_all().set(User::ACTIVE, false).where_eq(User::ID, 1);
+//! async fn read() -> tideorm::Result<(Vec<i64>, Option<Option<String>>)> {
+//!     let ids = User::query().pluck(User::ID).await?;
+//!     let nickname = User::query().value(User::NICKNAME).await?;
+//!     Ok((ids, nickname))
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! use tideorm::prelude::*;
+//! #[tideorm::model(table = "users")]
+//! struct User { #[tideorm(primary_key)] id: i64, active: bool }
+//! let _update = User::update_all().set(User::ACTIVE, "yes").where_eq(User::ID, 1);
+//! ```
+//!
+//! ```compile_fail
+//! use tideorm::prelude::*;
+//! #[tideorm::model(table = "users")]
+//! struct User { #[tideorm(primary_key)] id: i64, active: bool }
+//! async fn read() -> tideorm::Result<Vec<String>> {
+//!     User::query().pluck(User::ID).await
+//! }
+//! ```
+//!
 
 use std::marker::PhantomData;
 
@@ -89,21 +122,135 @@ pub trait IntoColumnName {
     }
 }
 
-/// A column that accepts `V` as a filter value.
+/// A list of columns, as [`select`](crate::query::QueryBuilder::select),
+/// [`on_conflict`](crate::model::Model::on_conflict) and the CTE builders
+/// take it.
+///
+/// An array, a `Vec` or a slice holds one column type: names or field names
+/// (`["id", "email"]`), or typed columns of one Rust type. A tuple mixes
+/// them, typed columns of different types included: `(User::ID, User::EMAIL)`.
+/// A single column is a list of one, and `()` is a list of none (a window
+/// function with no partition). Collect an iterator first:
+/// `names.iter().collect::<Vec<_>>()`.
+///
+/// ```
+/// use tideorm::prelude::*;
+/// # #[tideorm::model(table = "users")]
+/// # struct User { #[tideorm(primary_key)] id: i64, email: String }
+/// User::query().select((User::ID, User::EMAIL)).validate().unwrap();
+/// User::query().select(["id", "email"]).validate().unwrap();
+/// User::query().select(vec![String::from("id")]).validate().unwrap();
+/// User::query().select(User::EMAIL).validate().unwrap();
+/// ```
+pub trait IntoColumnNames {
+    /// Call `visit` with each column, in order.
+    fn visit_columns(&self, visit: &mut dyn FnMut(&dyn IntoColumnName));
+}
+
+impl<C: IntoColumnName> IntoColumnNames for [C] {
+    fn visit_columns(&self, visit: &mut dyn FnMut(&dyn IntoColumnName)) {
+        for column in self {
+            visit(column);
+        }
+    }
+}
+
+impl<C: IntoColumnName, const N: usize> IntoColumnNames for [C; N] {
+    fn visit_columns(&self, visit: &mut dyn FnMut(&dyn IntoColumnName)) {
+        self.as_slice().visit_columns(visit);
+    }
+}
+
+impl<C: IntoColumnName> IntoColumnNames for Vec<C> {
+    fn visit_columns(&self, visit: &mut dyn FnMut(&dyn IntoColumnName)) {
+        self.as_slice().visit_columns(visit);
+    }
+}
+
+impl<T: IntoColumnNames + ?Sized> IntoColumnNames for &T {
+    fn visit_columns(&self, visit: &mut dyn FnMut(&dyn IntoColumnName)) {
+        (**self).visit_columns(visit);
+    }
+}
+
+impl IntoColumnNames for &str {
+    fn visit_columns(&self, visit: &mut dyn FnMut(&dyn IntoColumnName)) {
+        visit(self);
+    }
+}
+
+impl IntoColumnNames for String {
+    fn visit_columns(&self, visit: &mut dyn FnMut(&dyn IntoColumnName)) {
+        visit(self);
+    }
+}
+
+impl<T> IntoColumnNames for Column<T> {
+    fn visit_columns(&self, visit: &mut dyn FnMut(&dyn IntoColumnName)) {
+        visit(self);
+    }
+}
+
+impl IntoColumnNames for () {
+    fn visit_columns(&self, _visit: &mut dyn FnMut(&dyn IntoColumnName)) {}
+}
+
+macro_rules! tuple_column_names {
+    ($($column:ident)+) => {
+        impl<$($column: IntoColumnName),+> IntoColumnNames for ($($column,)+) {
+            #[allow(non_snake_case)]
+            fn visit_columns(&self, visit: &mut dyn FnMut(&dyn IntoColumnName)) {
+                let ($($column,)+) = self;
+                $(visit($column);)+
+            }
+        }
+    };
+}
+tuple_column_names!(A);
+tuple_column_names!(A B);
+tuple_column_names!(A B C);
+tuple_column_names!(A B C D);
+tuple_column_names!(A B C D E);
+tuple_column_names!(A B C D E F);
+tuple_column_names!(A B C D E F G);
+tuple_column_names!(A B C D E F G H);
+tuple_column_names!(A B C D E F G H I);
+tuple_column_names!(A B C D E F G H I J);
+tuple_column_names!(A B C D E F G H I J K);
+tuple_column_names!(A B C D E F G H I J K L);
+
+/// Each of `columns` through `f`, in order.
+pub(crate) fn map_columns<R>(
+    columns: &(impl IntoColumnNames + ?Sized),
+    mut f: impl FnMut(&dyn IntoColumnName) -> R,
+) -> Vec<R> {
+    let mut mapped = Vec::new();
+    columns.visit_columns(&mut |column| mapped.push(f(column)));
+    mapped
+}
+
+/// The names of `columns`, without their tables.
+pub(crate) fn column_names(columns: &(impl IntoColumnNames + ?Sized)) -> Vec<String> {
+    map_columns(columns, |column| column.column_name().to_string())
+}
+
+/// A column that accepts `V` as a filter value, or as the value a batch
+/// update's `set()` and `coalesce()` write.
 ///
 /// A generated `Column<T>` accepts a `T` or a `&T`, so a borrowed list works
 /// in `where_in`. A nullable `Column<Option<T>>` accepts those as well as an
 /// `Option<T>`. Text columns accept `&str`, and integer, float and decimal
 /// columns accept narrower numbers that convert losslessly. String column
-/// names retain their dynamic, serializable values.
+/// names take any value a column can hold, each bound as its own type, or a
+/// `serde_json::Value`, which is read as the column's type.
 #[diagnostic::on_unimplemented(
-    message = "a `{Self}` filter does not accept a `{V}` value",
+    message = "a `{Self}` does not accept a `{V}` value",
     label = "expected the column's Rust type",
-    note = "typed columns take their field's type or a reference to it, `&str` for text, or a losslessly widened number; filter by the column's name to pass any serializable value"
+    note = "typed columns take their field's type or a reference to it, `&str` for text, or a losslessly widened number; name the column by string to pass any other value a column can hold"
 )]
 pub trait ColumnValue<V>: IntoColumnName {
-    /// The value serialized into the query parameter.
-    type Value: serde::Serialize;
+    /// The value bound as the query parameter.
+    type Value: Into<crate::DbValue>;
     /// Convert a filter value to the column's Rust type.
     fn convert_value(value: V) -> Self::Value;
 }
@@ -120,13 +267,22 @@ macro_rules! identity_column_value {
     )*};
 }
 identity_column_value!(
-    [T: serde::Serialize] T => T,
-    [T: serde::Serialize] T => Option<T>,
-    ['a, T: serde::Serialize] &'a T => T,
-    ['a, T: serde::Serialize] &'a T => Option<T>,
+    [T: Into<crate::DbValue>] T => T,
+    [T: Into<crate::DbValue>] T => Option<T>,
     ['a] &'a str => String,
     ['a] &'a str => Option<String>,
 );
+
+// A borrowed value binds as a copy of itself.
+macro_rules! borrowed_column_value {
+    ($($column:ty),* $(,)?) => {$(
+        impl<'a, T: Clone + Into<crate::DbValue>> ColumnValue<&'a T> for Column<$column> {
+            type Value = T;
+            fn convert_value(value: &'a T) -> T { value.clone() }
+        }
+    )*};
+}
+borrowed_column_value!(T, Option<T>);
 
 // Only into types an unsuffixed literal falls back to (`i32`, `f64`) or reaches
 // from one: a widening into `i16` would make `where_eq(column, 5)` ambiguous.
@@ -151,13 +307,33 @@ widened_column_value!(
 
 macro_rules! dynamic_column_value {
     ($($ty:ty),*) => {$(
-        impl<V: serde::Serialize> ColumnValue<V> for $ty {
+        impl<V: Into<crate::DbValue>> ColumnValue<V> for $ty {
             type Value = V;
             fn convert_value(value: V) -> V { value }
         }
     )*};
 }
 dynamic_column_value!(&str, String, &String);
+
+/// A column whose values [`pluck()`](crate::query::QueryBuilder::pluck) and
+/// [`value()`](crate::query::QueryBuilder::value) read as `T`.
+///
+/// A generated `Column<T>` reads as its field's type, so `pluck(User::ID)`
+/// needs no annotation and a nullable column reads as an `Option`. A column
+/// named by a string reads as whatever type you ask for.
+#[diagnostic::on_unimplemented(
+    message = "a `{Self}` does not read as `{T}`",
+    label = "expected the column's Rust type",
+    note = "a typed column reads as its field's type; name the column by string to read it as another type"
+)]
+pub trait ColumnRead<T>: IntoColumnName {}
+
+impl<T> ColumnRead<T> for Column<T> {}
+
+macro_rules! dynamic_column_read {
+    ($($ty:ty),*) => {$(impl<T> ColumnRead<T> for $ty {})*};
+}
+dynamic_column_read!(&str, String, &String);
 
 /// How a query of the model whose table is `own_table` refers to `column`:
 /// by name, qualified with the column's own table when that is another
@@ -176,6 +352,26 @@ pub(crate) fn column_reference(
         }
         _ => column.column_name().to_string(),
     }
+}
+
+/// `column`, a reference [`column_reference`] qualified, without its table
+/// when that is `own_table`: a typed condition (`User::ID.gt(1)`) on a query
+/// of its own model names the column alone.
+pub(crate) fn unqualified_own_column(
+    column: String,
+    own_table: Option<(&str, Option<&str>)>,
+) -> String {
+    let Some((own, own_schema)) = own_table else {
+        return column;
+    };
+    let Some((table, name)) = column.rsplit_once('.') else {
+        return column;
+    };
+    let owned = match table.split_once('.') {
+        Some((schema, table)) => Some(schema) == own_schema && table == own,
+        None => table == own,
+    };
+    if owned { name.to_string() } else { column }
 }
 
 /// The table, with its schema, of model `M`: what a builder of `M` passes to
@@ -203,9 +399,19 @@ impl IntoColumnName for String {
     }
 }
 
-impl IntoColumnName for &String {
+// A reference names what it points at: `&String`, `&&str` (an element of a
+// `&[&str]`) and `&Column<T>` all work where a column is expected.
+impl<T: IntoColumnName + ?Sized> IntoColumnName for &T {
     fn column_name(&self) -> &str {
-        self.as_str()
+        (**self).column_name()
+    }
+
+    fn column_table(&self) -> Option<&str> {
+        (**self).column_table()
+    }
+
+    fn column_schema(&self) -> Option<&str> {
+        (**self).column_schema()
     }
 }
 
@@ -282,32 +488,6 @@ impl<T> Column<T> {
 /// condition a query's `where_*` methods build, with the column qualified by
 /// its model's table.
 pub type ColumnCondition = crate::query::WhereCondition;
-
-/// The escape character used by every generated `LIKE ... ESCAPE` clause.
-///
-/// Deliberately **not** a backslash. A backslash costs us on three fronts:
-/// SQLite string literals do not process it (so `'\\'` is a two-character
-/// escape argument SQLite rejects), MySQL's handling flips with
-/// `NO_BACKSLASH_ESCAPES`, and sea-query's tokenizer treats it as an escape
-/// character when it re-scans a `cust_with_values` fragment — an `ESCAPE '\'`
-/// clause leaves the literal unterminated and swallows every later placeholder.
-/// `!` is a single character in all three dialects, is not special inside a LIKE
-/// pattern, and keeps generated SQL backslash-free.
-pub(crate) const LIKE_ESCAPE_CHAR: char = '!';
-
-/// The full ` ESCAPE '<char>'` suffix appended to generated LIKE comparisons.
-pub(crate) const LIKE_ESCAPE_CLAUSE: &str = " ESCAPE '!'";
-
-pub(crate) fn escape_like_literal(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for ch in value.chars() {
-        if ch == LIKE_ESCAPE_CHAR || ch == '%' || ch == '_' {
-            escaped.push(LIKE_ESCAPE_CHAR);
-        }
-        escaped.push(ch);
-    }
-    escaped
-}
 
 /// Trait for types that can be compared for equality
 pub trait ColumnEq<T> {

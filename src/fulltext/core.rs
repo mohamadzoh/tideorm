@@ -49,8 +49,8 @@ impl FullTextConfig {
     }
 
     /// Leave these words out of the query, compared without regard to case.
-    pub fn stop_words(mut self, words: Vec<String>) -> Self {
-        self.stop_words = words;
+    pub fn stop_words(mut self, words: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.stop_words = words.into_iter().map(Into::into).collect();
         self
     }
 
@@ -229,8 +229,13 @@ impl HighlightedField {
 
 /// Trait for models that support full-text search
 pub trait FullTextSearch: Model + Sized {
-    /// Perform a simple full-text search on specified columns
-    fn search(columns: &[&str], query: &str) -> FullTextSearchBuilder<Self> {
+    /// Search the text of `columns`, given as names
+    /// (`["title", "body"]`) or typed columns
+    /// (`(Article::TITLE, Article::BODY)`), for `query`.
+    fn search(
+        columns: impl crate::columns::IntoColumnNames,
+        query: impl Into<String>,
+    ) -> FullTextSearchBuilder<Self> {
         FullTextSearchBuilder::new(columns, query)
     }
 }

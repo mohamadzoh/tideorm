@@ -56,3 +56,25 @@ async fn a_malformed_translations_payload_does_not_blank_to_json() {
     assert_eq!(rendered[1]["body"], "Texte");
     assert_eq!(rendered[2]["body"], "Texte");
 }
+
+/// `to_json_in` renders one language without an options map, and the
+/// collection forms take a borrowed slice.
+#[tokio::test]
+async fn to_json_in_renders_one_language() {
+    let article = Article {
+        id: 1,
+        title: "Hello".into(),
+        body: "Text".into(),
+        translations: Some(serde_json::json!({"title": {"fr": "Bonjour"}})),
+    };
+    assert_eq!(article.to_json_in("fr")["title"], "Bonjour");
+    assert_eq!(article.try_to_json_in("fr").unwrap()["body"], "Text");
+    assert_eq!(article.to_json_in("en")["title"], "Hello");
+
+    let articles = vec![article];
+    let french = HashMap::from([("language".to_string(), "fr".to_string())]);
+    let rendered = Article::collection_to_json(&articles, Some(french));
+    assert_eq!(rendered[0]["title"], "Bonjour");
+    let rendered = Article::try_collection_to_json(articles.as_slice(), None).unwrap();
+    assert_eq!(rendered[0]["title"], "Hello");
+}

@@ -25,8 +25,8 @@
 //! | Automatic model field encryption | `encrypted-fields` |
 //!
 //! Database operations need a backend and runtime. docs.rs includes all module
-//! features; applications must enable those they use. Rust 1.94 is required by
-//! the SeaORM and SQLx dependencies.
+//! features; applications must enable those they use. The minimum supported
+//! Rust version is 1.94.
 //!
 //! # Typed queries
 //!
@@ -111,6 +111,13 @@ pub mod translations;
 
 extern crate self as tideorm;
 
+// The README's and the cheat sheet's Rust examples run as doc tests; the
+// quick start connects to SQLite.
+#[cfg(all(doctest, feature = "sqlite"))]
+#[doc = include_str!("../README.md")]
+#[doc = include_str!("../API.md")]
+struct ReadmeAndCheatSheet;
+
 #[cfg(all(test, feature = "entity-manager"))]
 #[path = "../tests/support/postgres_test_config.rs"]
 pub(crate) mod postgres_test_config;
@@ -134,6 +141,8 @@ pub use inventory;
 pub use serde;
 #[doc(hidden)]
 pub use serde_json;
+
+pub(crate) use logging::{tide_debug, tide_info, tide_warn};
 
 #[cfg(test)]
 #[path = "../tests/unit/support.rs"]
