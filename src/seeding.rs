@@ -102,10 +102,7 @@ impl Seeder {
 
     /// The database this seeder runs on.
     fn db(&self) -> Result<Database> {
-        match &self.db {
-            Some(db) => Ok(db.clone()),
-            None => require_db(),
-        }
+        self.db.clone().map_or_else(require_db, Ok)
     }
 
     /// Add a boxed seed (used internally)

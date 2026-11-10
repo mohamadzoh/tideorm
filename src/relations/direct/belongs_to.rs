@@ -88,24 +88,12 @@ impl<E: Model> BelongsTo<E> {
     }
 
     #[doc(hidden)]
-    pub fn attach_query_database(&mut self, database: &crate::database::Database) {
-        self.state.source.database = Some(database.clone());
-    }
-
-    #[doc(hidden)]
-    pub fn set_cached(&mut self, model: Option<E>) {
-        self.state.set_cached(model.map(Box::new));
-    }
-
-    #[doc(hidden)]
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
         // The cache holds the owner, which a row not given a foreign key yet
         // is the caller's to link.
         self.state.preserve_from(
             &previous.state,
-            self.foreign_key == previous.foreign_key
-                && self.owner_key == previous.owner_key
-                && self.state.key == previous.state.key,
+            self.foreign_key == previous.foreign_key && self.owner_key == previous.owner_key,
             previous.state.key.is_none(),
         );
     }
@@ -119,12 +107,9 @@ impl<E: Model> BelongsTo<E> {
     /// the wrapper carries no foreign-key value (a bare `Default`, or a
     /// deserialized model that was never refreshed).
     pub async fn load(&self) -> Result<Option<E>> {
-        let can_query = self.state.can_query(self.ensure_configured().is_ok());
-        if let Some(cached) = self.state.served(can_query) {
-            return Ok(cached.map(|model| (**model).clone()));
-        }
-
-        self.query("BelongsTo::load")?.first().await
+        let configured = self.ensure_configured().is_ok();
+        let query = || self.query("BelongsTo::load").map(Some);
+        self.state.load_one(configured, query).await
     }
 
     /// Fetch the owning row through a caller-supplied refinement of the query.

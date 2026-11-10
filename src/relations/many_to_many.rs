@@ -159,30 +159,19 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     }
 
     #[doc(hidden)]
-    pub fn attach_query_database(&mut self, database: &crate::database::Database) {
-        self.state.source.database = Some(database.clone());
-    }
-
-    #[doc(hidden)]
-    pub fn set_cached(&mut self, models: Vec<Related>) {
-        self.state.set_cached(Some(models));
-    }
-
-    #[doc(hidden)]
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
-        let same_relation = self.foreign_key == previous.foreign_key
+        let same_columns = self.foreign_key == previous.foreign_key
             && self.related_key == previous.related_key
             && self.local_key == previous.local_key
             && self.related_local_key == previous.related_local_key
-            && self.pivot_table == previous.pivot_table
-            && self.state.key == previous.state.key;
+            && self.pivot_table == previous.pivot_table;
         #[cfg(feature = "entity-manager")]
-        let same_relation = same_relation
+        let same_columns = same_columns
             && self.relation_name == previous.relation_name
             && self.owner_table == previous.owner_table;
 
         self.state
-            .preserve_from(&previous.state, same_relation, previous.state.owner_is_new);
+            .preserve_from(&previous.state, same_columns, previous.state.owner_is_new);
     }
 
     /// Apply the pivot join and the owner filter `load_with` reads the
@@ -264,12 +253,9 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     /// [`load_with`](Self::load_with) when you need ordering, paging, or the
     /// pivot's own columns.
     pub async fn load(&self) -> Result<Vec<Related>> {
-        let can_query = self.state.can_query(self.ensure_configured().is_ok());
-        if let Some(cached) = self.state.served(can_query) {
-            return Ok(cached.cloned().unwrap_or_default());
-        }
-
-        self.load_query("HasManyThrough::load")?.get().await
+        let configured = self.ensure_configured().is_ok();
+        let query = || self.load_query("HasManyThrough::load");
+        self.state.load_many(configured, query).await
     }
 
     /// Load the relation through a caller-supplied constraint on the join query.

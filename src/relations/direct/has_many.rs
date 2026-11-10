@@ -52,40 +52,9 @@ pub struct HasMany<E: Model> {
     pub(crate) state: RelationState<Vec<E>>,
 }
 
+key_pair_relation!(HasMany);
+
 impl<E: Model> HasMany<E> {
-    fn ensure_configured(&self) -> Result<()> {
-        ensure_relation_configured("HasMany", &[self.foreign_key, self.local_key])
-    }
-
-    /// The query for the related rows.
-    fn query(&self, context: &str) -> Result<QueryBuilder<E>> {
-        self.ensure_configured()?;
-        let pk = required_key(&self.state.key, "Parent primary key", context)?;
-        Ok(where_key(self.state.source.query(), self.foreign_key, pk))
-    }
-
-    /// Declare the relation's key pair.
-    ///
-    /// Both names must be non-empty; every method rejects a wrapper built by
-    /// [`Default`] (which leaves them `""`) with "HasMany relation is not
-    /// configured". Pair with `with_parent_pk` to make it
-    /// loadable — normally the derive does both for you.
-    #[must_use]
-    pub fn new(foreign_key: &'static str, local_key: &'static str) -> Self {
-        Self {
-            foreign_key,
-            local_key,
-            ..Self::default()
-        }
-    }
-
-    key_pair_plumbing!();
-
-    #[doc(hidden)]
-    pub fn set_cached(&mut self, models: Vec<E>) {
-        self.state.set_cached(Some(models));
-    }
-
     /// Fetch all related rows, in no particular order — add one with
     /// [`load_with`](Self::load_with) if order matters.
     ///
@@ -96,12 +65,9 @@ impl<E: Model> HasMany<E> {
     /// carries no parent key (a bare `Default`, or a deserialized model that was
     /// never refreshed).
     pub async fn load(&self) -> Result<Vec<E>> {
-        let can_query = self.state.can_query(self.ensure_configured().is_ok());
-        if let Some(cached) = self.state.served(can_query) {
-            return Ok(cached.cloned().unwrap_or_default());
-        }
-
-        self.query("HasMany::load")?.get().await
+        let configured = self.ensure_configured().is_ok();
+        let query = || self.query("HasMany::load");
+        self.state.load_many(configured, query).await
     }
 
     /// Fetch related rows through a caller-supplied refinement of the query.
@@ -150,22 +116,6 @@ impl<E: Model> HasMany<E> {
         identity_keys(self.state.cached())
     }
 }
-
-impl<E: Model> Default for HasMany<E> {
-    fn default() -> Self {
-        Self {
-            foreign_key: "",
-            local_key: "",
-            #[cfg(feature = "entity-manager")]
-            relation_name: "",
-            #[cfg(feature = "entity-manager")]
-            owner_table: "",
-            state: RelationState::default(),
-        }
-    }
-}
-
-relation_serde!(HasMany<E>);
 
 /// Loading through [`EntityManager::load`](crate::entity_manager::EntityManager::load)
 /// keeps the rows cached already, or reads them, hands each to the manager's

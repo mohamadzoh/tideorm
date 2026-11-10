@@ -361,10 +361,7 @@ impl Migrator {
 
     /// The database this migrator runs on.
     pub(super) fn db(&self) -> Result<Database> {
-        match &self.db {
-            Some(db) => Ok(db.clone()),
-            None => require_db(),
-        }
+        self.db.clone().map_or_else(require_db, Ok)
     }
 
     /// The ledger this migrator records into, its table name checked before it

@@ -53,44 +53,9 @@ pub struct HasOne<E: Model> {
     pub(crate) state: RelationState<Box<E>>,
 }
 
+key_pair_relation!(HasOne);
+
 impl<E: Model> HasOne<E> {
-    fn ensure_configured(&self) -> Result<()> {
-        ensure_relation_configured("HasOne", &[self.foreign_key, self.local_key])
-    }
-
-    fn parent_key(&self, context: &str) -> Result<&Value> {
-        self.ensure_configured()?;
-        required_key(&self.state.key, "Parent primary key", context)
-    }
-
-    /// The query for the related row.
-    fn query(&self, context: &str) -> Result<QueryBuilder<E>> {
-        let pk = self.parent_key(context)?;
-        Ok(where_key(self.state.source.query(), self.foreign_key, pk))
-    }
-
-    /// Declare the relation's key pair.
-    ///
-    /// Both names must be non-empty; every loading method rejects a wrapper
-    /// built by [`Default`] (which leaves them `""`) with "HasOne relation is
-    /// not configured". Pair with `with_parent_pk` to
-    /// make it loadable — normally the derive does both for you.
-    #[must_use]
-    pub fn new(foreign_key: &'static str, local_key: &'static str) -> Self {
-        Self {
-            foreign_key,
-            local_key,
-            ..Self::default()
-        }
-    }
-
-    key_pair_plumbing!();
-
-    #[doc(hidden)]
-    pub fn set_cached(&mut self, model: Option<E>) {
-        self.state.set_cached(model.map(Box::new));
-    }
-
     /// Fetch the related row, returning `Ok(None)` when there is none.
     ///
     /// Queries the database whenever a connection is reachable, ignoring any
@@ -100,12 +65,9 @@ impl<E: Model> HasOne<E> {
     /// parent key (a bare `Default` or a deserialized model that was never
     /// refreshed).
     pub async fn load(&self) -> Result<Option<E>> {
-        let can_query = self.state.can_query(self.ensure_configured().is_ok());
-        if let Some(cached) = self.state.served(can_query) {
-            return Ok(cached.map(|model| (**model).clone()));
-        }
-
-        self.query("HasOne::load")?.first().await
+        let configured = self.ensure_configured().is_ok();
+        let query = || self.query("HasOne::load").map(Some);
+        self.state.load_one(configured, query).await
     }
 
     /// Fetch the related row through a caller-supplied refinement of the query.
@@ -140,22 +102,6 @@ impl<E: Model> HasOne<E> {
         "Under an entity manager, the owner's next save deletes a child the relation no longer holds."
     );
 }
-
-impl<E: Model> Default for HasOne<E> {
-    fn default() -> Self {
-        Self {
-            foreign_key: "",
-            local_key: "",
-            #[cfg(feature = "entity-manager")]
-            relation_name: "",
-            #[cfg(feature = "entity-manager")]
-            owner_table: "",
-            state: RelationState::default(),
-        }
-    }
-}
-
-relation_serde!(HasOne<E>);
 
 /// Loading through [`EntityManager::load`](crate::entity_manager::EntityManager::load)
 /// resolves the row from the manager's identity map when it is there,

@@ -175,39 +175,25 @@ async fn insert_by_strategy<M>(
 where
     M: InternalModel + crate::model::Model,
 {
-    let count = active_models.len();
-    match strategy {
-        Strategy::Returning(order) => {
-            let mut results = Vec::with_capacity(count);
-            let mut remaining = active_models.into_iter().peekable();
-            loop {
-                let chunk = next_chunk::<M, _>(&mut remaining, chunks);
-                if chunk.is_empty() {
-                    return Ok(results);
-                }
-                let offset = results.len();
-                results.extend(
-                    insert_returning::<M>(connection, chunk, order, offset, error_context).await?,
-                );
+    let mut results = Vec::with_capacity(active_models.len());
+    let mut remaining = active_models.into_iter().peekable();
+    loop {
+        let chunk = next_chunk::<M, _>(&mut remaining, chunks);
+        if chunk.is_empty() {
+            return Ok(results);
+        }
+        let offset = results.len();
+        let rows = match strategy {
+            Strategy::Returning(order) => {
+                insert_returning::<M>(connection, chunk, order, offset, error_context).await?
             }
-        }
-        Strategy::InsertThenSelect(keys) => {
-            let mut results = Vec::with_capacity(count);
-            let mut remaining = active_models.into_iter().peekable();
-            loop {
-                let chunk = next_chunk::<M, _>(&mut remaining, chunks);
-                if chunk.is_empty() {
-                    return Ok(results);
-                }
-                let chunk_keys = &keys[results.len()..results.len() + chunk.len()];
-                results.extend(
-                    insert_then_select::<M>(connection, chunk, chunk_keys, error_context).await?,
-                );
+            Strategy::InsertThenSelect(keys) => {
+                let chunk_keys = &keys[offset..offset + chunk.len()];
+                insert_then_select::<M>(connection, chunk, chunk_keys, error_context).await?
             }
-        }
-        Strategy::PerRow => {
-            insert_individually::<M>(connection, active_models, error_context).await
-        }
+            Strategy::PerRow => insert_individually::<M>(connection, chunk, error_context).await?,
+        };
+        results.extend(rows);
     }
 }
 
@@ -286,17 +272,9 @@ fn client_keys<M: InternalModel>(
 /// written, while a MySQL `CHAR` key comes back without trailing spaces.
 fn returns_exactly(value: &Value, backend: DatabaseType) -> bool {
     match value {
-        Value::TinyInt(Some(_))
-        | Value::SmallInt(Some(_))
-        | Value::Int(Some(_))
-        | Value::BigInt(Some(_))
-        | Value::TinyUnsigned(Some(_))
-        | Value::SmallUnsigned(Some(_))
-        | Value::Unsigned(Some(_))
-        | Value::BigUnsigned(Some(_))
-        | Value::Uuid(Some(_)) => true,
+        Value::Uuid(Some(_)) => true,
         Value::String(Some(_)) => backend == DatabaseType::SQLite,
-        _ => false,
+        value => super::is_integer_value(value),
     }
 }
 

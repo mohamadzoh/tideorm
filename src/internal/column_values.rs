@@ -178,6 +178,21 @@ fn typed_null(column_type: &ColumnType) -> Value {
     }
 }
 
+/// Whether `value` is a non-NULL integer, signed or not.
+pub(crate) fn is_integer_value(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::TinyInt(Some(_))
+            | Value::SmallInt(Some(_))
+            | Value::Int(Some(_))
+            | Value::BigInt(Some(_))
+            | Value::TinyUnsigned(Some(_))
+            | Value::SmallUnsigned(Some(_))
+            | Value::Unsigned(Some(_))
+            | Value::BigUnsigned(Some(_))
+    )
+}
+
 /// Whether `column_type` holds integers, signed or not.
 pub(crate) fn is_integer(column_type: &ColumnType) -> bool {
     matches!(

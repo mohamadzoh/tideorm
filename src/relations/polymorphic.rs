@@ -274,64 +274,89 @@ fn morph_query<Related: Model, C>(
     ))
 }
 
-/// The plumbing [`MorphOne`] and [`MorphMany`] share, expanded inside each
-/// one's `impl` block: they differ only in what they cache.
-macro_rules! morph_owner_plumbing {
-    ($relation:literal) => {
-        fn query(&self, context: &str) -> Result<QueryBuilder<Related>> {
-            morph_query(
-                $relation,
-                self.morph_name,
-                self.local_key,
-                self.parent_table.as_deref(),
-                &self.state,
-                context,
-            )
+/// What [`MorphOne`] and [`MorphMany`] share: they differ only in what they
+/// cache.
+macro_rules! morph_owner_relation {
+    ($relation:ident) => {
+        impl<Related: Model> $relation<Related> {
+            fn query(&self, context: &str) -> Result<QueryBuilder<Related>> {
+                morph_query(
+                    stringify!($relation),
+                    self.morph_name,
+                    self.local_key,
+                    self.parent_table.as_deref(),
+                    &self.state,
+                    context,
+                )
+            }
+
+            /// Whether the relation names its columns and its owner's table,
+            /// so `load` can query.
+            fn is_configured(&self) -> bool {
+                ensure_relation_configured(
+                    stringify!($relation),
+                    &[self.morph_name, self.local_key],
+                )
+                .is_ok()
+                    && self.parent_table.is_some()
+            }
+
+            /// Declare the morph prefix and the local key column.
+            ///
+            /// Both must be non-empty; every method rejects a wrapper built by
+            /// [`Default`] with
+            #[doc = concat!("\"", stringify!($relation), " relation is not configured\".")]
+            /// Pair with `with_parent` to make it loadable.
+            #[must_use]
+            pub fn new(morph_name: &'static str, local_key: &'static str) -> Self {
+                Self {
+                    morph_name,
+                    local_key,
+                    parent_table: None,
+                    state: RelationState::default(),
+                }
+            }
+
+            /// Supply both halves of the polymorphic key: this model's
+            /// [`local_key`](Self::local_key) value and its table name, which
+            /// is what the `_type` column is matched against, and whether the
+            /// model is new (its `is_new()`), whose cached rows carry over when
+            /// saving it rebuilds the relation.
+            ///
+            /// The pk must be a scalar. Without this the wrapper is inert —
+            /// every query method errors with "Parent primary key not set for
+            /// relation".
+            #[doc(hidden)]
+            pub fn with_parent(
+                mut self,
+                pk: impl Into<Value>,
+                table: String,
+                owner_is_new: bool,
+            ) -> Self {
+                self.state.set_owner_key(pk.into(), owner_is_new);
+                self.parent_table = Some(table);
+                self
+            }
+
+            #[doc(hidden)]
+            pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
+                self.state.preserve_from(
+                    &previous.state,
+                    self.morph_name == previous.morph_name
+                        && self.local_key == previous.local_key
+                        && self.parent_table == previous.parent_table,
+                    previous.state.owner_is_new,
+                );
+            }
         }
 
-        /// Whether the relation names its columns and its owner's table, so
-        /// `load` can query.
-        fn is_configured(&self) -> bool {
-            ensure_relation_configured($relation, &[self.morph_name, self.local_key]).is_ok()
-                && self.parent_table.is_some()
+        impl<Related: Model> Default for $relation<Related> {
+            fn default() -> Self {
+                Self::new("", "")
+            }
         }
 
-        /// Supply both halves of the polymorphic key: this model's
-        /// [`local_key`](Self::local_key) value and its table name, which is what
-        /// the `_type` column is matched against, and whether the model is new
-        /// (its `is_new()`), whose cached rows carry over when saving it
-        /// rebuilds the relation.
-        ///
-        /// The pk must be a scalar. Without this the wrapper is inert — every query
-        /// method errors with "Parent primary key not set for relation".
-        #[doc(hidden)]
-        pub fn with_parent(
-            mut self,
-            pk: impl Into<Value>,
-            table: String,
-            owner_is_new: bool,
-        ) -> Self {
-            self.state.set_owner_key(pk.into(), owner_is_new);
-            self.parent_table = Some(table);
-            self
-        }
-
-        #[doc(hidden)]
-        pub fn attach_query_database(&mut self, database: &crate::database::Database) {
-            self.state.source.database = Some(database.clone());
-        }
-
-        #[doc(hidden)]
-        pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
-            self.state.preserve_from(
-                &previous.state,
-                self.morph_name == previous.morph_name
-                    && self.local_key == previous.local_key
-                    && self.parent_table == previous.parent_table
-                    && self.state.key == previous.state.key,
-                previous.state.owner_is_new,
-            );
-        }
+        relation_serde!($relation<Related>);
     };
 }
 
@@ -365,23 +390,9 @@ pub struct MorphOne<Related: Model> {
     state: RelationState<Box<Related>>,
 }
 
+morph_owner_relation!(MorphOne);
+
 impl<Related: Model> MorphOne<Related> {
-    /// Declare the morph prefix and the local key column.
-    ///
-    /// Both must be non-empty; loading a wrapper built by [`Default`] fails with
-    /// "MorphOne relation is not configured". Pair with
-    /// `with_parent` to make it loadable.
-    #[must_use]
-    pub fn new(morph_name: &'static str, local_key: &'static str) -> Self {
-        Self {
-            morph_name,
-            local_key,
-            ..Self::default()
-        }
-    }
-
-    morph_owner_plumbing!("MorphOne");
-
     /// Fetch the related row, returning `Ok(None)` when there is none.
     ///
     /// Queries whenever a connection is reachable. A cached row — from an eager
@@ -390,12 +401,8 @@ impl<Related: Model> MorphOne<Related> {
     /// eager-loaded row itself with [`get_cached`](Self::get_cached). An eager
     /// load that found no row is served as `Ok(None)`.
     pub async fn load(&self) -> Result<Option<Related>> {
-        let can_query = self.state.can_query(self.is_configured());
-        if let Some(cached) = self.state.served(can_query) {
-            return Ok(cached.map(|model| (**model).clone()));
-        }
-
-        self.query("MorphOne::load")?.first().await
+        let query = || self.query("MorphOne::load").map(Some);
+        self.state.load_one(self.is_configured(), query).await
     }
 
     /// Fetch the related row through a caller-supplied refinement of the
@@ -416,25 +423,7 @@ impl<Related: Model> MorphOne<Related> {
     }
 
     crate::relations::state::one_row_cache!(Related);
-
-    #[doc(hidden)]
-    pub fn set_cached(&mut self, model: Option<Related>) {
-        self.state.set_cached(model.map(Box::new));
-    }
 }
-
-impl<Related: Model> Default for MorphOne<Related> {
-    fn default() -> Self {
-        Self {
-            morph_name: "",
-            local_key: "",
-            parent_table: None,
-            state: RelationState::default(),
-        }
-    }
-}
-
-relation_serde!(MorphOne<Related>);
 
 /// The owning side of a polymorphic one-to-many relation: every row of
 /// `Related` whose `(type, id)` pair points back at this model.
@@ -459,23 +448,9 @@ pub struct MorphMany<Related: Model> {
     state: RelationState<Vec<Related>>,
 }
 
+morph_owner_relation!(MorphMany);
+
 impl<Related: Model> MorphMany<Related> {
-    /// Declare the morph prefix and the local key column.
-    ///
-    /// Both must be non-empty; every method rejects a wrapper built by
-    /// [`Default`] with "MorphMany relation is not configured". Pair with
-    /// `with_parent` to make it loadable.
-    #[must_use]
-    pub fn new(morph_name: &'static str, local_key: &'static str) -> Self {
-        Self {
-            morph_name,
-            local_key,
-            ..Self::default()
-        }
-    }
-
-    morph_owner_plumbing!("MorphMany");
-
     /// Fetch every related row, in no particular order.
     ///
     /// Queries whenever a connection is reachable. Cached rows — from an eager
@@ -483,12 +458,8 @@ impl<Related: Model> MorphMany<Related> {
     /// that arrived in a request body is never reported as stored rows; read
     /// eager-loaded rows themselves with [`get_cached`](Self::get_cached).
     pub async fn load(&self) -> Result<Vec<Related>> {
-        let can_query = self.state.can_query(self.is_configured());
-        if let Some(cached) = self.state.served(can_query) {
-            return Ok(cached.cloned().unwrap_or_default());
-        }
-
-        self.query("MorphMany::load")?.get().await
+        let query = || self.query("MorphMany::load");
+        self.state.load_many(self.is_configured(), query).await
     }
 
     /// Fetch related rows through a caller-supplied refinement of the query.
@@ -517,22 +488,4 @@ impl<Related: Model> MorphMany<Related> {
     }
 
     crate::relations::state::many_rows_cache!(Related);
-
-    #[doc(hidden)]
-    pub fn set_cached(&mut self, models: Vec<Related>) {
-        self.state.set_cached(Some(models));
-    }
 }
-
-impl<Related: Model> Default for MorphMany<Related> {
-    fn default() -> Self {
-        Self {
-            morph_name: "",
-            local_key: "",
-            parent_table: None,
-            state: RelationState::default(),
-        }
-    }
-}
-
-relation_serde!(MorphMany<Related>);

@@ -223,29 +223,7 @@ impl TableBuilder {
         )
     }
 
-    /// Index `columns` under a generated name, `idx_<table>_<columns>`,
-    /// shortened with a hash past 63 bytes.
-    pub fn index(&mut self, columns: &[&str]) -> &mut Self {
-        let name = ddl::index_name(self.table(), columns, false);
-        self.push_index(name, columns, false)
-    }
-
-    /// Index `columns` under `name`.
-    pub fn index_named(&mut self, name: &str, columns: &[&str]) -> &mut Self {
-        self.push_index(name.to_string(), columns, false)
-    }
-
-    /// A unique index on `columns`, named `idx_<table>_<columns>_unique`
-    /// (shortened with a hash past 63 bytes).
-    pub fn unique_index(&mut self, columns: &[&str]) -> &mut Self {
-        let name = ddl::index_name(self.table(), columns, true);
-        self.push_index(name, columns, true)
-    }
-
-    /// A unique index on `columns`, named `name`.
-    pub fn unique_index_named(&mut self, name: &str, columns: &[&str]) -> &mut Self {
-        self.push_index(name.to_string(), columns, true)
-    }
+    ddl::index_methods!(index, index_named, unique_index, unique_index_named);
 
     fn push_index(&mut self, name: String, columns: &[&str], unique: bool) -> &mut Self {
         self.indexes.push(IndexDefinition::new(

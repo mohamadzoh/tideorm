@@ -25,7 +25,8 @@ mod topology;
 
 pub use column_values::__column_type_of;
 pub(crate) use column_values::{
-    array_element, column_type_of, column_value, is_integer, json_to_column_value, value_document,
+    array_element, column_type_of, column_value, is_integer, is_integer_value,
+    json_to_column_value, value_document,
 };
 pub(crate) use error_translation::{reclassify_error, translate_connection_error, translate_error};
 pub(crate) use json_loss::json_loss;

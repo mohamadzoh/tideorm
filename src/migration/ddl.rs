@@ -166,6 +166,39 @@ pub(crate) fn index_name(table: &str, columns: &[impl AsRef<str>], unique: bool)
     bounded_index_name(format!("idx_{}_{}{}", table, columns.join("_"), suffix))
 }
 
+/// The four index methods of a builder with `table()` and
+/// `push_index(name, columns, unique)`, under that builder's names.
+macro_rules! index_methods {
+    ($index:ident, $named:ident, $unique:ident, $unique_named:ident) => {
+        /// Index `columns` under a generated name, `idx_<table>_<columns>`,
+        /// shortened with a hash past 63 bytes: the name a table's own index
+        /// and a later added one get alike.
+        pub fn $index(&mut self, columns: &[&str]) -> &mut Self {
+            let name = $crate::migration::ddl::index_name(self.table(), columns, false);
+            self.push_index(name, columns, false)
+        }
+
+        /// Index `columns` under `name`.
+        pub fn $named(&mut self, name: &str, columns: &[&str]) -> &mut Self {
+            self.push_index(name.to_string(), columns, false)
+        }
+
+        /// A unique index on `columns`, named `idx_<table>_<columns>_unique`
+        /// (shortened with a hash past 63 bytes).
+        pub fn $unique(&mut self, columns: &[&str]) -> &mut Self {
+            let name = $crate::migration::ddl::index_name(self.table(), columns, true);
+            self.push_index(name, columns, true)
+        }
+
+        /// A unique index on `columns`, named `name`.
+        pub fn $unique_named(&mut self, name: &str, columns: &[&str]) -> &mut Self {
+            self.push_index(name.to_string(), columns, true)
+        }
+    };
+}
+
+pub(crate) use index_methods;
+
 /// Whether `default` is the current timestamp in one of the spellings the
 /// backends share between them.
 fn is_current_timestamp(default: &str) -> bool {

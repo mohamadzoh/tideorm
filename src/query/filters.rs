@@ -232,14 +232,21 @@ macro_rules! condition_methods {
         $($crate::query::condition_methods!(@raw $raw $family => $receiver, $push, $doc);)?
     };
 
-    (@col where, $receiver:ident, $push:ident, $doc:literal) => {
-        $crate::query::condition_methods!(@col_method where_col, $receiver, $push, $doc);
+    // Expand `@$arm` with the family's name out of a `[where, or_where,
+    // and_where]` triple.
+    (@pick where, [$name:ident, $or_name:ident, $and_name:ident], $arm:ident $($rest:tt)*) => {
+        $crate::query::condition_methods!(@ $arm $name $($rest)*);
     };
-    (@col or_where, $receiver:ident, $push:ident, $doc:literal) => {
-        $crate::query::condition_methods!(@col_method or_where_col, $receiver, $push, $doc);
+    (@pick or_where, [$name:ident, $or_name:ident, $and_name:ident], $arm:ident $($rest:tt)*) => {
+        $crate::query::condition_methods!(@ $arm $or_name $($rest)*);
     };
-    (@col and_where, $receiver:ident, $push:ident, $doc:literal) => {
-        $crate::query::condition_methods!(@col_method and_where_col, $receiver, $push, $doc);
+    (@pick and_where, [$name:ident, $or_name:ident, $and_name:ident], $arm:ident $($rest:tt)*) => {
+        $crate::query::condition_methods!(@ $arm $and_name $($rest)*);
+    };
+
+    (@col $family:ident, $receiver:ident, $push:ident, $doc:literal) => {
+        $crate::query::condition_methods!(@pick $family, [where_col, or_where_col, and_where_col],
+            col_method, $receiver, $push, $doc);
     };
 
     (@col_method $name:ident, $receiver:ident, $push:ident, $doc:literal) => {
@@ -261,47 +268,21 @@ macro_rules! condition_methods {
         }
     };
 
-    (@ops where, $receiver:ident, $push:ident, $doc:literal; $(
+    (@ops $family:ident, $receiver:ident, $push:ident, $doc:literal; $(
         [$name:ident, $or_name:ident, $and_name:ident] $(<$generic:ident: $bound:path>)?
         $summary:literal ($($arg:ident: $arg_ty:ty),*) => $operator:ident, $value:expr;
     )*) => {$(
-        $crate::query::condition_methods!(@method $name $(<$generic: $bound>)?, $summary, $doc, $receiver,
-            ($($arg: $arg_ty),*), $push, $operator, $value);
-    )*};
-
-    (@ops or_where, $receiver:ident, $push:ident, $doc:literal; $(
-        [$name:ident, $or_name:ident, $and_name:ident] $(<$generic:ident: $bound:path>)?
-        $summary:literal ($($arg:ident: $arg_ty:ty),*) => $operator:ident, $value:expr;
-    )*) => {$(
-        $crate::query::condition_methods!(@method $or_name $(<$generic: $bound>)?, $summary, $doc, $receiver,
-            ($($arg: $arg_ty),*), $push, $operator, $value);
-    )*};
-
-    (@ops and_where, $receiver:ident, $push:ident, $doc:literal; $(
-        [$name:ident, $or_name:ident, $and_name:ident] $(<$generic:ident: $bound:path>)?
-        $summary:literal ($($arg:ident: $arg_ty:ty),*) => $operator:ident, $value:expr;
-    )*) => {$(
-        $crate::query::condition_methods!(@method $and_name $(<$generic: $bound>)?, $summary, $doc, $receiver,
-            ($($arg: $arg_ty),*), $push, $operator, $value);
+        $crate::query::condition_methods!(@pick $family, [$name, $or_name, $and_name], method
+            $(<$generic: $bound>)?, $summary, $doc, $receiver, ($($arg: $arg_ty),*), $push, $operator, $value);
     )*};
 
     (@typed_ops $family:ident, $receiver:ident, $push:ident, $doc:literal; $(
         [$name:ident, $or_name:ident, $and_name:ident] $kind:ident
         $summary:literal => $operator:ident;
     )*) => {$(
-        $crate::query::condition_methods!(@typed_name $family,
-            [$name, $or_name, $and_name], $kind, $summary, $doc, $receiver, $push, $operator);
+        $crate::query::condition_methods!(@pick $family, [$name, $or_name, $and_name], typed_method,
+            $kind, $summary, $doc, $receiver, $push, $operator);
     )*};
-
-    (@typed_name where, [$name:ident, $or_name:ident, $and_name:ident], $($rest:tt)*) => {
-        $crate::query::condition_methods!(@typed_method $name, $($rest)*);
-    };
-    (@typed_name or_where, [$name:ident, $or_name:ident, $and_name:ident], $($rest:tt)*) => {
-        $crate::query::condition_methods!(@typed_method $or_name, $($rest)*);
-    };
-    (@typed_name and_where, [$name:ident, $or_name:ident, $and_name:ident], $($rest:tt)*) => {
-        $crate::query::condition_methods!(@typed_method $and_name, $($rest)*);
-    };
     // TypedValue/TypedList/TypedRange are dispatch markers for value-aware
     // signatures. The remaining operations keep their operator-specific types.
     (@typed_method $name:ident, TypedValue, $summary:literal, $doc:literal,
@@ -319,14 +300,11 @@ macro_rules! condition_methods {
         where
             C: $crate::columns::ColumnValue<V>,
         {
-            self.$push($crate::query::WhereCondition {
-                column: $crate::columns::column_reference(
-                    &column,
-                    <Self as $crate::columns::ConditionOwner>::own_table(),
-                ),
-                operator: $crate::query::Operator::$operator,
-                value: $crate::query::ConditionValue::single(C::convert_value(value)),
-            })
+            self.$push(<Self as $crate::columns::ConditionOwner>::condition(
+                &column,
+                $crate::query::Operator::$operator,
+                $crate::query::ConditionValue::single(C::convert_value(value)),
+            ))
         }
     };
 
@@ -341,14 +319,11 @@ macro_rules! condition_methods {
         where
             C: $crate::columns::ColumnValue<V>,
         {
-            self.$push($crate::query::WhereCondition {
-                column: $crate::columns::column_reference(
-                    &column,
-                    <Self as $crate::columns::ConditionOwner>::own_table(),
-                ),
-                operator: $crate::query::Operator::$operator,
-                value: $crate::query::ConditionValue::list(values.into_iter().map(C::convert_value)),
-            })
+            self.$push(<Self as $crate::columns::ConditionOwner>::condition(
+                &column,
+                $crate::query::Operator::$operator,
+                $crate::query::ConditionValue::list(values.into_iter().map(C::convert_value)),
+            ))
         }
     };
 
@@ -362,17 +337,14 @@ macro_rules! condition_methods {
         where
             C: $crate::columns::ColumnValue<L> + $crate::columns::ColumnValue<H>,
         {
-            self.$push($crate::query::WhereCondition {
-                column: $crate::columns::column_reference(
-                    &column,
-                    <Self as $crate::columns::ConditionOwner>::own_table(),
-                ),
-                operator: $crate::query::Operator::$operator,
-                value: $crate::query::ConditionValue::range(
+            self.$push(<Self as $crate::columns::ConditionOwner>::condition(
+                &column,
+                $crate::query::Operator::$operator,
+                $crate::query::ConditionValue::range(
                     <C as $crate::columns::ColumnValue<L>>::convert_value(min),
                     <C as $crate::columns::ColumnValue<H>>::convert_value(max),
                 ),
-            })
+            ))
         }
     };
 
@@ -387,28 +359,19 @@ macro_rules! condition_methods {
             column: impl $crate::columns::IntoColumnName,
             $($arg: $arg_ty),*
         ) -> Self {
-            self.$push($crate::query::WhereCondition {
-                column: $crate::columns::column_reference(
-                    &column,
-                    <Self as $crate::columns::ConditionOwner>::own_table(),
-                ),
-                operator: $crate::query::Operator::$operator,
-                value: $value,
-            })
+            self.$push(<Self as $crate::columns::ConditionOwner>::condition(
+                &column,
+                $crate::query::Operator::$operator,
+                $value,
+            ))
         }
     };
 
-    (@raw raw where => $receiver:ident, $push:ident, $doc:literal) => {
-        $crate::query::condition_methods!(@raw_method where_raw, $receiver, $push, $doc);
-        $crate::query::condition_methods!(@raw_with_method where_raw_with, $receiver, $push, $doc);
-    };
-    (@raw raw or_where => $receiver:ident, $push:ident, $doc:literal) => {
-        $crate::query::condition_methods!(@raw_method or_where_raw, $receiver, $push, $doc);
-        $crate::query::condition_methods!(@raw_with_method or_where_raw_with, $receiver, $push, $doc);
-    };
-    (@raw raw and_where => $receiver:ident, $push:ident, $doc:literal) => {
-        $crate::query::condition_methods!(@raw_method and_where_raw, $receiver, $push, $doc);
-        $crate::query::condition_methods!(@raw_with_method and_where_raw_with, $receiver, $push, $doc);
+    (@raw raw $family:ident => $receiver:ident, $push:ident, $doc:literal) => {
+        $crate::query::condition_methods!(@pick $family, [where_raw, or_where_raw, and_where_raw],
+            raw_method, $receiver, $push, $doc);
+        $crate::query::condition_methods!(@pick $family,
+            [where_raw_with, or_where_raw_with, and_where_raw_with], raw_with_method, $receiver, $push, $doc);
     };
 
     (@raw_with_method $name:ident, $receiver:ident, $push:ident, $doc:literal) => {

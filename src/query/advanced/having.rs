@@ -54,16 +54,12 @@ fn numeric_operand(value: &Value) -> Option<Value> {
         Value::Json(Some(json)) => json.as_str()?.trim().parse().ok()?,
         Value::String(Some(text)) => text.trim().parse().ok()?,
         Value::Decimal(Some(decimal)) => *decimal,
-        Value::TinyInt(Some(_))
-        | Value::SmallInt(Some(_))
-        | Value::Int(Some(_))
-        | Value::BigInt(Some(_))
-        | Value::TinyUnsigned(Some(_))
-        | Value::SmallUnsigned(Some(_))
-        | Value::Unsigned(Some(_))
-        | Value::BigUnsigned(Some(_))
-        | Value::Float(Some(_))
-        | Value::Double(Some(_)) => return Some(crate::internal::bindable_value(value.clone())),
+        value
+            if crate::internal::is_integer_value(value)
+                || matches!(value, Value::Float(Some(_)) | Value::Double(Some(_))) =>
+        {
+            return Some(crate::internal::bindable_value(value.clone()));
+        }
         _ => return None,
     };
     Some(Value::Decimal(Some(decimal)))

@@ -23,15 +23,24 @@ pub(super) fn compiled_validation_regex(pattern: &str) -> Option<Arc<regex::Rege
 }
 
 /// Value adapter used by the generic validator helpers.
+///
+/// Every method has a default: a value that is never empty and has no text
+/// or number, which only `required` applies to.
 pub trait ValidatableValue {
     /// Return whether the value counts as empty for `Required`.
-    fn is_empty_value(&self) -> bool;
+    fn is_empty_value(&self) -> bool {
+        false
+    }
 
     /// Return a string view for string-oriented rules.
-    fn as_str_value(&self) -> Option<&str>;
+    fn as_str_value(&self) -> Option<&str> {
+        None
+    }
 
     /// Return a numeric representation for numeric rules.
-    fn as_f64_value(&self) -> Option<f64>;
+    fn as_f64_value(&self) -> Option<f64> {
+        None
+    }
 
     /// Return the value as an exact integer, for an integer value: numeric
     /// rules compare it exactly, where an integer past 2^53 has no exact `f64`.
@@ -52,41 +61,29 @@ pub trait ValidatableValue {
     }
 }
 
-impl ValidatableValue for String {
-    fn is_empty_value(&self) -> bool {
-        self.trim().is_empty()
-    }
+macro_rules! impl_validatable_for_text {
+    ($($t:ty),*) => {$(
+        impl ValidatableValue for $t {
+            fn is_empty_value(&self) -> bool {
+                self.trim().is_empty()
+            }
 
-    fn as_str_value(&self) -> Option<&str> {
-        Some(self.as_str())
-    }
+            fn as_str_value(&self) -> Option<&str> {
+                Some(self.as_ref())
+            }
 
-    fn as_f64_value(&self) -> Option<f64> {
-        self.parse().ok()
-    }
+            fn as_f64_value(&self) -> Option<f64> {
+                self.parse().ok()
+            }
 
-    fn as_i128_value(&self) -> Option<i128> {
-        self.parse().ok()
-    }
+            fn as_i128_value(&self) -> Option<i128> {
+                self.parse().ok()
+            }
+        }
+    )*};
 }
 
-impl ValidatableValue for &str {
-    fn is_empty_value(&self) -> bool {
-        self.trim().is_empty()
-    }
-
-    fn as_str_value(&self) -> Option<&str> {
-        Some(self)
-    }
-
-    fn as_f64_value(&self) -> Option<f64> {
-        self.parse().ok()
-    }
-
-    fn as_i128_value(&self) -> Option<i128> {
-        self.parse().ok()
-    }
-}
+impl_validatable_for_text!(String, &str);
 
 impl<T: ValidatableValue> ValidatableValue for Option<T> {
     fn as_decimal_value(&self) -> Option<rust_decimal::Decimal> {
@@ -121,14 +118,6 @@ macro_rules! impl_validatable_for_number {
     ($($t:ty),* ; $($int:ty),*) => {
         $(
             impl ValidatableValue for $t {
-                fn is_empty_value(&self) -> bool {
-                    false
-                }
-
-                fn as_str_value(&self) -> Option<&str> {
-                    None
-                }
-
                 fn as_f64_value(&self) -> Option<f64> {
                     Some(*self as f64)
                 }
@@ -140,14 +129,6 @@ macro_rules! impl_validatable_for_number {
         )*
         $(
             impl ValidatableValue for $int {
-                fn is_empty_value(&self) -> bool {
-                    false
-                }
-
-                fn as_str_value(&self) -> Option<&str> {
-                    None
-                }
-
                 fn as_f64_value(&self) -> Option<f64> {
                     Some(*self as f64)
                 }
@@ -168,13 +149,6 @@ impl_validatable_for_number!(
 impl ValidatableValue for rust_decimal::Decimal {
     fn as_decimal_value(&self) -> Option<rust_decimal::Decimal> {
         Some(*self)
-    }
-    fn is_empty_value(&self) -> bool {
-        false
-    }
-
-    fn as_str_value(&self) -> Option<&str> {
-        None
     }
 
     fn as_f64_value(&self) -> Option<f64> {
@@ -221,57 +195,14 @@ impl<T> ValidatableValue for Vec<T> {
     fn is_empty_value(&self) -> bool {
         self.is_empty()
     }
-
-    fn as_str_value(&self) -> Option<&str> {
-        None
-    }
-
-    fn as_f64_value(&self) -> Option<f64> {
-        None
-    }
 }
 
-/// Types only `required` applies to, and which are never empty themselves:
-/// an `Option` of one is empty when it is `None`.
-macro_rules! impl_validatable_presence_only {
-    ($($t:ty),* $(,)?) => {
-        $(
-            impl ValidatableValue for $t {
-                fn is_empty_value(&self) -> bool {
-                    false
-                }
-
-                fn as_str_value(&self) -> Option<&str> {
-                    None
-                }
-
-                fn as_f64_value(&self) -> Option<f64> {
-                    None
-                }
-            }
-        )*
-    };
-}
-
-impl_validatable_presence_only!(
-    bool,
-    char,
-    uuid::Uuid,
-    chrono::NaiveDate,
-    chrono::NaiveDateTime,
-    chrono::NaiveTime,
-);
-
-impl<Tz: chrono::TimeZone> ValidatableValue for chrono::DateTime<Tz> {
-    fn is_empty_value(&self) -> bool {
-        false
-    }
-
-    fn as_str_value(&self) -> Option<&str> {
-        None
-    }
-
-    fn as_f64_value(&self) -> Option<f64> {
-        None
-    }
-}
+// Types only `required` applies to, and which are never empty themselves:
+// an `Option` of one is empty when it is `None`.
+impl ValidatableValue for bool {}
+impl ValidatableValue for char {}
+impl ValidatableValue for uuid::Uuid {}
+impl ValidatableValue for chrono::NaiveDate {}
+impl ValidatableValue for chrono::NaiveDateTime {}
+impl ValidatableValue for chrono::NaiveTime {}
+impl<Tz: chrono::TimeZone> ValidatableValue for chrono::DateTime<Tz> {}

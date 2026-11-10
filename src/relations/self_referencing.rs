@@ -21,6 +21,32 @@ use super::helpers::{
 };
 use super::state::{RelationState, relation_serde};
 
+/// `new`, `Default` (`parent_id`/`id`) and serde for [`SelfRef`] and
+/// [`SelfRefMany`], which name the same two columns.
+macro_rules! self_ref_relation {
+    ($relation:ident) => {
+        impl<E: Model> $relation<E> {
+            /// Declare the two columns. Both name columns on the *same* table.
+            #[must_use]
+            pub fn new(foreign_key: &'static str, local_key: &'static str) -> Self {
+                Self {
+                    foreign_key,
+                    local_key,
+                    state: RelationState::default(),
+                }
+            }
+        }
+
+        impl<E: Model> Default for $relation<E> {
+            fn default() -> Self {
+                Self::new("parent_id", "id")
+            }
+        }
+
+        relation_serde!($relation<E>);
+    };
+}
+
 /// The upward half of a self-referencing relation: the single row of the same
 /// table that this row points at, such as a node's parent.
 ///
@@ -51,17 +77,9 @@ pub struct SelfRef<E: Model> {
     state: RelationState<Box<E>>,
 }
 
-impl<E: Model> SelfRef<E> {
-    /// Declare the two columns. Both name columns on the *same* table.
-    #[must_use]
-    pub fn new(foreign_key: &'static str, local_key: &'static str) -> Self {
-        Self {
-            foreign_key,
-            local_key,
-            ..Self::default()
-        }
-    }
+self_ref_relation!(SelfRef);
 
+impl<E: Model> SelfRef<E> {
     /// Supply this row's [`foreign_key`](Self::foreign_key) value, which is what
     /// the parent is looked up by.
     ///
@@ -76,19 +94,12 @@ impl<E: Model> SelfRef<E> {
     }
 
     #[doc(hidden)]
-    pub fn attach_query_database(&mut self, database: &crate::database::Database) {
-        self.state.source.database = Some(database.clone());
-    }
-
-    #[doc(hidden)]
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
         // The cache holds the parent, which a row not given a foreign key yet
         // is the caller's to link.
         self.state.preserve_from(
             &previous.state,
-            self.foreign_key == previous.foreign_key
-                && self.local_key == previous.local_key
-                && self.state.key == previous.state.key,
+            self.foreign_key == previous.foreign_key && self.local_key == previous.local_key,
             previous.state.key.is_none(),
         );
     }
@@ -117,14 +128,8 @@ impl<E: Model> SelfRef<E> {
     /// ancestor chain costs one query per level — for a subtree use
     /// [`SelfRefMany::load_tree`], which does it in one.
     pub async fn load(&self) -> Result<Option<E>> {
-        if let Some(cached) = self.state.served(self.state.can_query(true)) {
-            return Ok(cached.map(|model| (**model).clone()));
-        }
-
-        match self.query("SelfRef::load")? {
-            Some(query) => query.first().await,
-            None => Ok(None),
-        }
+        let query = || self.query("SelfRef::load");
+        self.state.load_one(true, query).await
     }
 
     /// Fetch the parent through a caller-supplied refinement of the query.
@@ -156,18 +161,6 @@ impl<E: Model> SelfRef<E> {
     crate::relations::state::one_row_cache!(E);
 }
 
-impl<E: Model> Default for SelfRef<E> {
-    fn default() -> Self {
-        Self {
-            foreign_key: "parent_id",
-            local_key: "id",
-            state: RelationState::default(),
-        }
-    }
-}
-
-relation_serde!(SelfRef<E>);
-
 /// The downward half of a self-referencing relation: every row of the same table
 /// that points at this one, such as a node's direct children.
 ///
@@ -194,17 +187,9 @@ pub struct SelfRefMany<E: Model> {
     state: RelationState<Vec<E>>,
 }
 
-impl<E: Model> SelfRefMany<E> {
-    /// Declare the two columns. Both name columns on the *same* table.
-    #[must_use]
-    pub fn new(foreign_key: &'static str, local_key: &'static str) -> Self {
-        Self {
-            foreign_key,
-            local_key,
-            ..Self::default()
-        }
-    }
+self_ref_relation!(SelfRefMany);
 
+impl<E: Model> SelfRefMany<E> {
     /// Supply this row's [`local_key`](Self::local_key) value, which the
     /// children's foreign key is matched against, and whether the row is new
     /// (its `is_new()`), whose cached children carry over when saving it
@@ -220,17 +205,10 @@ impl<E: Model> SelfRefMany<E> {
     }
 
     #[doc(hidden)]
-    pub fn attach_query_database(&mut self, database: &crate::database::Database) {
-        self.state.source.database = Some(database.clone());
-    }
-
-    #[doc(hidden)]
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
         self.state.preserve_from(
             &previous.state,
-            self.foreign_key == previous.foreign_key
-                && self.local_key == previous.local_key
-                && self.state.key == previous.state.key,
+            self.foreign_key == previous.foreign_key && self.local_key == previous.local_key,
             previous.state.owner_is_new,
         );
     }
@@ -252,11 +230,8 @@ impl<E: Model> SelfRefMany<E> {
     /// with this is one query per node; use [`load_tree`](Self::load_tree)
     /// instead.
     pub async fn load(&self) -> Result<Vec<E>> {
-        if let Some(cached) = self.state.served(self.state.can_query(true)) {
-            return Ok(cached.cloned().unwrap_or_default());
-        }
-
-        self.query("SelfRefMany::load")?.get().await
+        let query = || self.query("SelfRefMany::load");
+        self.state.load_many(true, query).await
     }
 
     /// Fetch the direct children through a caller-supplied refinement of the
@@ -318,15 +293,3 @@ impl<E: Model> SelfRefMany<E> {
             .await
     }
 }
-
-impl<E: Model> Default for SelfRefMany<E> {
-    fn default() -> Self {
-        Self {
-            foreign_key: "parent_id",
-            local_key: "id",
-            state: RelationState::default(),
-        }
-    }
-}
-
-relation_serde!(SelfRefMany<E>);

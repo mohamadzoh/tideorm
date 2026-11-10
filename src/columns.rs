@@ -385,6 +385,19 @@ pub(crate) fn model_table<M: crate::model::ModelMeta>()
 pub(crate) trait ConditionOwner {
     /// The table of the builder's model, if it has one.
     fn own_table() -> Option<(&'static str, Option<&'static str>)>;
+
+    /// The condition on `column` as this builder writes it.
+    fn condition(
+        column: &impl IntoColumnName,
+        operator: crate::query::Operator,
+        value: crate::query::ConditionValue,
+    ) -> crate::query::WhereCondition {
+        crate::query::WhereCondition {
+            column: column_reference(column, Self::own_table()),
+            operator,
+            value,
+        }
+    }
 }
 
 impl IntoColumnName for &str {

@@ -187,15 +187,6 @@ impl DeriveValueTypeStruct {
             quote!()
         };
 
-        let impl_not_u8 = if cfg!(feature = "postgres") {
-            quote!(
-                #[automatically_derived]
-                impl ::tideorm::orm::sql_builder::postgres_array::NotU8 for #name {}
-            )
-        } else {
-            quote!()
-        };
-
         let impl_try_getable_array = if cfg!(feature = "postgres") && self.try_getable_array {
             quote!(
                 #[automatically_derived]
@@ -213,6 +204,16 @@ impl DeriveValueTypeStruct {
             quote!()
         };
 
+        let value = Ident::new("v", Span::call_site());
+        let value_type = value_type_impl(
+            name,
+            &value,
+            quote!(<#field_type as ::tideorm::orm::sql_builder::ValueType>::try_from(#value).map(|v| #name(v))),
+            array_type,
+            column_type,
+        );
+        let shared = shared_impls(name);
+
         quote!(
             #[automatically_derived]
             impl std::convert::From<#name> for ::tideorm::orm::Value {
@@ -229,24 +230,7 @@ impl DeriveValueTypeStruct {
                 }
             }
 
-            #[automatically_derived]
-            impl ::tideorm::orm::sql_builder::ValueType for #name {
-                fn try_from(v: ::tideorm::orm::Value) -> std::result::Result<Self, ::tideorm::orm::sql_builder::ValueTypeErr> {
-                    <#field_type as ::tideorm::orm::sql_builder::ValueType>::try_from(v).map(|v| #name(v))
-                }
-
-                fn type_name() -> std::string::String {
-                    stringify!(#name).to_owned()
-                }
-
-                fn array_type() -> ::tideorm::orm::sql_builder::ArrayType {
-                    #array_type
-                }
-
-                fn column_type() -> ::tideorm::orm::sql_builder::ColumnType {
-                    #column_type
-                }
-            }
+            #value_type
 
             #[automatically_derived]
             impl ::tideorm::orm::sql_builder::Nullable for #name {
@@ -255,16 +239,9 @@ impl DeriveValueTypeStruct {
                 }
             }
 
-            #[automatically_derived]
-            impl ::tideorm::orm::IntoActiveValue<#name> for #name {
-                fn into_active_value(self) -> ::tideorm::orm::ActiveValue<#name> {
-                    ::tideorm::orm::ActiveValue::Set(self)
-                }
-            }
+            #shared
 
             #try_from_u64_impl
-
-            #impl_not_u8
 
             #impl_try_getable_array
         )
@@ -302,14 +279,17 @@ impl DeriveValueTypeString {
         let err = Ident::new("err", Span::mixed_site());
         let value = Ident::new("v", Span::mixed_site());
 
-        let impl_not_u8 = if cfg!(feature = "postgres") {
+        let value_type = value_type_impl(
+            name,
+            &value,
             quote!(
-                #[automatically_derived]
-                impl ::tideorm::orm::sql_builder::postgres_array::NotU8 for #name {}
-            )
-        } else {
-            quote!()
-        };
+                let #string = <String as ::tideorm::orm::sql_builder::ValueType>::try_from(#value)?;
+                #from_str(&#string).map_err(|_| ::tideorm::orm::sql_builder::ValueTypeErr)
+            ),
+            &quote!(::tideorm::orm::sql_builder::ArrayType::String),
+            &quote!(::tideorm::orm::sql_builder::ColumnType::#column_type),
+        );
+        let shared = shared_impls(name);
 
         quote!(
             #[automatically_derived]
@@ -334,25 +314,7 @@ impl DeriveValueTypeString {
                 }
             }
 
-            #[automatically_derived]
-            impl ::tideorm::orm::sql_builder::ValueType for #name {
-                fn try_from(#value: ::tideorm::orm::Value) -> std::result::Result<Self, ::tideorm::orm::sql_builder::ValueTypeErr> {
-                    let #string = <String as ::tideorm::orm::sql_builder::ValueType>::try_from(#value)?;
-                    #from_str(&#string).map_err(|_| ::tideorm::orm::sql_builder::ValueTypeErr)
-                }
-
-                fn type_name() -> std::string::String {
-                    stringify!(#name).to_owned()
-                }
-
-                fn array_type() -> ::tideorm::orm::sql_builder::ArrayType {
-                    ::tideorm::orm::sql_builder::ArrayType::String
-                }
-
-                fn column_type() -> ::tideorm::orm::sql_builder::ColumnType {
-                    ::tideorm::orm::sql_builder::ColumnType::#column_type
-                }
-            }
+            #value_type
 
             #[automatically_derived]
             impl ::tideorm::orm::sql_builder::Nullable for #name {
@@ -361,16 +323,62 @@ impl DeriveValueTypeString {
                 }
             }
 
-            #[automatically_derived]
-            impl ::tideorm::orm::IntoActiveValue<#name> for #name {
-                fn into_active_value(self) -> ::tideorm::orm::ActiveValue<#name> {
-                    ::tideorm::orm::ActiveValue::Set(self)
-                }
-            }
-
-            #impl_not_u8
+            #shared
         )
     }
+}
+
+/// The `ValueType` impl of `name`, whose `try_from(value)` runs `try_from`.
+fn value_type_impl(
+    name: &Ident,
+    value: &Ident,
+    try_from: TokenStream,
+    array_type: &TokenStream,
+    column_type: &TokenStream,
+) -> TokenStream {
+    quote!(
+        #[automatically_derived]
+        impl ::tideorm::orm::sql_builder::ValueType for #name {
+            fn try_from(#value: ::tideorm::orm::Value) -> std::result::Result<Self, ::tideorm::orm::sql_builder::ValueTypeErr> {
+                #try_from
+            }
+
+            fn type_name() -> std::string::String {
+                stringify!(#name).to_owned()
+            }
+
+            fn array_type() -> ::tideorm::orm::sql_builder::ArrayType {
+                #array_type
+            }
+
+            fn column_type() -> ::tideorm::orm::sql_builder::ColumnType {
+                #column_type
+            }
+        }
+    )
+}
+
+/// The impls both kinds of value type emit alike: `IntoActiveValue`, and on
+/// PostgreSQL `NotU8`, which lets a `Vec` of it be an array.
+fn shared_impls(name: &Ident) -> TokenStream {
+    let not_u8 = if cfg!(feature = "postgres") {
+        quote!(
+            #[automatically_derived]
+            impl ::tideorm::orm::sql_builder::postgres_array::NotU8 for #name {}
+        )
+    } else {
+        quote!()
+    };
+    quote!(
+        #[automatically_derived]
+        impl ::tideorm::orm::IntoActiveValue<#name> for #name {
+            fn into_active_value(self) -> ::tideorm::orm::ActiveValue<#name> {
+                ::tideorm::orm::ActiveValue::Set(self)
+            }
+        }
+
+        #not_u8
+    )
 }
 
 pub fn expand_derive_value_type(input: syn::DeriveInput) -> syn::Result<TokenStream> {
