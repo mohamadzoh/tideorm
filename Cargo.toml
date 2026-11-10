@@ -43,9 +43,9 @@ exclude = [
 ]
 
 # docs.rs builds the default features only, which would leave every API behind a
-# module flag undocumented. The backend features gate no public items.
+# module flag, and the MySQL and SQLite connect options, undocumented.
 [package.metadata.docs.rs]
-features = ["attachments", "translations", "fulltext", "entity-manager", "dirty-tracking", "encrypted-fields"]
+features = ["mysql", "sqlite", "attachments", "translations", "fulltext", "entity-manager", "dirty-tracking", "encrypted-fields"]
 
 [workspace]
 members = [".", "tideorm-macros"]

@@ -419,7 +419,7 @@ jobs:
       - name: Build docs with the docs.rs feature set
         env:
           RUSTDOCFLAGS: "-D warnings"
-        run: cargo doc --locked --no-deps --features "attachments translations fulltext entity-manager dirty-tracking encrypted-fields"
+        run: cargo doc --locked --no-deps --features "mysql sqlite attachments translations fulltext entity-manager dirty-tracking encrypted-fields"
       - name: Execute documentation examples, including SQLite terminals
         run: cargo test --locked --doc --all-features -- --test-threads=8
       - name: Compile all standalone examples
