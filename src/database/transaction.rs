@@ -229,7 +229,9 @@ impl TransactionScope {
         options: TransactionOptions,
     ) -> std::result::Result<Self, crate::internal::OrmError> {
         connection.observe_attach();
-        let txn = connection.executor().begin_with_options(options).await?;
+        // Boxed: unbroken, the begin's future (down to the driver's connect)
+        // nests a caller's layout past the compiler's query depth limit.
+        let txn = Box::pin(connection.executor().begin_with_options(options)).await?;
         Ok(Self {
             txn: Arc::new(txn),
             pool: connection.pool().clone(),

@@ -5,6 +5,16 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.1] - 2026-11-10
+
+### Fixed
+
+- A release build with both `runtime-tokio` and `runtime-async-std` and the `mysql` feature no
+  longer fails in model code with "queries overflow the depth limit!": a transaction's begin is
+  boxed, so a model method's future no longer nests the driver's connect inside it.
+- docs.rs builds the documentation with the `mysql` and `sqlite` features, so `DatabaseBuilder`'s
+  links to `mysql_options` and `sqlite_options` resolve.
+
 ## [0.17.0] - 2026-11-10
 
 TideORM runs on its own execution engine, SQL builder and database drivers, published as the
