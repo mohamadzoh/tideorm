@@ -100,9 +100,9 @@ dependencies = [
 
 [[package]]
 name = "async-executor"
-version = "1.14.0"
+version = "1.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c96bf972d85afc50bf5ab8fe2d54d1586b4e0b46c97c50a0c9e71e2f7bcd812a"
+checksum = "f426a31126c735126297bc5ea7a521263c9faff4f63ca415267ee625651c4f37"
 dependencies = [
  "async-task",
  "concurrent-queue",
@@ -1353,16 +1353,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pluralizer"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b3eba432a00a1f6c16f39147847a870e94e2e9b992759b503e330efec778cbe"
-dependencies = [
- "once_cell",
- "regex",
-]
-
-[[package]]
 name = "polling"
 version = "3.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1896,7 +1886,7 @@ dependencies = [
 
 [[package]]
 name = "tideorm"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "argon2",
  "async-io",
@@ -1936,9 +1926,9 @@ dependencies = [
 
 [[package]]
 name = "tideorm-driver-core"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d42d21457fd003699d09a16b8ddce457cf03fc3857633ea4ecc197b7a1807411"
+checksum = "64b51d135f15e70ee80d1d3af05c8183553503ec56f6fb6457c1fa8e5adfdec3"
 dependencies = [
  "async-io",
  "async-std",
@@ -1950,7 +1940,6 @@ dependencies = [
  "event-listener 5.4.2",
  "futures-core",
  "futures-intrusive",
- "futures-io",
  "futures-util",
  "hashbrown 0.16.1",
  "hashlink",
@@ -1973,15 +1962,14 @@ dependencies = [
 
 [[package]]
 name = "tideorm-driver-mysql"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d92238466ab7f7a7bffcb2fc63026240885f5abe80970f0e52098c107b697cd"
+checksum = "5234a5b21e554a5f09c7a11b17c91af8e458f558f04307fd4d840bc712e641e5"
 dependencies = [
  "bitflags",
  "byteorder",
  "bytes",
  "chrono",
- "digest",
  "either",
  "futures-core",
  "futures-util",
@@ -2033,13 +2021,12 @@ dependencies = [
 
 [[package]]
 name = "tideorm-driver-sqlite"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1df758eec814ae0fb2e29b7b51a4fac2d8cc21dc7a7592098347537814d33b42"
+checksum = "d3bcd0fde219af182d039e294fe5e4c6a154014bdf80beee67dd566ebac56bfb"
 dependencies = [
  "chrono",
  "flume",
- "form_urlencoded",
  "futures-channel",
  "futures-core",
  "futures-executor",
@@ -2076,10 +2063,9 @@ dependencies = [
 
 [[package]]
 name = "tideorm-macros"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "darling",
- "pluralizer",
  "proc-macro2",
  "quote",
  "syn 3.0.9",

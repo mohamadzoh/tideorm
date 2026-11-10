@@ -5,6 +5,14 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.2] - 2026-11-10
+
+### Changed
+
+- `tideorm-macros` no longer depends on `pluralizer`, which it did not use.
+- `tideorm-driver-core`, `tideorm-driver-mysql` and `tideorm-driver-sqlite` 0.1.1 drop their
+  unused `futures-io`, `digest` and `form_urlencoded` dependencies; a fresh build resolves them.
+
 ## [0.17.1] - 2026-11-10
 
 ### Fixed
