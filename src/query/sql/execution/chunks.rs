@@ -110,6 +110,34 @@ fn key_of<M: Model>(model: &M) -> Result<serde_json::Value> {
     serde_json::to_value(model.primary_key()).map_err(Error::from)
 }
 
+/// One page of a query's models read after a cursor, as
+/// [`QueryBuilder::cursor_paginate`] reads it. Serializes as
+/// `{"items": [..], "next_cursor": ".." | null}`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct CursorPage<M> {
+    /// The models on this page.
+    pub items: Vec<M>,
+    /// The cursor that reads the next page; `None` once a page comes back
+    /// short. A page that ends exactly at the last row is followed by an
+    /// empty one.
+    pub next_cursor: Option<String>,
+}
+
+/// A chunk cursor as text a client hands back: the key and whether the next
+/// page starts at it, as base64url JSON.
+fn encode_cursor((key, inclusive): &(serde_json::Value, bool)) -> String {
+    crate::tokenization::base64_url_encode(
+        serde_json::json!([key, inclusive]).to_string().as_bytes(),
+    )
+}
+
+fn decode_cursor(cursor: &str) -> Result<(serde_json::Value, bool)> {
+    crate::tokenization::base64_url_decode(cursor)
+        .and_then(|bytes| serde_json::from_slice::<(serde_json::Value, bool)>(&bytes).ok())
+        .filter(|(key, _)| key.is_number() || key.is_string())
+        .ok_or_else(|| Error::validation("cursor", "is not a cursor this query issued"))
+}
+
 impl<M: Model> QueryBuilder<M> {
     /// Read the matching models in batches of `chunk_size`, one batch per
     /// [`Chunks::next`], without loading the full result set into memory.
@@ -167,6 +195,61 @@ impl<M: Model> QueryBuilder<M> {
             joins_repeat_keys,
             cursor: None,
         })
+    }
+
+    /// One page of at most `per_page` models, keyset-paged by the primary key:
+    /// pass `None` for the first page, then each page's
+    /// [`next_cursor`](CursorPage::next_cursor). Unlike
+    /// [`paginate`](Self::paginate) it counts nothing and skips no rows by
+    /// OFFSET, so a deep page costs what the first does, and a row written
+    /// between requests neither repeats nor skips another.
+    ///
+    /// The query follows [`chunk`](Self::chunk)'s rules, and `limit()` is
+    /// refused: a page holds `per_page` rows. A cursor is opaque text for a
+    /// client, not a secret: it names the key to continue from, and the
+    /// query's filters still apply. One that does not decode fails with
+    /// [`Error::Validation`] on the field `cursor`.
+    ///
+    /// Run this example with the `sqlite` feature.
+    ///
+    /// ```
+    /// # #[cfg(feature = "sqlite")]
+    /// # {
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users")]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String }
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User,)>().sync(true).connect().await?;
+    /// # Database::execute("INSERT INTO users (id, name) VALUES (1, 'Ada'), (2, 'Grace'), (3, 'Edsger')").await?;
+    /// let first = User::query().cursor_paginate(2, None).await?;
+    /// assert_eq!(first.items.len(), 2);
+    /// let second = User::query().cursor_paginate(2, first.next_cursor.as_deref()).await?;
+    /// assert_eq!(second.items[0].name, "Edsger");
+    /// assert_eq!(second.next_cursor, None);
+    /// # Ok::<(), tideorm::Error>(())
+    /// # }).unwrap();
+    /// # }
+    /// ```
+    pub async fn cursor_paginate(
+        self,
+        per_page: u64,
+        cursor: Option<&str>,
+    ) -> Result<CursorPage<M>> {
+        if self.clauses.limit_value.is_some() {
+            return Err(Error::query(
+                "cursor_paginate() does not support limit(): each page holds per_page rows",
+            ));
+        }
+        let mut pages = self.chunks(per_page)?;
+        if let Some(cursor) = cursor {
+            pages.cursor = Some(decode_cursor(cursor)?);
+        }
+        let items = pages.next().await?.unwrap_or_default();
+        let next_cursor = match (&pages.query, &pages.cursor) {
+            (Some(_), Some(cursor)) => Some(encode_cursor(cursor)),
+            _ => None,
+        };
+        Ok(CursorPage { items, next_cursor })
     }
 
     /// Process matching models in batches without loading the full result set into memory.

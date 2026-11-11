@@ -9,6 +9,19 @@ use crate::tide_warn;
 
 use super::schema::{ModelSchema, execute_ddl, qualifying_schema, table_reference};
 
+/// Refuse `force_sync` where `environment` (`TIDEORM_ENV`) is `production`,
+/// in any case as the CLI reads it, unless `allowed`
+/// (`TIDEORM_ALLOW_FORCE_SYNC`): it deletes every registered table's rows.
+pub(super) fn refuse_in_production(environment: Option<&str>, allowed: bool) -> Result<()> {
+    let production = environment.is_some_and(|name| name.trim().eq_ignore_ascii_case("production"));
+    if production && !allowed {
+        return Err(crate::Error::configuration(
+            "force_sync drops and recreates every registered table, and TIDEORM_ENV is              production; set TIDEORM_ALLOW_FORCE_SYNC=true to run it anyway",
+        ));
+    }
+    Ok(())
+}
+
 /// Drop the tables of `models` that exist, `existing[i]` saying whether
 /// `models[i]`'s does.
 ///

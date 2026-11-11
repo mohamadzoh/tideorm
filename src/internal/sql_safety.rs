@@ -1,5 +1,6 @@
 use super::sql_lexer::{EscapeMode, Kind, QuotedRun, Token, quoted_end};
 use crate::config::DatabaseType;
+use crate::orm::sql::Dialect;
 
 #[cfg(feature = "fulltext")]
 mod fulltext;
@@ -18,7 +19,7 @@ pub(crate) use crate::orm::sql_builder::is_plain_identifier as is_safe_identifie
 /// backend: `[` quotes nothing there, so a bracket's contents are checked as
 /// SQL, and a dollar quote is a token of its own, which can be refused.
 fn fragment_tokens(sql: &str) -> impl Iterator<Item = Token<'_>> {
-    crate::orm::sql::tokens(sql, crate::orm::sql::Dialect::Postgres)
+    crate::orm::sql::tokens(sql, Dialect::Postgres)
 }
 
 /// Scan a raw SQL fragment for statement separators and comment introducers that
@@ -69,7 +70,18 @@ fn find_forbidden_raw_sql_token(sql: &str) -> Option<&'static str> {
         };
         return Some(reason);
     }
-    None
+    // Another backend can end a quote elsewhere: SQLite's `@name(..)`
+    // parameter runs to a `)`, quotes included, so `@a('x) -- '` hides a
+    // comment there.
+    let other_backends = [Dialect::MySql, Dialect::Sqlite];
+    other_backends.into_iter().find_map(|dialect| {
+        crate::orm::sql::tokens(sql, dialect).find_map(|token| match token.kind {
+            Kind::Comment => Some("SQL comments"),
+            _ if !token.terminated => Some("unterminated quotes"),
+            Kind::Symbol if token.text == ";" => Some("statement separators"),
+            _ => None,
+        })
+    })
 }
 
 /// Whether the `[` opening `sql` and the next `]` hold a quote: SQLite reads

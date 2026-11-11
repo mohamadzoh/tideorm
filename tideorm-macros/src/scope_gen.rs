@@ -30,6 +30,7 @@ pub(crate) const QUERY_BUILDER_METHODS: &[&str] = &[
     "consolidate",
     "count",
     "count_distinct",
+    "cursor_paginate",
     "debug",
     "debug_for",
     "delete",

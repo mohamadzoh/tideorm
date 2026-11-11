@@ -50,6 +50,8 @@
 //! a schema change is not additive. Use explicit migrations for deployed systems.
 //!
 //! **Do not use force_sync in production.** It deletes tables and their data.
+//! A process whose `TIDEORM_ENV` is `production` refuses it unless
+//! `TIDEORM_ALLOW_FORCE_SYNC` is `1` or `true`.
 //!
 //! Enable synchronization with `TideConfig::init().sync(true)` or call
 //! `Database::sync()` directly after connecting.
@@ -176,10 +178,16 @@ pub async fn sync_database(db: &Database) -> Result<()> {
 /// # ⚠️ DANGER
 ///
 /// **DO NOT use in production!** This is for development only.
-/// [`SyncMode::Recreate`] deletes the tables and all of their data.
+/// [`SyncMode::Recreate`] deletes the tables and all of their data; it is an
+/// [`Error::Configuration`](crate::Error::Configuration) where `TIDEORM_ENV` is
+/// `production`, unless `TIDEORM_ALLOW_FORCE_SYNC` is `1` or `true`.
 pub async fn sync_database_with(db: &Database, mode: SyncMode) -> Result<()> {
     let force_sync = mode == SyncMode::Recreate;
     if force_sync {
+        recreate::refuse_in_production(
+            std::env::var("TIDEORM_ENV").ok().as_deref(),
+            crate::logging::env_flag_enabled("TIDEORM_ALLOW_FORCE_SYNC"),
+        )?;
         tide_warn!(
             "Database FORCE sync mode is ENABLED - registered tables are dropped and recreated!"
         );

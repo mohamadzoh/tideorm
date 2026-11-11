@@ -444,6 +444,8 @@ fn test_escape_fts5_query_quotes_each_literal_term() {
     assert_eq!(escape_fts5_query("   "), "");
     assert_eq!(escape_fts5_query("* ^ -"), "");
     assert_eq!(escape_fts5_query("rust *"), "\"rust\"");
+    // FTS5 would read the NUL as the end of the query.
+    assert_eq!(escape_fts5_query("a\0b"), "\"a b\"");
 }
 
 #[test]

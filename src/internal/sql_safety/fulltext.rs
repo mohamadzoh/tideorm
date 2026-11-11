@@ -213,8 +213,9 @@ pub(crate) fn sanitize_postgres_boolean_tsquery(input: &str) -> String {
 
 /// `text` between double quotes, each one in it doubled: an FTS5 string,
 /// which FTS5 tokenizes instead of parsing, or a `ts_headline` option value.
+/// A NUL is written as a space: FTS5 reads it as the end of the query.
 pub(crate) fn double_quoted(text: &str) -> String {
-    format!("\"{}\"", text.replace('"', "\"\""))
+    format!("\"{}\"", text.replace('"', "\"\"").replace('\0', " "))
 }
 
 /// Rewrite user input as a list of FTS5 string literals.

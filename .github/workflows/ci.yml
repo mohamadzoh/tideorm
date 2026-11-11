@@ -143,6 +143,31 @@ jobs:
       - name: Exercise async-std without the Tokio driver runtime
         run: cargo test --locked --no-default-features --features sqlite,runtime-async-std --test async_std_runtime
 
+  # Each module feature on its own, so one that compiles only alongside another
+  # (a missing #[cfg], an import another feature brings) fails here.
+  feature-isolation:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+
+      - name: Run clippy with each module feature alone
+        run: |
+          for feature in attachments translations fulltext entity-manager dirty-tracking encrypted-fields; do
+            echo "::group::$feature"
+            cargo clippy --locked --workspace --all-targets --features "$feature" -- -D warnings
+            echo "::endgroup::"
+          done
+
   macros:
     runs-on: ubuntu-latest
 

@@ -176,7 +176,9 @@ impl TideConfig {
     /// Drop and recreate the table of every registered model on connect.
     ///
     /// Every row in those tables is deleted, on every start. Keep it to local
-    /// development and tests, never production startup. Has no effect unless
+    /// development and tests, never production startup: where `TIDEORM_ENV` is
+    /// `production`, [`connect`](TideConfig::connect) refuses it unless
+    /// `TIDEORM_ALLOW_FORCE_SYNC` is `1` or `true`. Has no effect unless
     /// [`sync(true)`](TideConfig::sync) is also set.
     #[must_use]
     pub fn force_sync(mut self, enabled: bool) -> Self {

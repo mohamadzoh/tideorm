@@ -97,7 +97,7 @@ static TOKENIZATION_STATE: RwLock<TokenizationState> = RwLock::new(TokenizationS
 struct ConfiguredEncryptionKey {
     derived: [u8; 32],
     #[cfg(feature = "encrypted-fields")]
-    scoped_derived: RwLock<HashMap<String, [u8; 32]>>,
+    scoped_derived: parking_lot::Mutex<HashMap<String, [u8; 32]>>,
 }
 
 impl ConfiguredEncryptionKey {
@@ -105,24 +105,19 @@ impl ConfiguredEncryptionKey {
         Self {
             derived: derive_encryption_key(raw),
             #[cfg(feature = "encrypted-fields")]
-            scoped_derived: RwLock::new(HashMap::new()),
+            scoped_derived: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 
     #[cfg(feature = "encrypted-fields")]
     fn derived_field_key(&self, table_name: &str, column_name: &str) -> [u8; 32] {
-        let scope_cache_key = format!("{}\0{}", table_name, column_name);
-
-        if let Some(derived) = self.scoped_derived.read().get(&scope_cache_key).copied() {
-            return derived;
-        }
-
-        let derived = derive_scoped_encryption_key(&self.derived, table_name, column_name);
-        self.scoped_derived
-            .write()
-            .entry(scope_cache_key)
-            .or_insert(derived);
-        derived
+        // Derived under the lock: each derivation takes 64 MiB, and rows of one
+        // column decoded at once would otherwise all derive it.
+        *self
+            .scoped_derived
+            .lock()
+            .entry(format!("{table_name}\0{column_name}"))
+            .or_insert_with(|| derive_scoped_encryption_key(&self.derived, table_name, column_name))
     }
 }
 
@@ -394,9 +389,16 @@ fn seal_token(record_id: &str, aad: &[u8]) -> Result<String> {
     let key = TokenConfig::get_derived_encryption_key()?;
     let sealed = seal(&key, record_id.as_bytes(), aad)
         .ok_or_else(|| Error::tokenization("Failed to encrypt token payload"))?;
-
-    Ok(base64_url_encode(&sealed))
+    let token = base64_url_encode(&sealed);
+    if token.len() > MAX_TOKEN_LEN {
+        return Err(Error::tokenization("record id too long to tokenize"));
+    }
+    Ok(token)
 }
+
+/// The longest token that opens, one for a key of about 3 KB: a longer one is
+/// refused before it is decoded or authenticated.
+const MAX_TOKEN_LEN: usize = 4096;
 
 /// Default token decoder.
 ///
@@ -410,7 +412,9 @@ pub fn default_decode(token: &str, model_name: &str) -> Result<Option<String>> {
 /// or does not authenticate, `Err` only when no key is configured.
 fn open_token(token: &str, aad: &[u8]) -> Result<Option<String>> {
     let key = TokenConfig::get_derived_encryption_key()?;
-
+    if token.len() > MAX_TOKEN_LEN {
+        return Ok(None);
+    }
     let Some(sealed) = base64_url_decode(token) else {
         return Ok(None);
     };
@@ -454,12 +458,12 @@ fn token_codecs<T: Tokenizable>() -> (Option<TokenEncoder>, Option<TokenDecoder>
 }
 
 /// The default decoder for a model that names its table. A token without the
-/// prefix was issued bound to the struct name, and opens only for a model of
-/// that name.
-fn decode_for_table(token: &str, table: TokenTable, model_name: &str) -> Result<Option<String>> {
+/// prefix, bound to a struct name another model may share, does not open; a
+/// missing key is still an `Err`.
+fn decode_for_table(token: &str, table: TokenTable) -> Result<Option<String>> {
     match token.strip_prefix(TABLE_TOKEN_PREFIX) {
         Some(sealed) => open_token(sealed, &table_binding(table)),
-        None => default_decode(token, model_name),
+        None => TokenConfig::get_derived_encryption_key().map(|_| None),
     }
 }
 
@@ -485,9 +489,6 @@ pub trait Tokenizable: Sized + Send + Sync {
     /// struct name in different modules cannot open each other's tokens;
     /// `None`, the default for a hand-written impl, binds them to
     /// [`token_model_name`](Self::token_model_name).
-    ///
-    /// A token issued before tokens were bound to tables still decodes for
-    /// a model of the struct name it was bound to.
     fn token_table() -> Option<TokenTable> {
         None
     }
@@ -567,7 +568,7 @@ pub trait Tokenizable: Sized + Send + Sync {
         let (encoder, decoder) = token_codecs::<Self>();
         let model_name = Self::token_model_name();
         let payload = match (encoder, decoder, Self::token_table()) {
-            (None, None, Some(table)) => decode_for_table(token, table, model_name)?,
+            (None, None, Some(table)) => decode_for_table(token, table)?,
             (_, Some(decoder), _) => decoder(token, model_name)?,
             (_, None, _) => default_decode(token, model_name)?,
         }

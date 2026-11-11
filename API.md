@@ -116,6 +116,7 @@ get_as<T: DeserializeOwned>(self) -> Result<Vec<T>>
 pluck<T: DeserializeOwned>(self, column: impl ColumnRead<T>) -> Result<Vec<T>>
 value<T: DeserializeOwned>(self, column: impl ColumnRead<T>) -> Result<Option<T>>
 paginate(self, page: u64, per_page: u64) -> Result<Paginated<M>>
+cursor_paginate(self, per_page: u64, cursor: Option<&str>) -> Result<CursorPage<M>>
 sum<T: DeserializeOwned>(self, column: impl IntoColumnName) -> Result<T>
 avg<T: DeserializeOwned>(self, column: impl IntoColumnName) -> Result<Option<T>>
 min / max<T: DeserializeOwned>(self, column: impl IntoColumnName) -> Result<Option<T>>
@@ -155,7 +156,7 @@ Default features: `postgres`, `runtime-tokio`. To use only SQLite:
 
 ```toml
 [dependencies]
-tideorm = { version = "0.17.2", default-features = false, features = ["sqlite", "runtime-tokio"] }
+tideorm = { version = "0.17.3", default-features = false, features = ["sqlite", "runtime-tokio"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 

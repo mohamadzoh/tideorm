@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::{CacheConfig, CacheStrategy, QueryCache};
+use super::{CacheConfig, CacheInvalidation, CacheStrategy, QueryCache};
 use crate::cache::GLOBAL_QUERY_CACHE;
 
 impl QueryCache {
@@ -80,8 +80,8 @@ impl QueryCache {
     ///
     /// Entries are evicted with the configured strategy until a new payload fits
     /// inside the budget, and a payload larger than the whole budget is never
-    /// cached. Pass `0` (the default) for no byte budget, in which case only
-    /// `max_entries` bounds the cache.
+    /// cached. The default is 64 MiB; pass `0` for no byte budget, in which
+    /// case only `max_entries` bounds the cache.
     pub fn set_max_size_bytes(&self, max: usize) -> &Self {
         self.config.write().max_size_bytes = max;
         self
@@ -108,5 +108,35 @@ impl QueryCache {
     /// Get current configuration
     pub fn config(&self) -> CacheConfig {
         self.config.read().clone()
+    }
+
+    /// Call `hook` after each invalidation of this cache: a write's (as it
+    /// runs, and again when its transaction commits),
+    /// [`invalidate_model`](Self::invalidate_model)'s and
+    /// [`clear`](Self::clear)'s, but not a single key's
+    /// [`invalidate`](Self::invalidate) or an expiry. To keep the caches of
+    /// several processes in step, publish each event on a channel of your own
+    /// (Redis, NATS, ..) and hand what the other processes publish to
+    /// [`apply_invalidation`](Self::apply_invalidation). The hook runs on the
+    /// writing task: hand the event off rather than wait on the network.
+    ///
+    /// ```ignore
+    /// let (events, mut outgoing) = tokio::sync::mpsc::unbounded_channel();
+    /// QueryCache::global().set_invalidation_hook(move |event| { let _ = events.send(event.clone()); });
+    /// // a task publishes `outgoing`; one subscribed to the other processes calls
+    /// QueryCache::global().apply_invalidation(&received);
+    /// ```
+    pub fn set_invalidation_hook(
+        &self,
+        hook: impl Fn(&CacheInvalidation) + Send + Sync + 'static,
+    ) -> &Self {
+        self.invalidation_hook.set(std::sync::Arc::new(hook));
+        self
+    }
+
+    /// Stop calling the hook [`set_invalidation_hook`](Self::set_invalidation_hook) set.
+    pub fn clear_invalidation_hook(&self) -> &Self {
+        self.invalidation_hook.clear();
+        self
     }
 }

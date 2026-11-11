@@ -9,10 +9,12 @@ use crate::error::{Error, Result};
 
 mod config;
 mod control;
+mod hook;
 mod pending;
 mod store;
 
 pub use config::{CacheConfig, CacheStrategy};
+pub use hook::CacheInvalidation;
 #[cfg(any(feature = "entity-manager", feature = "dirty-tracking"))]
 pub(crate) use pending::undo_on_rollback;
 pub(crate) use pending::{
@@ -72,6 +74,8 @@ pub struct QueryCache {
     evictions: AtomicU64,
     /// Cache invalidation counter.
     invalidations: AtomicU64,
+    /// Told what each invalidation dropped.
+    invalidation_hook: hook::InvalidationHook,
 }
 
 impl QueryCache {
@@ -90,17 +94,23 @@ impl QueryCache {
             misses: AtomicU64::new(0),
             evictions: AtomicU64::new(0),
             invalidations: AtomicU64::new(0),
+            invalidation_hook: Default::default(),
         }
     }
 
     /// Generate a cache key from a query
     pub fn generate_key(&self, table: &str, query_hash: u64) -> String {
+        self.key_for(table, &query_hash.to_string())
+    }
+
+    /// The key of `table`'s entry named by `digest`.
+    pub(crate) fn key_for(&self, table: &str, digest: &str) -> String {
         let prefix = self.config.read().key_prefix.clone().unwrap_or_default();
 
         if prefix.is_empty() {
-            format!("{}:{}", table, query_hash)
+            format!("{table}:{digest}")
         } else {
-            format!("{}:{}:{}", prefix, table, query_hash)
+            format!("{prefix}:{table}:{digest}")
         }
     }
 
@@ -328,21 +338,32 @@ impl QueryCache {
     /// Table tags are compared without ASCII case sensitivity; quoted tables
     /// differing only in case may therefore be evicted together.
     pub fn invalidate_model(&self, model_name: &str) {
-        let model_name = model_name.to_ascii_lowercase();
+        let table = model_name.to_ascii_lowercase();
+        self.drop_table(&table);
+        self.invalidation_hook
+            .notify(|| CacheInvalidation::Table(table));
+    }
+
+    fn drop_table(&self, table: &str) {
         let removed = {
             let mut cache = self.cache.write();
-            cache.note_invalidated(&model_name);
-            cache.remove_where(|entry| entry.reads_table(&model_name))
+            cache.note_invalidated(table);
+            cache.remove_where(|entry| entry.reads_table(table))
         };
         self.invalidations
             .fetch_add(removed as u64, Ordering::Relaxed);
         if self.is_global() {
-            pending::record(|pending| pending.table(&model_name));
+            pending::record(|pending| pending.table(table));
         }
     }
 
     /// Clear the entire cache
     pub fn clear(&self) {
+        self.drop_all();
+        self.invalidation_hook.notify(|| CacheInvalidation::All);
+    }
+
+    fn drop_all(&self) {
         if self.is_global() {
             pending::record(PendingInvalidations::all);
         }
@@ -355,6 +376,23 @@ impl QueryCache {
     /// effects. Manually inserted entries have no database, so remain
     /// conservative and are invalidated by any database's write.
     pub(crate) fn invalidate_database(&self, database: std::sync::Arc<str>) {
+        self.drop_database(database.clone());
+        self.invalidation_hook
+            .notify(|| CacheInvalidation::Database(database.to_string()));
+    }
+
+    /// Drop what another process's cache dropped, as its
+    /// [invalidation hook](Self::set_invalidation_hook) reported it, without
+    /// calling this cache's own hook, which would publish it again.
+    pub fn apply_invalidation(&self, invalidation: &CacheInvalidation) {
+        match invalidation {
+            CacheInvalidation::Database(database) => self.drop_database(database.as_str().into()),
+            CacheInvalidation::Table(table) => self.drop_table(&table.to_ascii_lowercase()),
+            CacheInvalidation::All => self.drop_all(),
+        }
+    }
+
+    fn drop_database(&self, database: std::sync::Arc<str>) {
         let removed = {
             let mut cache = self.cache.write();
             cache.note_database_invalidated(database.clone());

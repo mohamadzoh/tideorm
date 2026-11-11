@@ -130,7 +130,7 @@ Enable the `encrypted-fields` Cargo feature before using `encrypted = "..."`.
 
 ```toml
 [dependencies]
-tideorm = { version = "0.17.2", features = ["postgres", "encrypted-fields"] }
+tideorm = { version = "0.17.3", features = ["postgres", "encrypted-fields"] }
 ```
 
 Use `encrypted = "..."` on the model when specific persisted columns should be stored encrypted in the database but keep their own plaintext type in your Rust model.
@@ -402,7 +402,7 @@ TideConfig::init()
 
 > ⚠️ **Warning**: Do NOT use `sync(true)` in production! Use proper migrations instead.
 
-`force_sync(true)` goes further: on every connect it drops and recreates the table of each registered model, deleting all of its rows. It drops every table before creating any, each before the registered tables its foreign keys reference, and the recreated tables have no foreign keys. It is for throwaway development and test databases only.
+`force_sync(true)` goes further: on every connect it drops and recreates the table of each registered model, deleting all of its rows. It drops every table before creating any, each before the registered tables its foreign keys reference, and the recreated tables have no foreign keys. It is for throwaway development and test databases only: in a process whose `TIDEORM_ENV` is `production` (in any case) it fails with `Error::Configuration` before dropping anything, unless `TIDEORM_ALLOW_FORCE_SYNC` is `1` or `true`.
 
 To sync a database yourself, outside `connect()`:
 
@@ -1051,7 +1051,7 @@ assert_ne!(user_token, product_token);  // Different!
 assert!(User::decode_token(&product_token).is_err());  // Error!
 ```
 
-A token is bound to the model's schema and table rather than its struct name, so two `User` models in different modules, on different tables, cannot open each other's tokens either, while two models over the same table can. Such a token starts with `v2.`; one issued before (bound to the struct name) still decodes for a model of that name. Encoder and decoder overrides receive the struct name, as before.
+A token is bound to the model's schema and table rather than its struct name, so two `User` models in different modules, on different tables, cannot open each other's tokens either, while two models over the same table can. Such a token starts with `v2.`; one issued by 0.15 or earlier, bound to the struct name, no longer decodes for a derived model. Encoder and decoder overrides receive the struct name, as before.
 
 ### Using Tokens in APIs
 
@@ -1168,7 +1168,7 @@ let id: Option<i64> = User::try_decode_token(&token)?;
 
 **Features:**
 - **Authenticated encryption**: Default tokens use XChaCha20-Poly1305
-- **Model binding**: Model name is authenticated as associated data, preventing cross-model reuse. The name is the struct's, so two tokenized models of one struct name in different modules accept each other's tokens; name them apart
+- **Table binding**: The model's schema and table are authenticated as associated data, so a token opens only for models over that table. A hand-written `Tokenizable` impl without `token_table` binds tokens to the model name instead, so two such models of one name accept each other's tokens; name them apart
 - **Tamper detection**: Modified tokens fail authentication and are rejected
 - **Randomized output**: The default encoder uses a fresh nonce, so the same record can produce different valid tokens
 - **URL-safe**: Base64-URL encoding (A-Za-z0-9-_), no escaping needed

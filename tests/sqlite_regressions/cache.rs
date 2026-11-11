@@ -7,6 +7,9 @@ use crate::fixtures::{
 use std::time::Duration;
 use tideorm::prelude::*;
 
+#[path = "cache/attached.rs"]
+mod attached;
+
 /// `review_users` holding one [`User`], named `old`.
 const OLD_USER: &str = "CREATE TABLE review_users(id INTEGER PRIMARY KEY, name TEXT, active BOOLEAN); \
      INSERT INTO review_users VALUES(1, 'old', 1)";
@@ -172,46 +175,6 @@ async fn separate_pools_on_one_file_invalidate_each_other() {
     assert_eq!(query.get().await.unwrap()[0].name, "new");
     crate::fixtures::close(&reader).await;
     crate::fixtures::close(&writer).await;
-}
-
-#[tokio::test]
-async fn attached_databases_keep_conservative_invalidation() {
-    for attach in [
-        "ATTACH DATABASE ? AS other",
-        "\u{feff}ATTACH DATABASE ? AS other",
-        "/* outer /* inner */ ATTACH DATABASE ? AS other",
-    ] {
-        check_attachment_invalidation(attach).await;
-    }
-}
-
-async fn check_attachment_invalidation(attach: &str) {
-    let (file_db, file) = file_database("attached-cache-scope").await;
-    file_db.exec_raw(OLD_USER).await.unwrap();
-    // SQLITE_OPEN_MEMORY also affects ATTACH unless its URI overrides the
-    // mode. Use a file-backed, single-connection pool for this file attachment.
-    let attaching_file = crate::fixtures::TempFile::new("attaching-cache-scope", "sqlite");
-    let attaching = crate::fixtures::single_connection(&format!(
-        "sqlite://{}?mode=rwc",
-        attaching_file.display()
-    ))
-    .await;
-    let cache = crate::fixtures::global_cache();
-    let query = User::query_with(&file_db).cache(Duration::from_secs(60));
-    query.clone().get().await.unwrap();
-    attaching
-        .exec_raw_with_params(attach, vec![file.to_string_lossy().to_string().into()])
-        .await
-        .unwrap();
-    query.clone().get().await.unwrap();
-    attaching
-        .exec_raw("UPDATE other.review_users SET name = 'new' WHERE id = 1")
-        .await
-        .unwrap();
-    assert_eq!(query.get().await.unwrap()[0].name, "new");
-    assert_eq!(cache.stats().entries, 1);
-    crate::fixtures::close(&attaching).await;
-    crate::fixtures::close(&file_db).await;
 }
 
 #[tokio::test]

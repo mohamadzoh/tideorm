@@ -1,6 +1,6 @@
 [package]
 name = "tideorm"
-version = "0.17.2"
+version = "0.17.3"
 edition = "2024"
 authors = ["Mohamad Al Zohbie <alzoubi528@gmail.com>"]
 description = "A developer-friendly ORM for Rust with clean, expressive syntax"
@@ -74,7 +74,7 @@ encrypted-fields = []
 # The execution engine, from its own repository (rust-ocean/tideorm-engine).
 # `src/orm.rs` re-exports it, with the ORM derive macros from `tideorm-macros`,
 # and macro-generated models reach both through that module's paths.
-tideorm-engine = { version = "0.1.0", default-features = false }
+tideorm-engine = { version = "0.1.1", default-features = false }
 
 # Async runtime
 async-trait = "0.1.92"
@@ -94,7 +94,7 @@ rust_decimal = { version = "1.43.0", features = ["serde"] }
 thiserror = "2.0.21"
 
 # Derive macros (our own crate)
-tideorm-macros = { version = "0.17.2", path = "tideorm-macros" }
+tideorm-macros = { version = "0.17.3", path = "tideorm-macros" }
 
 # Utils
 parking_lot = "0.12.5"
@@ -105,6 +105,7 @@ regex = "1.13.1"
 url = "2.5.8"
 chacha20poly1305 = "0.11.0"
 argon2 = "0.6.0"
+blake2 = { version = "0.11.0", default-features = false }
 
 [dev-dependencies]
 async-std = "1.13.2"

@@ -39,7 +39,7 @@ pub(crate) use filters::{
     comparable_value, condition_example, condition_is_vacuous, condition_methods, is_json_null,
     is_sql_null,
 };
-pub use sql::execution::{Chunks, Paginated};
+pub use sql::execution::{Chunks, CursorPage, Paginated};
 pub use structure::{
     CTE, FrameBound, FrameType, JoinResultConsolidator, JoinType, QueryFragment, WindowFunction,
     WindowFunctionType,

@@ -27,8 +27,8 @@ pub struct CacheConfig {
     pub enabled: bool,
     /// Maximum number of entries in the cache
     pub max_entries: usize,
-    /// Upper bound on the total serialized size of cached data, or `0` for no
-    /// byte budget
+    /// Upper bound on the total serialized size of cached data (64 MiB by
+    /// default), or `0` for no byte budget
     pub max_size_bytes: usize,
     /// Default TTL for cache entries
     pub default_ttl: Duration,
@@ -55,7 +55,7 @@ impl Default for CacheConfig {
         Self {
             enabled: false,
             max_entries: 1000,
-            max_size_bytes: 0,
+            max_size_bytes: 64 << 20,
             default_ttl: Duration::from_secs(60),
             strategy: CacheStrategy::LRU,
             cache_empty_results: true,
@@ -79,8 +79,8 @@ impl CacheConfig {
         self
     }
 
-    /// Keep at most `bytes` of serialized results, or `0` (the default) for
-    /// no byte budget.
+    /// Keep at most `bytes` of serialized results (64 MiB by default), or `0`
+    /// for no byte budget.
     #[must_use]
     pub fn max_size_bytes(mut self, bytes: usize) -> Self {
         self.max_size_bytes = bytes;

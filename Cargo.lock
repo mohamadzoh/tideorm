@@ -1886,12 +1886,13 @@ dependencies = [
 
 [[package]]
 name = "tideorm"
-version = "0.17.2"
+version = "0.17.3"
 dependencies = [
  "argon2",
  "async-io",
  "async-std",
  "async-trait",
+ "blake2",
  "chacha20poly1305",
  "chrono",
  "criterion",
@@ -1926,9 +1927,9 @@ dependencies = [
 
 [[package]]
 name = "tideorm-driver-core"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64b51d135f15e70ee80d1d3af05c8183553503ec56f6fb6457c1fa8e5adfdec3"
+checksum = "da81e9c4aa3736b4f5e720a13834abdb2f0ae55be85f8fff8cb74f4ec81e9476"
 dependencies = [
  "async-io",
  "async-std",
@@ -1962,9 +1963,9 @@ dependencies = [
 
 [[package]]
 name = "tideorm-driver-mysql"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5234a5b21e554a5f09c7a11b17c91af8e458f558f04307fd4d840bc712e641e5"
+checksum = "90249f987e94b93b8b3ea63d464423a8de250be88b2683bc9e51adff08b46e71"
 dependencies = [
  "bitflags",
  "byteorder",
@@ -1985,9 +1986,9 @@ dependencies = [
 
 [[package]]
 name = "tideorm-driver-postgres"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4bb47c648a170250a77f79e34b8964ba4c17db42f4606c098586500c44d05d4a"
+checksum = "7a25117f256dc3ba86945626e12c1b3f0426e64e0a4a6cb2b447ecb4ec801e42"
 dependencies = [
  "atoi",
  "base64",
@@ -2044,9 +2045,9 @@ dependencies = [
 
 [[package]]
 name = "tideorm-engine"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4bbda92154a6e0c2d4a26e9908592a06a4e1ced867d466e4a8573b49c41d29f5"
+checksum = "074a4cfbefe0678ca2e59b73f97e44e541dcedb5a7e66676992aa76f082cf2f5"
 dependencies = [
  "chrono",
  "futures-util",
@@ -2063,7 +2064,7 @@ dependencies = [
 
 [[package]]
 name = "tideorm-macros"
-version = "0.17.2"
+version = "0.17.3"
 dependencies = [
  "darling",
  "proc-macro2",

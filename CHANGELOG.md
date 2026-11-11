@@ -5,6 +5,57 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.3] - 2026-11-11
+
+### Breaking Changes
+
+- A model with `#[tideorm(tokenize)]` no longer decodes tokens issued by 0.15 or earlier, bound to
+  the struct name, which two models in different modules can share; only `v2.` tokens, bound to
+  the model's table, open. Hand-written `Tokenizable` impls without `token_table` are unchanged.
+- On MySQL and MariaDB the migration and seed locks are named after the database
+  (`tideorm_migrations:<database>`), since `GET_LOCK` names are server-wide: applications on one
+  server no longer wait on each other's migrations. A 0.17.3 process and an earlier one do not
+  exclude each other, so do not run migrations from both at once.
+- The query cache keeps at most 64 MiB of results by default (`CacheConfig::max_size_bytes`, `0`
+  for no budget), instead of no byte budget.
+- A token longer than 4,096 characters is refused unread (`Ok(None)`), and a record id too long
+  for one fails to tokenize.
+
+### Added
+
+- `force_sync` (`SyncMode::Recreate`) is refused with `Error::Configuration` in a process whose
+  `TIDEORM_ENV` is `production`, before it drops anything; `TIDEORM_ALLOW_FORCE_SYNC=true` runs
+  it anyway.
+- `QueryBuilder::cursor_paginate(per_page, cursor)` pages by the primary key, the way `chunks()`
+  reads: a `CursorPage` holds the page's models and an opaque `next_cursor` for the next request,
+  with no count and no OFFSET; a cursor that does not decode is an `Error::Validation`.
+- `QueryCache::set_invalidation_hook` calls an application's hook with a `CacheInvalidation`
+  (serde-serializable) after each invalidation, and `apply_invalidation` drops what another
+  process reported without calling the hook again, so several processes can keep their caches in
+  step over a broker of their own.
+
+### Fixed
+
+- A write through a SQLite database attached inside a transaction drops the attached file's
+  cached reads when the transaction commits, as one attached outside a transaction already did.
+- The key of an encrypted field is derived once per column: rows of one column decoded at once no
+  longer each run the 64 MiB key derivation.
+- A refused commit whose rollback then fails too reports that failure, instead of saying the
+  transaction was rolled back (`tideorm-engine` 0.1.1); the transaction rolls back when dropped.
+- A raw SQL fragment is also refused when MySQL or SQLite would read a comment, a `;` or an
+  unclosed quote in it: SQLite reads `@a('x) -- '` as a parameter and a comment, not a string.
+- A SQLite full-text search whose input holds a NUL no longer fails with FTS5's `unterminated
+  string`.
+- A query's cache entry is named by a 256-bit BLAKE2s digest of the query and its values instead
+  of a 64-bit hash under a fixed key, which a crafted value could collide with another query's to
+  be served its rows.
+- What a server sends cannot make the drivers reserve memory ahead of the bytes that arrive: a
+  forged message length reserves at most 1 MiB at a time (`tideorm-driver-core` 0.1.2), and a
+  forged MySQL column count nothing past 65,535 columns (`tideorm-driver-mysql` 0.1.2). A
+  PostgreSQL `server_version` too large for a `u32` is read as unknown instead of overflowing
+  (`tideorm-driver-postgres` 0.1.1). An empty MySQL OK or auth-switch packet, or a binary `TIME`
+  of the wrong length, is a protocol or decode error instead of a panic.
+
 ## [0.17.2] - 2026-11-10
 
 ### Changed

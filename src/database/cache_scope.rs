@@ -71,17 +71,17 @@ impl super::ConnectionRef {
     /// conservative global invalidation once a connection of this pool has
     /// attached one, as the driver notes for every `ATTACH` it prepares;
     /// DETACH cannot prove every pooled connection detached the same database.
-    /// SQLite refuses `ATTACH` inside a transaction, so only a pool's own
-    /// statements attach; a transaction takes the scope its pool has when it
-    /// begins.
+    /// SQLite also attaches inside a transaction, so a transaction's
+    /// statements widen their pool's scope too.
     pub(crate) fn observe_attach(&self) {
         #[cfg(feature = "sqlite")]
-        if let Self::Database(pool) = self
-            && pool
-                .conn
-                .get_sqlite_connection_pool()
-                .is_some_and(|sqlite| sqlite.connect_options().has_attached())
+        if self
+            .pool()
+            .conn
+            .get_sqlite_connection_pool()
+            .is_some_and(|sqlite| sqlite.connect_options().has_attached())
         {
+            let pool = self.pool();
             let widened = pool.cache_scope.write().take().is_some();
             if widened {
                 self.recording(|| crate::cache::QueryCache::global().clear());

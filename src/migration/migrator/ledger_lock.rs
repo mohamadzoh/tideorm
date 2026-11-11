@@ -160,10 +160,17 @@ impl LedgerLock {
     #[cfg(feature = "mysql")]
     async fn acquire_mysql(db: &Database, kind: LockKind) -> Result<Self> {
         let session = db.pin_session().await?;
+        let database = session
+            .fetch_rows("SELECT DATABASE() AS name", Vec::new())
+            .await?
+            .first()
+            .and_then(|row| row.try_get::<Option<String>>("name").ok())
+            .flatten();
+        let name = mysql_lock_name(kind, database.as_deref());
         let rows = session
             .fetch_rows(
                 "SELECT GET_LOCK(?, ?) AS acquired",
-                vec![kind.name().into(), MIGRATION_LOCK_TIMEOUT_SECONDS.into()],
+                vec![name.clone().into(), MIGRATION_LOCK_TIMEOUT_SECONDS.into()],
             )
             .await?;
         // `GET_LOCK` is 1 once acquired, 0 on timeout, NULL on error.
@@ -173,14 +180,12 @@ impl LedgerLock {
             .flatten();
         if acquired != Some(1) {
             return Err(Error::transaction(format!(
-                "Timed out after {}s waiting for the '{}' lock; another ledger operation is still running",
-                MIGRATION_LOCK_TIMEOUT_SECONDS,
-                kind.name()
+                "Timed out after {MIGRATION_LOCK_TIMEOUT_SECONDS}s waiting for the '{name}' lock; another ledger operation is still running",
             )));
         }
         Ok(Self::Session {
             session,
-            release: ("SELECT RELEASE_LOCK(?)", kind.name().into()),
+            release: ("SELECT RELEASE_LOCK(?)", name.into()),
         })
     }
 
@@ -206,6 +211,19 @@ impl LedgerLock {
             }
         }
     }
+}
+
+/// The named lock `kind` takes in `database`. `GET_LOCK` names are
+/// server-wide, so the database's name is in it: applications on one server
+/// do not wait on each other's migrations. MySQL refuses a name past 64
+/// characters, so a long one is cut, and two databases whose names share
+/// their first 45 characters take turns.
+#[cfg(feature = "mysql")]
+fn mysql_lock_name(kind: LockKind, database: Option<&str>) -> String {
+    format!("{}:{}", kind.name(), database.unwrap_or_default())
+        .chars()
+        .take(64)
+        .collect()
 }
 
 /// Poll a nonblocking OS lock with a runtime-independent timer. Cancelling
@@ -298,3 +316,7 @@ async fn with_ledger_lock<T>(
     released?;
     Ok(result)
 }
+
+#[cfg(all(test, feature = "mysql"))]
+#[path = "../../../tests/unit/migration_ledger_lock_tests.rs"]
+mod tests;

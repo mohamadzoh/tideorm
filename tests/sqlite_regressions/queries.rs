@@ -9,6 +9,9 @@ mod builder_api;
 #[path = "queries/chunk.rs"]
 mod chunk;
 
+#[path = "queries/cursor_pages.rs"]
+mod cursor_pages;
+
 #[path = "queries/distinct.rs"]
 mod distinct;
 

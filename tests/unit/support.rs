@@ -114,3 +114,28 @@ pub(crate) async fn fresh_postgres_tables(
     .await?;
     Ok(Some(db))
 }
+
+/// A deterministic xorshift generator for property tests: a fixed seed gives
+/// the same cases on every run, so a failure reproduces.
+pub(crate) struct Rng(u64);
+
+impl Rng {
+    pub(crate) fn new(seed: u64) -> Self {
+        Self(seed | 1)
+    }
+
+    pub(crate) fn below(&mut self, bound: usize) -> usize {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        (self.0 % bound as u64) as usize
+    }
+
+    /// Up to `max` pieces of `alphabet`, joined.
+    pub(crate) fn text(&mut self, alphabet: &[&str], max: usize) -> String {
+        let len = self.below(max + 1);
+        (0..len)
+            .map(|_| alphabet[self.below(alphabet.len())])
+            .collect()
+    }
+}

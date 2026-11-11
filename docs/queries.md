@@ -446,6 +446,8 @@ while let Some(batch) = batches.next().await? {
 
 `chunk()` and `chunks()` walk the current query by a single-column primary-key cursor instead of loading the full result set into memory at once. That means callbacks may safely update or delete already-processed rows without later batches skipping records. Existing filters, `limit()`, and cache settings remain in effect. If you want descending traversal, order explicitly by the primary key before calling `chunk()`. `chunk()` rejects `offset()` and other custom ordering because those conflict with stable cursor traversal. On a join that repeats a key, the rows that share it are handed over in one batch, so only a key repeated more often than the chunk size fails.
 
+There is no row-by-row stream: `chunks()` is how to read a result set larger than memory. Each batch is one query, so only one batch is held at a time, and the next is read when you ask for it.
+
 ### Execution Methods
 
 ```rust
@@ -653,6 +655,16 @@ let page = Post::query().where_eq("published", true).order_desc("id").paginate(2
 println!("page {} of {} ({} posts)", page.page, page.last_page(), page.total);
 ```
 
+`cursor_paginate(per_page, cursor)` pages by the primary key instead, the way `chunks()` does: pass `None` for the first page and each page's `next_cursor` for the one after it. It returns a `CursorPage<M>`, serialized as `{"items": .., "next_cursor": ..}`, whose `next_cursor` is `None` once a page comes back short. It counts nothing and skips no rows by OFFSET, so a deep page costs what the first does, and rows written between requests are neither repeated nor skipped. The query follows `chunk()`'s rules (ordered only by the primary key, no `offset()` or GROUP BY), and refuses `limit()`. A cursor is opaque but not secret: it names the key to continue from, the query's filters still apply, and one that does not decode fails with `Error::Validation` on the field `cursor`:
+
+```rust
+let page = Post::query()
+    .where_eq("published", true)
+    .order_desc("id")
+    .cursor_paginate(20, params.cursor.as_deref())
+    .await?;
+```
+
 ### UNION Queries
 
 Combine results from multiple queries:
@@ -832,7 +844,7 @@ TideORM provides full-text search capabilities across PostgreSQL (tsvector/tsque
 Enable the feature explicitly when you need the full-text search API:
 
 ```toml
-tideorm = { version = "0.17.2", features = ["postgres", "fulltext"] }
+tideorm = { version = "0.17.3", features = ["postgres", "fulltext"] }
 ```
 
 ### Search Basics
@@ -1212,6 +1224,27 @@ Name the columns in raw SQL rather than `SELECT *` when the table can change und
 
 Every raw statement invalidates cached reads of its database once it has run, reads included, and so does one that fails: its text cannot show which tables it writes, as a `SELECT` can write through a function, a view or a trigger, and a statement before a failing one may already have committed. Independent databases keep their cached results. Separate pools using the same SQLite file or the same PostgreSQL endpoint and database share invalidation; MySQL databases on one endpoint share it because triggers and foreign keys can cross schemas. SQLite handles that use `ATTACH`, and connections whose database cannot be identified, retain conservative global invalidation. Entries inserted manually with `QueryCache::set` or `set_tagged` have no database identity and are invalidated by any database write.
 
+The cache lives in one process. To keep several processes' caches in step, give the cache a hook: it is called with a `CacheInvalidation` (`Database(name)`, `Table(name)` or `All`, serializable with serde) after each invalidation. A write's comes once as it runs and again when its transaction commits. Publish each event on a channel of your own, such as Redis or NATS, and hand what the other processes publish to `apply_invalidation`, which drops the same entries without calling the hook again. A database's name is built from the connection's host, port and database, so connect every process the same way. The hook runs on the writing task, so hand the event off rather than wait on the network:
+
+```rust
+use tideorm::prelude::*;
+
+let (events, mut outgoing) = tokio::sync::mpsc::unbounded_channel::<CacheInvalidation>();
+QueryCache::global().set_invalidation_hook(move |event| {
+    let _ = events.send(event.clone());
+});
+tokio::spawn(async move {
+    while let Some(event) = outgoing.recv().await {
+        publish(serde_json::to_string(&event)?).await; // your broker
+    }
+    Ok::<_, serde_json::Error>(())
+});
+
+// In the task subscribed to the other processes:
+let event: CacheInvalidation = serde_json::from_str(&message)?;
+QueryCache::global().apply_invalidation(&event);
+```
+
 ---
 
 ## Query Logging
@@ -1223,7 +1256,7 @@ Enable SQL query logging for development/debugging:
 TIDE_LOG_QUERIES=true cargo run
 ```
 
-When enabled, every statement is printed to stderr: query-builder and migration statements before they run, the rest — `find`, `save`, `update`, `delete`, upserts and raw SQL — once they complete. The variable is read once, when the first statement runs. `QueryLogger` records them too, except the migrator's, with the query builder's tagged by table. `TIDE_LOG_LEVEL` (`error`, `warn`, `info`, `debug`, `trace`) and `TIDE_SLOW_QUERY_MS` configure the structured `QueryLogger` the way `QueryLogger::global()` does in code; settings made in code take precedence.
+When enabled, every statement is printed to stderr: query-builder and migration statements before they run, the rest — `find`, `save`, `update`, `delete`, upserts and raw SQL — once they complete. The variable is read once, when the first statement runs. Bound values are never logged: a statement appears with its placeholders (`$1`, `?`). `QueryLogger` records them too, except the migrator's, with the query builder's tagged by table. `TIDE_LOG_LEVEL` (`error`, `warn`, `info`, `debug`, `trace`) and `TIDE_SLOW_QUERY_MS` configure the structured `QueryLogger` the way `QueryLogger::global()` does in code; settings made in code take precedence.
 
 `QueryLogger::global()` returns a builder; nothing changes until `enable()`, `disable()` or `apply()` ends it. `set_sink` sends what the logger prints somewhere other than stderr, such as `tracing`, and `QueryLogger::reset()` puts the logger back as the environment configures it, for tests:
 
@@ -1246,6 +1279,20 @@ QueryLogger::set_sink(|entry, text| {
 for entry in QueryLogger::slow_queries() {
     println!("{entry:?}");
 }
+```
+
+A sink runs on the task that ran the statement, so one that writes to a file or the network should hand the text off and return. A bounded channel keeps that from holding up queries, dropping lines instead of waiting when the writer falls behind:
+
+```rust
+let (lines, mut pending) = tokio::sync::mpsc::channel::<String>(1024);
+QueryLogger::set_sink(move |_entry, text| {
+    let _ = lines.try_send(text.to_owned());
+});
+tokio::spawn(async move {
+    while let Some(text) = pending.recv().await {
+        write_log_line(&text).await; // your writer
+    }
+});
 ```
 
 To look at a query before it runs, print `debug()`: the statement with its values written in, the parameterized statement, and the clauses it was built from. A query that a terminal would refuse — an unsafe `order_by` taken from a request, a bad raw fragment, a zero page — reports the reason on an `Invalid:` line, and `validate()` returns the same error without running anything, so a handler can answer 400 first:

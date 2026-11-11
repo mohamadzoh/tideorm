@@ -255,9 +255,11 @@ async fn a_cancelled_migration_run_frees_the_migration_lock() {
     );
 
     let lock_is_free = || async {
-        let rows = Database::raw_json("SELECT IS_FREE_LOCK('tideorm_migrations') AS free")
-            .await
-            .expect("IS_FREE_LOCK failed");
+        let rows = Database::raw_json(
+            "SELECT IS_FREE_LOCK(CONCAT('tideorm_migrations:', DATABASE())) AS free",
+        )
+        .await
+        .expect("IS_FREE_LOCK failed");
         rows[0]["free"] == serde_json::json!(1)
     };
     let deadline = Instant::now() + Duration::from_secs(10);

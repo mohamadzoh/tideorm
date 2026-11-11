@@ -65,6 +65,7 @@ fn test_cache_config_default() {
     let config = CacheConfig::default();
     assert!(!config.enabled);
     assert_eq!(config.max_entries, 1000);
+    assert_eq!(config.max_size_bytes, 64 << 20);
     assert_eq!(config.default_ttl, Duration::from_secs(60));
 }
 

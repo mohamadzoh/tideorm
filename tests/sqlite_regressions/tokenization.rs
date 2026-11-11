@@ -36,6 +36,13 @@ struct Voucher {
     id: i64,
 }
 
+/// The vouchers' table read by code: its tokens open for `Voucher` too.
+#[tideorm::model(table = "token_vouchers", tokenize)]
+struct VoucherCode {
+    #[tideorm(primary_key)]
+    code: String,
+}
+
 fn configure_key() {
     TokenConfig::set_encryption_key("tokenization-regression-key");
 }
@@ -72,16 +79,16 @@ async fn a_token_opens_only_for_the_table_it_was_issued_for() {
     invalid_token(admin::User::decode_token(&shop_token));
 }
 
-/// A token issued before tokens were bound to tables is bound to the struct
-/// name, and still decodes for a model of that name only.
+/// A token bound to a struct name, as tokens were before they were bound to
+/// tables, opens for no derived model: two models may share that name.
 #[test]
-fn an_unversioned_token_decodes_for_the_struct_name_it_was_bound_to() {
+fn an_unversioned_token_opens_for_no_derived_model() {
     configure_key();
     let legacy = default_encode("7", "User").unwrap();
     assert!(!legacy.contains('.'), "{legacy}");
 
-    assert_eq!(admin::User::decode_token(&legacy).unwrap(), 7);
-    assert_eq!(shop::User::decode_token(&legacy).unwrap(), 7);
+    invalid_token(admin::User::decode_token(&legacy));
+    invalid_token(shop::User::decode_token(&legacy));
     invalid_token(Voucher::decode_token(&legacy));
 }
 
@@ -139,7 +146,7 @@ fn tampered_tokens_are_invalid_and_a_missing_key_is_a_configuration_error() {
 #[test]
 fn a_payload_that_is_no_key_stays_out_of_the_error() {
     configure_key();
-    let token = default_encode("\"s3cret-coupon\"", "Voucher").unwrap();
+    let token = VoucherCode::tokenize_id("s3cret-coupon".to_string()).unwrap();
 
     let message = invalid_token(Voucher::decode_token(&token));
     assert!(!message.contains("s3cret"), "{message}");

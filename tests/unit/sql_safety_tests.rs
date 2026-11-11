@@ -144,3 +144,18 @@ fn a_keyword_glued_to_a_number_is_still_read() {
     let error = validate_having_sql_fragment("HAVING raw SQL", "COUNT(*) > $1").unwrap_err();
     assert!(error.contains("unexpected character '$'"), "{error}");
 }
+
+#[test]
+fn a_sqlite_parameter_cannot_hide_a_comment_the_literal_reading_misses() {
+    // SQLite reads `@a('x)` as one parameter, so the `--` that PostgreSQL
+    // reads inside a string is a comment there, cutting off what follows.
+    let error = validate_raw_sql_fragment("WHERE raw SQL", "@a('x) OR 1=1) -- '").unwrap_err();
+    assert!(error.contains("SQL comments"), "{error}");
+}
+
+#[path = "sql_safety_tests/properties.rs"]
+mod properties;
+
+#[cfg(feature = "fulltext")]
+#[path = "sql_safety_tests/fulltext_properties.rs"]
+mod fulltext_properties;

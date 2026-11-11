@@ -30,3 +30,22 @@ fn a_reference_names_the_model_table_as_the_catalog_writes_it() {
     assert!(names_table("Users", &users, DatabaseType::SQLite));
     assert!(!names_table("Users", &users, DatabaseType::MySQL));
 }
+
+#[test]
+fn force_sync_is_refused_in_production_unless_allowed() {
+    for production in ["production", "Production", " PRODUCTION "] {
+        let error = refuse_in_production(Some(production), false).unwrap_err();
+        assert!(
+            matches!(error, crate::Error::Configuration { .. }),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("TIDEORM_ALLOW_FORCE_SYNC"),
+            "{error}"
+        );
+        assert!(refuse_in_production(Some(production), true).is_ok());
+    }
+    for other in [None, Some("development"), Some("staging"), Some("")] {
+        assert!(refuse_in_production(other, false).is_ok(), "{other:?}");
+    }
+}

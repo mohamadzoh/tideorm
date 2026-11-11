@@ -28,7 +28,7 @@ pub use crate::model::{
     OnConflictBuilder, UpdateValue,
 };
 pub use crate::query::{
-    Aggregate, AggregateCondition, CTE, Chunks, FrameBound, FrameType, HavingCondition,
+    Aggregate, AggregateCondition, CTE, Chunks, CursorPage, FrameBound, FrameType, HavingCondition,
     JoinResultConsolidator, JoinType, LogicalOp, OrBranchBuilder, OrGroup, Order, Paginated,
     QueryBuilder, QueryFragment, SortOrder, WindowFunction, WindowFunctionType,
 };
@@ -80,7 +80,8 @@ pub use crate::profiling::{
 
 // Query caching
 pub use crate::cache::{
-    CacheConfig, CacheKeyBuilder, CacheOptions, CacheStats, CacheStrategy, QueryCache,
+    CacheConfig, CacheInvalidation, CacheKeyBuilder, CacheOptions, CacheStats, CacheStrategy,
+    QueryCache,
 };
 
 // Database seeding

@@ -49,7 +49,7 @@ mod toggle;
 pub use builders::{CacheKeyBuilder, CacheOptions};
 #[cfg(any(feature = "entity-manager", feature = "dirty-tracking"))]
 pub(crate) use query_cache::undo_on_rollback;
-pub use query_cache::{CacheConfig, CacheStats, CacheStrategy, QueryCache};
+pub use query_cache::{CacheConfig, CacheInvalidation, CacheStats, CacheStrategy, QueryCache};
 pub(crate) use query_cache::{
     PendingInvalidations, Record, install_pending_invalidations, replace_pending_invalidations,
 };
@@ -63,6 +63,44 @@ fn hash_text(text: &str) -> u64 {
     hasher.finish()
 }
 
+/// A [`Hasher`] feeding a 256-bit BLAKE2s digest, which names a query's cache
+/// entry. `DefaultHasher`'s 64 bits under a fixed key can be steered: a query
+/// whose bound values were searched for a collision would share another
+/// query's entry and be served its rows.
+pub(crate) struct KeyDigest(blake2::Blake2s256);
+
+impl KeyDigest {
+    pub(crate) fn new() -> Self {
+        Self(blake2::Digest::new())
+    }
+
+    /// The digest, as lowercase hex.
+    pub(crate) fn hex(self) -> String {
+        use std::fmt::Write;
+        blake2::Digest::finalize(self.0)
+            .iter()
+            .fold(String::with_capacity(64), |mut hex, byte| {
+                let _ = write!(hex, "{byte:02x}");
+                hex
+            })
+    }
+}
+
+impl Hasher for KeyDigest {
+    fn write(&mut self, bytes: &[u8]) {
+        blake2::Digest::update(&mut self.0, bytes);
+    }
+
+    fn finish(&self) -> u64 {
+        let digest = blake2::Digest::finalize(self.0.clone());
+        u64::from_le_bytes(digest[..8].try_into().expect("a digest has 32 bytes"))
+    }
+}
+
 #[cfg(test)]
 #[path = "../../tests/unit/cache_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../tests/unit/cache_key_digest_tests.rs"]
+mod key_digest_tests;

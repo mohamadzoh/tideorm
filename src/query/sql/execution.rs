@@ -11,7 +11,7 @@ mod mutation_safety;
 mod reads;
 mod shaped_reads;
 
-pub use chunks::Chunks;
+pub use chunks::{Chunks, CursorPage};
 pub use shaped_reads::Paginated;
 
 use hash_helpers::{hash_or_group, hash_where_condition};
@@ -223,10 +223,9 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     fn generate_cache_key(&self) -> String {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+        use std::hash::Hash;
 
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = crate::cache::KeyDigest::new();
         self.hash_database_identity(&mut hasher);
         // A caller-supplied key tells apart reads the query's shape alone would
         // let share an entry; it never stands in for that shape, or `first()`,
@@ -235,8 +234,7 @@ impl<M: Model> QueryBuilder<M> {
         self.clauses.cache_key.hash(&mut hasher);
         self.hash_query_shape(&mut hasher);
 
-        let hash = hasher.finish();
-        crate::cache::QueryCache::global().generate_key(M::table_name(), hash)
+        crate::cache::QueryCache::global().key_for(M::table_name(), &hasher.hex())
     }
 
     /// Hash what the query reads, with every value it binds: two queries

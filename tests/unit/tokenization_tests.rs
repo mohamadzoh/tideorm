@@ -148,7 +148,9 @@ fn test_token_config_reset_clears_state_set_on_another_thread() {
 /// Tokens sealed by earlier releases, with argon2 0.5 and chacha20poly1305
 /// 0.10, still open, and only under the key they were sealed with: a
 /// dependency upgrade that changed the key derivation or the cipher would
-/// invalidate every token already issued.
+/// invalidate every token already issued. A derived model, bound to its
+/// table, no longer opens a token bound to a struct name another model may
+/// share.
 #[test]
 fn tokens_issued_by_earlier_releases_still_open() {
     let by_name = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHVHWDkLrobLrgKs0g40xp6eSe";
@@ -161,11 +163,12 @@ fn tokens_issued_by_earlier_releases_still_open() {
         Some("42")
     );
     assert_eq!(
-        decode_for_table(by_table, (None, "users"), "User")
+        decode_for_table(by_table, (None, "users"))
             .unwrap()
             .as_deref(),
         Some("42")
     );
+    assert_eq!(decode_for_table(by_name, (None, "users")).unwrap(), None);
 
     TokenConfig::set_encryption_key("another-key");
     assert_eq!(default_decode(by_name, "User").unwrap(), None);
@@ -233,6 +236,30 @@ fn test_encrypted_field_key_is_derived_per_table_and_column() {
         TokenConfig::get_derived_encryption_key_for_field("users", "email").unwrap()
     );
 
+    TokenConfig::reset();
+}
+
+/// Threads decoding one column at once wait for a single derivation of its
+/// key and all get that key.
+#[cfg(feature = "encrypted-fields")]
+#[test]
+fn concurrent_first_uses_of_a_field_key_share_one_derivation() {
+    TokenConfig::reset();
+    TokenConfig::set_encryption_key("field-single-flight-key-32-chars");
+    let keys: Vec<[u8; 32]> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                scope.spawn(|| {
+                    TokenConfig::get_derived_encryption_key_for_field("users", "email").unwrap()
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect()
+    });
+    assert!(keys.windows(2).all(|pair| pair[0] == pair[1]));
     TokenConfig::reset();
 }
 
@@ -327,4 +354,22 @@ fn custom_codec_selectors_can_update_global_configuration() {
     assert_eq!(token, "ConfiguringModel:42");
     assert_eq!(ConfiguringModel::decode_token(&token).unwrap(), 42);
     TokenConfig::reset();
+}
+
+/// A token past `MAX_TOKEN_LEN` is refused before it is decoded, and no key
+/// long enough to make one is tokenized.
+#[test]
+fn an_oversized_token_is_refused_unread() {
+    init_test_key();
+    let longest = "7".repeat(3000);
+    let token = default_encode(&longest, "User").unwrap();
+    assert!(token.len() <= MAX_TOKEN_LEN);
+    assert_eq!(
+        default_decode(&token, "User").unwrap().as_deref(),
+        Some(longest.as_str())
+    );
+
+    assert!(default_encode(&"7".repeat(3100), "User").is_err());
+    let oversized = "A".repeat(MAX_TOKEN_LEN + 4);
+    assert_eq!(default_decode(&oversized, "User").unwrap(), None);
 }
