@@ -36,7 +36,24 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
-    fn describe_condition(condition: &WhereCondition) -> String {
+    /// `value` as a description shows it; with `redact`, a value the caller
+    /// bound is `?`, since an error context reaches logs.
+    fn described_value(value: &ConditionValue, redact: bool) -> String {
+        match value {
+            ConditionValue::Single(_)
+            | ConditionValue::List(_)
+            | ConditionValue::Range(..)
+            | ConditionValue::Subquery(_)
+                if redact =>
+            {
+                "?".to_string()
+            }
+            value => value.to_string(),
+        }
+    }
+
+    fn describe_condition(condition: &WhereCondition, redact: bool) -> String {
+        let value = Self::described_value(&condition.value, redact);
         match (&condition.operator, &condition.value) {
             (
                 Operator::Raw,
@@ -45,9 +62,9 @@ impl<M: Model> QueryBuilder<M> {
                 | ConditionValue::Subquery(_),
             ) => {
                 if condition.column.is_empty() {
-                    condition.value.to_string()
+                    value
                 } else {
-                    format!("{} {}", condition.column, condition.value)
+                    format!("{} {}", condition.column, value)
                 }
             }
             (Operator::IsNull | Operator::IsNotNull, ConditionValue::None) => {
@@ -61,20 +78,21 @@ impl<M: Model> QueryBuilder<M> {
                 "{} {} {}",
                 condition.column,
                 Self::operator_label(&condition.operator),
-                condition.value
+                value
             ),
         }
     }
 
-    /// A HAVING clause with its values written in, as `db_type`'s statement
-    /// preview writes it.
+    /// A HAVING clause as `db_type` writes it, its values left as markers:
+    /// an error context reaches logs.
     pub(in crate::query) fn describe_having_clause(
         &self,
         db_type: DatabaseType,
         clause: &crate::query::HavingClause,
     ) -> String {
-        let (sql, values) = self.having_bound(db_type, clause).build(db_type.dialect());
-        db_sql::inline_parameters(db_type, &sql, &values)
+        self.having_bound(db_type, clause)
+            .build(db_type.dialect())
+            .0
     }
 
     /// The backend a preview renders for: the one the query runs on, or
@@ -83,13 +101,18 @@ impl<M: Model> QueryBuilder<M> {
         self.db_type_for_sql().unwrap_or(DatabaseType::Postgres)
     }
 
-    fn describe_or_group(group: &OrGroup) -> String {
+    fn describe_or_group(group: &OrGroup, redact: bool) -> String {
         let mut parts: Vec<String> = group
             .conditions
             .iter()
-            .map(Self::describe_condition)
+            .map(|condition| Self::describe_condition(condition, redact))
             .collect();
-        parts.extend(group.nested_groups.iter().map(Self::describe_or_group));
+        parts.extend(
+            group
+                .nested_groups
+                .iter()
+                .map(|nested| Self::describe_or_group(nested, redact)),
+        );
 
         if parts.is_empty() {
             String::new()
@@ -104,11 +127,11 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// The description of each OR group that holds a condition.
-    fn described_or_groups(&self) -> impl Iterator<Item = String> + '_ {
+    fn described_or_groups(&self, redact: bool) -> impl Iterator<Item = String> + '_ {
         self.clauses
             .or_groups
             .iter()
-            .map(Self::describe_or_group)
+            .map(move |group| Self::describe_or_group(group, redact))
             .filter(|group| !group.is_empty())
     }
 
@@ -120,9 +143,9 @@ impl<M: Model> QueryBuilder<M> {
             .clauses
             .conditions
             .iter()
-            .map(Self::describe_condition)
+            .map(|condition| Self::describe_condition(condition, true))
             .collect();
-        let groups: Vec<String> = self.described_or_groups().collect();
+        let groups: Vec<String> = self.described_or_groups(true).collect();
         let db_type = self.preview_db_type();
         let having: Vec<String> = self
             .clauses
@@ -250,8 +273,8 @@ impl<M: Model> QueryBuilder<M> {
             .clauses
             .conditions
             .iter()
-            .map(Self::describe_condition)
-            .chain(self.described_or_groups())
+            .map(|condition| Self::describe_condition(condition, false))
+            .chain(self.described_or_groups(false))
         {
             info.add_condition(condition);
         }

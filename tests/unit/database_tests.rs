@@ -295,3 +295,17 @@ async fn a_transaction_is_joined_only_by_its_own_database() {
     assert_eq!(own_rows, vec![serde_json::json!({"name": "first"})]);
     assert_eq!(other_rows, vec![serde_json::json!({"name": "second"})]);
 }
+
+/// A URL whose backend this build leaves out names the feature to enable.
+#[cfg(all(not(feature = "mysql"), feature = "runtime-tokio"))]
+#[tokio::test]
+async fn a_url_for_a_backend_left_out_names_its_feature() {
+    let error = Database::builder()
+        .url("mysql://app:secret@localhost/app")
+        .build()
+        .await
+        .expect_err("this build has no MySQL driver");
+    let message = error.to_string();
+    assert!(message.contains("enable the `mysql` feature"), "{message}");
+    assert!(!message.contains("secret"), "{message}");
+}

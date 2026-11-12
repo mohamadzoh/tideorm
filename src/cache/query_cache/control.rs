@@ -71,8 +71,11 @@ impl QueryCache {
     }
 
     /// Set the maximum number of cache entries
+    ///
+    /// Lowering it evicts entries with the configured strategy right away.
     pub fn set_max_entries(&self, max: usize) -> &Self {
         self.config.write().max_entries = max;
+        self.enforce_limits();
         self
     }
 
@@ -81,10 +84,27 @@ impl QueryCache {
     /// Entries are evicted with the configured strategy until a new payload fits
     /// inside the budget, and a payload larger than the whole budget is never
     /// cached. The default is 64 MiB; pass `0` for no byte budget, in which
-    /// case only `max_entries` bounds the cache.
+    /// case only `max_entries` bounds the cache. Lowering it evicts entries
+    /// right away.
     pub fn set_max_size_bytes(&self, max: usize) -> &Self {
         self.config.write().max_size_bytes = max;
+        self.enforce_limits();
         self
+    }
+
+    /// Evict with the configured strategy until the cache is inside its
+    /// entry and byte limits, which a setter may just have lowered.
+    pub(super) fn enforce_limits(&self) {
+        let (max_entries, max_bytes, strategy) = {
+            let config = self.config.read();
+            (config.max_entries, config.max_size_bytes, config.strategy)
+        };
+        let mut cache = self.cache.write();
+        while cache.len() > max_entries || (max_bytes > 0 && cache.size_bytes() > max_bytes) {
+            if !self.evict_one(&mut cache, strategy) {
+                break;
+            }
+        }
     }
 
     /// Set the default TTL for cache entries

@@ -2,12 +2,13 @@ use super::*;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 const INVALIDATION_HISTORY_LIMIT: usize = 1024;
 
 /// A cache entry storing query results
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) struct CacheEntry {
     /// Cached data as serialized JSON bytes.
     pub(super) data: std::sync::Arc<[u8]>,
@@ -22,8 +23,9 @@ pub(super) struct CacheEntry {
     pub(super) database: Option<std::sync::Arc<str>>,
     /// Monotonic insertion sequence used by FIFO/TTL eviction indexes.
     insert_order: u64,
-    /// Monotonic access sequence used by the LRU eviction index.
-    access_order: u64,
+    /// Monotonic access sequence used by the LRU eviction index, moved on by
+    /// a hit under the store's shared lock.
+    access_order: AtomicU64,
 }
 
 impl CacheEntry {
@@ -40,7 +42,7 @@ impl CacheEntry {
             tables,
             database: None,
             insert_order: order,
-            access_order: order,
+            access_order: AtomicU64::new(order),
         }
     }
 
@@ -53,8 +55,13 @@ impl CacheEntry {
         Instant::now() >= self.expires_at
     }
 
+    /// Mark this entry as used at `access_order`; a later mark is never undone.
+    pub(super) fn touch(&self, access_order: u64) {
+        self.access_order.fetch_max(access_order, Ordering::Relaxed);
+    }
+
     fn lru_priority(&self) -> u64 {
-        self.access_order
+        self.access_order.load(Ordering::Relaxed)
     }
 
     fn fifo_priority(&self) -> u64 {
@@ -85,10 +92,11 @@ impl<P> Candidate<P> {
 
 /// The cached entries plus one eviction index per strategy.
 ///
-/// Each index is a min-heap that gains a candidate on every insert or LRU
-/// touch and never updates one in place, so a popped candidate whose priority
-/// no longer matches its entry is stale and skipped. The heaps are rebuilt once
-/// stale candidates outnumber the live entries too far.
+/// Each index is a min-heap that gains a candidate on every insert and never
+/// updates one in place. An LRU hit only moves its entry's access order on, so
+/// a popped candidate older than its entry goes back in at the entry's current
+/// priority, and one whose entry is gone or replaced is skipped. The heaps are
+/// rebuilt once stale candidates outnumber the live entries too far.
 #[derive(Debug, Default)]
 pub(super) struct CacheStore {
     entries: HashMap<Arc<str>, CacheEntry>,
@@ -230,18 +238,6 @@ impl CacheStore {
                 .any(|table| self.invalidated_at.get(table).is_some_and(|&at| at > seq))
     }
 
-    /// Mark `key` as the most recently used entry and return its data.
-    pub(super) fn touch(&mut self, key: &str, access_order: u64) -> Option<Arc<[u8]>> {
-        // The map's own key, so a hit allocates no copy of it.
-        let key = Arc::clone(self.entries.get_key_value(key)?.0);
-        let entry = self.entries.get_mut(&key)?;
-        entry.access_order = access_order;
-        let data = entry.data.clone();
-        self.lru_heap.push(Candidate::new(access_order, &key));
-        self.maybe_rebuild_indexes();
-        Some(data)
-    }
-
     /// Remove and return the entry `strategy` evicts first.
     pub(super) fn evict(&mut self, strategy: CacheStrategy) -> Option<CacheEntry> {
         let key = match strategy {
@@ -296,18 +292,24 @@ fn heap_of<P: Ord>(
 }
 
 /// Pop candidates until one still matches its entry's priority, and return
-/// that entry's key.
+/// that entry's key. A candidate behind its entry's priority (an LRU hit moved
+/// the entry on) goes back in at that priority; the caller holds the store
+/// exclusively, so no hit moves it again and the loop ends.
 fn pop_current<P: Ord>(
     heap: &mut BinaryHeap<Reverse<Candidate<P>>>,
     entries: &HashMap<Arc<str>, CacheEntry>,
     priority_of: impl Fn(&CacheEntry) -> P,
 ) -> Option<Arc<str>> {
     while let Some(Reverse(candidate)) = heap.pop() {
-        if entries
-            .get(&*candidate.key)
-            .is_some_and(|entry| priority_of(entry) == candidate.priority)
-        {
+        let Some(entry) = entries.get(&*candidate.key) else {
+            continue;
+        };
+        let current = priority_of(entry);
+        if current == candidate.priority {
             return Some(candidate.key);
+        }
+        if current > candidate.priority {
+            heap.push(Candidate::new(current, &candidate.key));
         }
     }
     None

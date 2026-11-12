@@ -1,0 +1,5 @@
+error: TideORM models require a #[tideorm(primary_key)] field; mark each field of a composite key
+ --> tests/ui/invalid_primary_key_missing.rs:2:8
+  |
+2 | struct Note {
+  |        ^^^^

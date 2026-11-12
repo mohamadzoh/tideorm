@@ -325,3 +325,37 @@ async fn connect_only_runs_none_of_the_startup_work() {
     Database::reset_global();
     TideConfig::reset();
 }
+
+/// Two migrations of one version are refused before either runs, by every
+/// operation: on MySQL the second's DDL would stay when the ledger refused
+/// its row.
+#[tokio::test]
+async fn a_version_registered_twice_runs_nothing() {
+    let db = crate::fixtures::memory_database("").await;
+    let migrator = Migrator::new()
+        .database(&db)
+        .add(sql(
+            "dup",
+            "first_of_two",
+            &["CREATE TABLE first_of_two(id INTEGER)"],
+        ))
+        .add(sql(
+            "dup",
+            "second_of_two",
+            &["CREATE TABLE second_of_two(id INTEGER)"],
+        ));
+
+    let error = migrator.run().await.unwrap_err().to_string();
+    assert!(
+        error.contains("'dup' is registered more than once"),
+        "{error}"
+    );
+    assert!(migrator.run_steps(1).await.is_err());
+    assert!(migrator.run_one("first_of_two").await.is_err());
+    assert!(migrator.status().await.is_err());
+    let tables = db
+        .query_raw_json("SELECT name FROM sqlite_master")
+        .await
+        .unwrap();
+    assert!(tables.is_empty(), "{tables:?}");
+}

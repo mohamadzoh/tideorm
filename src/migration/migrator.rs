@@ -360,7 +360,22 @@ impl Migrator {
     }
 
     /// The database this migrator runs on.
+    /// The database to migrate. Every operation starts here, so a version
+    /// registered twice is refused before any migration runs: both would run,
+    /// and MySQL and MariaDB keep the second one's DDL when the ledger
+    /// refuses its row.
     pub(super) fn db(&self) -> Result<Database> {
+        let mut versions = HashSet::new();
+        if let Some(twice) = self
+            .migrations
+            .iter()
+            .find(|migration| !versions.insert(migration.version()))
+        {
+            return Err(Error::configuration(format!(
+                "migration version '{}' is registered more than once",
+                twice.version()
+            )));
+        }
         self.db.clone().map_or_else(require_db, Ok)
     }
 

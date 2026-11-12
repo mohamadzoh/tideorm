@@ -15,8 +15,13 @@ fn a_mysql_lock_is_named_after_its_database_within_64_characters() {
         mysql_lock_name(LockKind::Migration, None),
         "tideorm_migrations:"
     );
+    // names past 64 characters hash the database, so a shared prefix does
+    // not make two databases share a lock
     let long = "é".repeat(64);
     let name = mysql_lock_name(LockKind::Migration, Some(&long));
-    assert_eq!(name.chars().count(), 64);
-    assert!(name.starts_with("tideorm_migrations:é"));
+    assert_eq!(name.len(), "tideorm_migrations:".len() + 40);
+    assert!(name.starts_with("tideorm_migrations:"));
+    let other = mysql_lock_name(LockKind::Migration, Some(&format!("{long}x")));
+    assert_ne!(name, other);
+    assert_ne!(name, mysql_lock_name(LockKind::Seed, Some(&long)));
 }

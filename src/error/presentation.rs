@@ -24,6 +24,10 @@ fn advice(kind: DbFailureKind) -> Option<(&'static str, &'static str)> {
             "Check constraint violation",
             "The value is outside the range the column allows.",
         ),
+        DbFailureKind::ExclusionViolation => (
+            "Exclusion constraint violation",
+            "The row conflicts with an existing one, such as an overlapping range.",
+        ),
         DbFailureKind::InvalidValue => (
             "Value does not fit the column",
             "Check its length, range and format, or validate it before saving.",

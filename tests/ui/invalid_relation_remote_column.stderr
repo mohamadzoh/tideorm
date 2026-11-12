@@ -1,5 +1,5 @@
 error[E0080]: evaluation panicked: relation 'author' references an unknown remote column 'uuid'
-  --> tests/ui/invalid_relation_remote_column.rs:10:1
+  --> tests/ui/invalid_relation_remote_column.rs:17:5
    |
-10 | #[tideorm::model(table = "articles")]
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `__tideorm_internal_article::_` failed here
+17 |     author: BelongsTo<User>,
+   |     ^^^^^^ evaluation of `__tideorm_internal_article::_` failed here

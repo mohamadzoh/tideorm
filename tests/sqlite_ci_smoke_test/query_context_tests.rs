@@ -91,9 +91,14 @@ async fn sqlite_query_errors_include_query_builder_context() {
     assert!(
         ctx.conditions
             .iter()
-            .any(|condition| condition == "active = true"),
+            .any(|condition| condition == "active = ?"),
         "expected rendered top-level condition in context: {:?}",
         ctx.conditions
+    );
+    assert!(
+        !err.log_format().contains("broken@example.com"),
+        "an error context leaves the filter values out: {}",
+        err.log_format()
     );
     assert!(
         ctx.conditions.iter().any(
@@ -106,7 +111,7 @@ async fn sqlite_query_errors_include_query_builder_context() {
     assert!(
         ctx.operator_chain
             .as_deref()
-            .is_some_and(|chain| chain.contains("active = true")
+            .is_some_and(|chain| chain.contains("active = ?")
                 && chain.contains("not_a_real_sql_function() = 1")
                 && chain.contains("OR")),
         "expected logical operator chain in context: {:?}",

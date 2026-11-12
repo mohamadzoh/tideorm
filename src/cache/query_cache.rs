@@ -121,6 +121,13 @@ impl QueryCache {
         }
 
         let strategy = self.config.read().strategy;
+        // A hit needs only the shared lock: its LRU mark is atomic.
+        let read = |entry: &CacheEntry| {
+            if strategy == CacheStrategy::LRU {
+                entry.touch(self.next_order());
+            }
+            entry.data.clone()
+        };
 
         let payload = {
             let cache = self.cache.read();
@@ -128,17 +135,17 @@ impl QueryCache {
                 self.misses.fetch_add(1, Ordering::Relaxed);
                 return None;
             };
-            (!entry.is_expired() && strategy != CacheStrategy::LRU).then(|| entry.data.clone())
+            (!entry.is_expired()).then(|| read(entry))
         }
         .or_else(|| {
+            // Expired: drop it, unless a fresh entry replaced it meanwhile.
             let mut cache = self.cache.write();
             match cache.get(key) {
                 Some(entry) if entry.is_expired() => {
                     cache.remove(key);
                     None
                 }
-                Some(_) if strategy == CacheStrategy::LRU => cache.touch(key, self.next_order()),
-                Some(entry) => Some(entry.data.clone()),
+                Some(entry) => Some(read(entry)),
                 None => None,
             }
         });
@@ -459,11 +466,13 @@ impl QueryCache {
 
     /// Replace this cache's configuration in place
     ///
-    /// Cached entries are kept; only the configuration and the enabled flag
-    /// change. This is what lets a late `QueryCache::init_global` still take
+    /// Only the configuration and the enabled flag change; cached entries are
+    /// kept, except those a lowered entry or byte limit evicts at once. This
+    /// is what lets a late `QueryCache::init_global` still take
     /// effect after the global cache has already been created with defaults.
     pub fn apply_config(&self, config: CacheConfig) {
         self.config.apply(config);
+        self.enforce_limits();
     }
 
     /// Get the number of entries in the cache

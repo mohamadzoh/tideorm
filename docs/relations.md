@@ -73,7 +73,7 @@ pub struct Post {
 | `foreign_key` | Foreign key column on related table | Yes |
 | `local_key` | Local key (defaults to primary key) | No |
 | `owner_key` | Owner key for BelongsTo | No |
-| `pivot` | Pivot table name for HasManyThrough | For through relations |
+| `pivot` | Pivot table name for HasManyThrough (defaults to the pivot model's table) | No |
 | `related_key` | Related key on pivot table | For through relations |
 
 ### Loading Relations
@@ -84,7 +84,7 @@ Runtime relation helpers operate on a single local or foreign key value per quer
 
 An owner whose key is NULL (a nullable `local_key` that is unset) has no related rows: `load()` returns none, `count()` zero, and `attach`, `detach` and `sync` refuse it, rather than matching every row whose foreign key is NULL. A model may hold several relations to one model, such as an `author` and an `editor` that are both `BelongsTo<User>`; each loads by its own keys, eagerly too. `query_with(db).with(..)` reads the relations from `db` as well.
 
-For `has_many_through`, TideORM requires all three relation options to be declared explicitly: `pivot`, `foreign_key`, and `related_key`. Missing any of them is now a compile-time error.
+For `has_many_through`, TideORM requires `foreign_key` and `related_key`; missing either is a compile-time error that names the conventional key (`foreign_key = "user_id"`). Keys are never assumed, since a model with two relations to one model would silently join both on the same key. `pivot` may be left out: it is the pivot model's table.
 
 The field's wrapper type decides the relation kind. The `has_one`/`has_many`/`belongs_to`/`has_many_through` attribute may be omitted, but when present it must name the same kind as the wrapper, and `HasOne`, `HasMany` and `BelongsTo` fields must declare `foreign_key`; either mistake is a compile-time error.
 
@@ -288,7 +288,7 @@ Enable the feature first:
 
 ```toml
 [dependencies]
-tideorm = { version = "0.17.3", features = ["postgres", "attachments"] }
+tideorm = { version = "0.17.4", features = ["postgres", "attachments"] }
 ```
 
 ### Model Setup
@@ -645,7 +645,7 @@ Enable the feature first:
 
 ```toml
 [dependencies]
-tideorm = { version = "0.17.3", features = ["postgres", "translations"] }
+tideorm = { version = "0.17.4", features = ["postgres", "translations"] }
 ```
 
 ### Model Setup

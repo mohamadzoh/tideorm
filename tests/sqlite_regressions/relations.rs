@@ -26,7 +26,6 @@ struct Book {
     author: BelongsTo<Author>,
     #[tideorm(
         has_many_through = "Tag",
-        pivot = "rel_book_tags",
         foreign_key = "book_id",
         related_key = "tag_id"
     )]

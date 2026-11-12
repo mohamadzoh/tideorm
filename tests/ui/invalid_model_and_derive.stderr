@@ -1,0 +1,5 @@
+error: #[tideorm::model] already derives Model; remove `Model` from this #[derive(..)]
+ --> tests/ui/invalid_model_and_derive.rs:2:1
+  |
+2 | #[derive(tideorm::Model)]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^

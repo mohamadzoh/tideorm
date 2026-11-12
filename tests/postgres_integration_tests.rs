@@ -1,7 +1,8 @@
 //! PostgreSQL integration tests: the scenarios every backend runs, in
 //! `support/integration_parity.rs`; those of the server backends, in
 //! `support/review_backend.rs`; and below, raw JSON decoding of PostgreSQL's
-//! own types, native array columns and a `NULLS NOT DISTINCT` upsert.
+//! own types, native array columns, a `NULLS NOT DISTINCT` upsert and the
+//! closing of statements a full statement cache evicts.
 //!
 //! Opt-in: set `RUN_POSTGRES_TESTS`, `TEST_DATABASE_URL` or
 //! `POSTGRESQL_DATABASE_URL`; `SKIP_POSTGRES_TESTS` turns them off again. Once
@@ -12,6 +13,7 @@
 //! Run with: cargo test --test postgres_integration_tests
 
 use tideorm::Database;
+use tideorm::prelude::DbValue;
 use tideorm::prelude::Model;
 
 #[path = "support/postgres_test_config.rs"]
@@ -285,4 +287,42 @@ async fn an_upsert_follows_a_nulls_not_distinct_constraint() {
     Database::execute("DROP TABLE test_nulls_not_distinct_contacts")
         .await
         .expect("failed to drop test_nulls_not_distinct_contacts");
+}
+
+/// A statement a full cache evicts is closed on the server, in the round trip
+/// of the next statement run: the server holds no more prepared statements
+/// than the cache, and every statement still answers.
+#[tokio::test]
+async fn an_evicted_statement_is_closed_with_the_next_one_run() {
+    if !test_config::should_run_postgres_tests() {
+        return;
+    }
+    let db = Database::builder()
+        .url(backend::database_url())
+        .max_connections(1)
+        .statement_cache_capacity(1)
+        .build()
+        .await
+        .expect("failed to connect to PostgreSQL");
+    for round in 0..3_i64 {
+        for (sql, column) in [
+            ("SELECT $1::int8 AS a", "a"),
+            ("SELECT $1::int8 + 1 AS b", "b"),
+        ] {
+            let rows = db
+                .query_raw_json_with_params(sql, [DbValue::from(round)])
+                .await
+                .expect("a statement runs after an eviction");
+            assert_eq!(rows[0][column], round + i64::from(column == "b"), "{sql}");
+        }
+    }
+    let prepared = db
+        .query_raw_json_with_params(
+            "SELECT count(*)::int8 AS n FROM pg_prepared_statements WHERE $1",
+            [DbValue::from(true)],
+        )
+        .await
+        .expect("prepared statements are listed");
+    assert_eq!(prepared[0]["n"], 1, "only the cached statement is prepared");
+    db.close().await.expect("the pool closes");
 }

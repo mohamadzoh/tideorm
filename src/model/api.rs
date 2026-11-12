@@ -17,6 +17,11 @@ use super::{BatchUpdateBuilder, OnConflictBuilder, crud, serialization};
 /// model calls fail before reaching SQL execution, verify that `TideConfig`
 /// finished connecting successfully.
 #[async_trait]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a TideORM model",
+    label = "not a model",
+    note = "add `#[tideorm::model]` (or `#[derive(tideorm::Model)]`) to the struct `{Self}`"
+)]
 pub trait Model:
     super::ModelMeta
     + crate::internal::InternalModel

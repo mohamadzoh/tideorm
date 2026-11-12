@@ -132,48 +132,114 @@ fn store_row(key: i64) -> RowKey {
     )
 }
 
+/// The scope's pool's baseline every task shares.
+const SHARED: Slot = (None, None);
+
+/// Two tasks, both alive while their ids are taken, so the ids differ.
+#[cfg(feature = "runtime-tokio")]
+fn two_tasks() -> (Task, Task) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        assert_eq!(current_task(), None);
+        let (go, ready) = tokio::sync::watch::channel(false);
+        let spawn = |mut ready: tokio::sync::watch::Receiver<bool>| {
+            tokio::spawn(async move {
+                let task = current_task().unwrap();
+                ready.wait_for(|go| *go).await.unwrap();
+                task
+            })
+        };
+        let (first, second) = (spawn(ready.clone()), spawn(ready));
+        go.send(true).unwrap();
+        (first.await.unwrap(), second.await.unwrap())
+    })
+}
+
+/// Each task reads the baseline it read or wrote itself, whatever another
+/// task wrote since; code outside a task, or in one that never read the row,
+/// reads the shared one, the latest.
+#[cfg(feature = "runtime-tokio")]
+#[test]
+fn each_task_reads_its_own_baseline() {
+    let (first, second) = two_tasks();
+    assert_ne!(first, second);
+    let mut store = SnapshotStore::new(10);
+    let row = store_row(1);
+    for slot in [(None, Some(first)), SHARED] {
+        store.replace(row.clone(), slot, Some(named("Alice")));
+    }
+    for slot in [(None, Some(second)), SHARED] {
+        store.replace(row.clone(), slot, Some(named("Bob")));
+    }
+
+    assert_eq!(store.get(&row, Some(first)), Some(&named("Alice")));
+    assert_eq!(store.get(&row, Some(second)), Some(&named("Bob")));
+    assert_eq!(store.get(&row, None), Some(&named("Bob")));
+}
+
+/// An evicted task's baseline takes the shared one with it, so that task
+/// does not go on to compare with another task's write.
+#[cfg(feature = "runtime-tokio")]
+#[test]
+fn eviction_of_a_tasks_baseline_takes_the_shared_one() {
+    let (first, second) = two_tasks();
+    let mut store = SnapshotStore::new(3);
+    let row = store_row(1);
+    store.replace(row.clone(), (None, Some(first)), Some(named("Alice")));
+    store.replace(row.clone(), (None, Some(second)), Some(named("Bob")));
+    store.replace(row.clone(), SHARED, Some(named("Bob")));
+    store.replace(store_row(2), SHARED, Some(named("Dave")));
+
+    assert_eq!(store.get(&row, Some(first)), None);
+    assert_eq!(store.get(&row, None), None);
+    assert_eq!(store.get(&row, Some(second)), Some(&named("Bob")));
+    assert_eq!(store.order.len(), 2);
+}
+
 #[test]
 fn a_rolled_back_read_leaves_a_baseline_written_since_alone() {
     let mut store = SnapshotStore::new(10);
     let row = store_row(1);
-    store.replace(row.clone(), None, Some(named("Alice")));
+    store.replace(row.clone(), SHARED, Some(named("Alice")));
 
     // A transaction reads the row, and before it rolls back another task
     // commits a change to it.
-    let (previous, standing) = store.replace(row.clone(), None, Some(named("Alice")));
-    store.replace(row.clone(), None, Some(named("Bob")));
-    store.restore(row.clone(), None, standing, previous);
+    let (previous, standing) = store.replace(row.clone(), SHARED, Some(named("Alice")));
+    store.replace(row.clone(), SHARED, Some(named("Bob")));
+    store.restore(row.clone(), SHARED, standing, previous);
 
-    assert_eq!(store.get(&row), Some(&named("Bob")));
+    assert_eq!(store.get(&row, None), Some(&named("Bob")));
 }
 
 #[test]
 fn a_rolled_back_transaction_restores_the_baseline_before_its_first_write() {
     let mut store = SnapshotStore::new(10);
     let row = store_row(1);
-    store.replace(row.clone(), None, Some(named("Alice")));
+    store.replace(row.clone(), SHARED, Some(named("Alice")));
 
-    let (first_previous, first) = store.replace(row.clone(), None, Some(named("Bob")));
-    let (second_previous, second) = store.replace(row.clone(), None, None);
+    let (first_previous, first) = store.replace(row.clone(), SHARED, Some(named("Bob")));
+    let (second_previous, second) = store.replace(row.clone(), SHARED, None);
     // Undo steps run last first.
-    store.restore(row.clone(), None, second, second_previous);
-    store.restore(row.clone(), None, first, first_previous);
+    store.restore(row.clone(), SHARED, second, second_previous);
+    store.restore(row.clone(), SHARED, first, first_previous);
 
-    assert_eq!(store.get(&row), Some(&named("Alice")));
+    assert_eq!(store.get(&row, None), Some(&named("Alice")));
 }
 
 #[test]
 fn eviction_drops_every_databases_baseline_of_a_key_together() {
     let mut store = SnapshotStore::new(2);
     let row = store_row(1);
-    store.replace(row.clone(), Some(1), Some(named("Bob")));
-    store.replace(row.clone(), Some(2), Some(named("Carol")));
+    store.replace(row.clone(), (Some(1), None), Some(named("Bob")));
+    store.replace(row.clone(), (Some(2), None), Some(named("Carol")));
     // Past capacity, the oldest baseline goes, and with it the key's other.
-    store.replace(store_row(2), Some(1), Some(named("Dave")));
+    store.replace(store_row(2), (Some(1), None), Some(named("Dave")));
 
     assert!(!store.entries.contains_key(&row));
     assert_eq!(store.order.len(), 1);
-    assert_eq!(store.get(&store_row(2)), Some(&named("Dave")));
+    assert_eq!(store.get(&store_row(2), None), Some(&named("Dave")));
 }
 
 #[test]

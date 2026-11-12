@@ -2,7 +2,6 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 
 use crate::context::BuildContext;
-use crate::parse::unraw_ident;
 
 pub(crate) fn generate_validation_impl(ctx: &BuildContext) -> TokenStream2 {
     let struct_name = &ctx.struct_name;
@@ -16,12 +15,7 @@ pub(crate) fn generate_validation_impl(ctx: &BuildContext) -> TokenStream2 {
         };
     }
 
-    let validation_checks = ctx.validation_rules.iter().map(|(field_ident, rules)| {
-        let field_name = unraw_ident(field_ident);
-        quote! {
-            errors.check(#field_name, &self.#field_ident, &[#(#rules),*]);
-        }
-    });
+    let validation_checks = ctx.validation_rules.iter().flat_map(|(_, checks)| checks);
 
     quote! {
         impl ::tideorm::validation::Validate for #struct_name {

@@ -2,8 +2,8 @@
 //! of their keys, the hidden-attribute filters of their payloads, and what an
 //! entity manager reads them through.
 
-use proc_macro2::TokenStream as TokenStream2;
-use quote::quote;
+use proc_macro2::{Span, TokenStream as TokenStream2};
+use quote::{quote, quote_spanned};
 use syn::Type;
 
 use crate::context::BuildContext;
@@ -61,6 +61,9 @@ pub(super) fn build_relation_checks(
 ) -> syn::Result<TokenStream2> {
     let ident = field.ident();
     let name = field.name();
+    let column_assert = |ty: &Type, column: &str, message: &str| {
+        compile_time_column_assert(ty, column, message, ident.span())
+    };
     let related_types = field.related_types();
     let related_ty = related_types
         .first()
@@ -78,21 +81,21 @@ pub(super) fn build_relation_checks(
             ctx.relation_local_ident(field)?;
             let related_key = field.related_key.as_deref().expect("validated related_key");
             let related_local_key = field.owner_key.as_deref().unwrap_or("id");
-            let pivot_foreign = compile_time_column_assert(
+            let pivot_foreign = column_assert(
                 pivot_ty,
                 foreign_key,
                 &format!(
                     "many-to-many relation '{name}' references an unknown pivot foreign key '{foreign_key}'"
                 ),
             );
-            let pivot_related = compile_time_column_assert(
+            let pivot_related = column_assert(
                 pivot_ty,
                 related_key,
                 &format!(
                     "many-to-many relation '{name}' references an unknown pivot related column '{related_key}'"
                 ),
             );
-            let related_column = compile_time_column_assert(
+            let related_column = column_assert(
                 related_ty,
                 related_local_key,
                 &format!(
@@ -108,7 +111,7 @@ pub(super) fn build_relation_checks(
         Some(RelationKind::BelongsTo) => {
             ctx.resolve_required_db_field_ident(foreign_key, ident)?;
             let owner_key = field.owner_key.as_deref().unwrap_or("id");
-            Ok(compile_time_column_assert(
+            Ok(column_assert(
                 related_ty,
                 owner_key,
                 &remote_column_error(&name, owner_key),
@@ -116,7 +119,7 @@ pub(super) fn build_relation_checks(
         }
         _ => {
             ctx.relation_local_ident(field)?;
-            Ok(compile_time_column_assert(
+            Ok(column_assert(
                 related_ty,
                 foreign_key,
                 &remote_column_error(&name, foreign_key),
@@ -132,8 +135,8 @@ fn remote_column_error(relation: &str, column: &str) -> String {
     )
 }
 
-fn compile_time_column_assert(ty: &Type, column: &str, message: &str) -> TokenStream2 {
-    quote! {
+fn compile_time_column_assert(ty: &Type, column: &str, message: &str, span: Span) -> TokenStream2 {
+    quote_spanned! {span=>
         const _: () = assert!(<#ty>::__has_column_name(#column), #message);
     }
 }

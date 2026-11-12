@@ -202,7 +202,7 @@ impl TideConfig {
     ///
     /// Only needed when the URL scheme is ambiguous. Note that a `mysql://` URL
     /// pointing at a MariaDB server is detected automatically during
-    /// [`connect`](TideConfig::connect) by querying the server version, and
+    /// [`connect`](TideConfig::connect) from the server's handshake, and
     /// [`get_database_type`](TideConfig::get_database_type) then reports MariaDB.
     #[must_use]
     pub fn database_type(mut self, db_type: DatabaseType) -> Self {

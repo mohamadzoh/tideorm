@@ -1,5 +1,5 @@
 error[E0080]: evaluation panicked: many-to-many relation 'roles' references an unknown pivot foreign key 'account_id'
-  --> tests/ui/invalid_relation_pivot_column.rs:18:1
+  --> tests/ui/invalid_relation_pivot_column.rs:30:5
    |
-18 | #[tideorm::model(table = "users")]
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `__tideorm_internal_user::_` failed here
+30 |     roles: HasManyThrough<Role, UserRole>,
+   |     ^^^^^ evaluation of `__tideorm_internal_user::_` failed here

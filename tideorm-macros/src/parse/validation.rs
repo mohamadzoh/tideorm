@@ -50,6 +50,7 @@ fn supported_rules() -> String {
     RULES
         .iter()
         .map(|(name, ..)| *name)
+        .chain(["custom"])
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -101,17 +102,25 @@ fn parse_rule(
         )
     })?;
     let rule = unraw_ident(&rule_ident);
+    let (name, ident) = (field.name(), field.ident());
+    if rule == "custom" {
+        // The function takes the field as declared and returns
+        // `Result<(), E>`, `E: Display` being the message.
+        let function = parse_single(
+            meta,
+            &rule_ident,
+            expr_to_function,
+            "a function path",
+            "\"check_sku\"",
+        )?;
+        rules.push(quote! {
+            if let ::core::result::Result::Err(message) = #function(&self.#ident) {
+                errors.add(#name, message.to_string());
+            }
+        });
+        return Ok(());
+    }
     let Some(&(_, variant, arity, applies)) = RULES.iter().find(|(name, ..)| *name == rule) else {
-        // A field rule cannot run model code, so `custom` used to compile to a
-        // marker nothing evaluated and silently accepted every value.
-        if rule == "custom" {
-            return Err(syn::Error::new_spanned(
-                &rule_ident,
-                "`#[validate(custom = ..)]` is not supported: implement \
-                 `tideorm::Callbacks::after_validation` (or `before_validation`) on the model \
-                 and return `Err(tideorm::Error::validation(field, message))` from it",
-            ));
-        }
         return Err(syn::Error::new_spanned(
             &rule_ident,
             format!(
@@ -166,8 +175,20 @@ fn parse_rule(
         }
     };
 
-    rules.push(tokens);
+    rules.push(quote!(errors.check(#name, &self.#ident, &[#tokens]);));
     Ok(())
+}
+
+/// The function `custom` names: a path, or a string holding one.
+fn expr_to_function(expr: &Expr) -> Option<syn::ExprPath> {
+    match expr {
+        Expr::Path(path) => Some(path.clone()),
+        Expr::Lit(ExprLit {
+            lit: Lit::Str(text),
+            ..
+        }) => text.parse().ok(),
+        _ => None,
+    }
 }
 
 fn ensure_validation_compatibility(

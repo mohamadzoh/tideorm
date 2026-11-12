@@ -130,6 +130,13 @@ fn expand_model(model_attr: TokenStream2, input: DeriveInput) -> syn::Result<Tok
         ));
     }
 
+    if let Some(derive) = attrs.iter().find(|attr| derives_model(attr)) {
+        return Err(syn::Error::new_spanned(
+            derive,
+            "#[tideorm::model] already derives Model; remove `Model` from this #[derive(..)]",
+        ));
+    }
+
     let inline_tide_attr = if has_inline_model_options {
         Some(quote! { #[tideorm(#model_attr)] })
     } else {
@@ -143,6 +150,29 @@ fn expand_model(model_attr: TokenStream2, input: DeriveInput) -> syn::Result<Tok
         #(#attrs)*
         #vis struct #name #struct_body
     })
+}
+
+/// Whether `attr` is a `#[derive(..)]` naming `Model` or `tideorm::Model`.
+fn derives_model(attr: &syn::Attribute) -> bool {
+    attr.path().is_ident("derive")
+        && attr
+            .parse_args_with(
+                syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
+            )
+            .is_ok_and(|paths| {
+                paths.iter().any(|path| {
+                    let names: Vec<String> = path
+                        .segments
+                        .iter()
+                        .map(|segment| segment.ident.to_string())
+                        .collect();
+                    match names.as_slice() {
+                        [model] => model == "Model",
+                        [krate, model] => krate == "tideorm" && model == "Model",
+                        _ => false,
+                    }
+                })
+            })
 }
 
 /// Re-emit everything after the struct name: generics, fields, `where` clause

@@ -111,6 +111,19 @@ TideConfig::init()
 
 `TideConfig::apply()`, `TideConfig::connect()` and `TideConfig::connect_only()` overwrite previously applied TideORM configuration. If a new configuration omits the database type, the stored type is cleared instead of leaving the old backend classification behind. `connect_only()` connects without the startup work the configuration enables (migrations, schema sync, seeds, the schema file), which is how the migration and seed runners `tideorm init` scaffolds connect with the application's own configuration.
 
+### Environment Variables
+
+TideORM reads these from the process environment; a boolean flag is on only when set to `1` or `true`. The connection URL is not one of them: pass it to `.database(..)` yourself, from `DATABASE_URL` or wherever your configuration keeps it.
+
+| Variable | Effect |
+|---|---|
+| `TIDE_LOG_QUERIES` | Print every statement to stderr (see [Query Logging](queries.md#query-logging)). Read once, at the first statement. |
+| `TIDE_LOG_LEVEL` | The `QueryLogger` level: `error`, `warn`, `info`, `debug` or `trace`. |
+| `TIDE_SLOW_QUERY_MS` | The slow-query threshold, in milliseconds. |
+| `TIDE_LOG_SEEDS` | Log each seeder as it runs and rolls back. |
+| `TIDEORM_ENV` | `production` (any case) makes `force_sync(true)` fail before it drops anything. |
+| `TIDEORM_ALLOW_FORCE_SYNC` | Lets `force_sync(true)` run even when `TIDEORM_ENV` is `production`. |
+
 ---
 
 ## Data Type Mappings
@@ -143,7 +156,7 @@ TideConfig::init()
 
 On PostgreSQL a field can also be an array: `Vec<i32>`, `Vec<i64>`, `Vec<f64>`, `Vec<bool>`, `Vec<String>` or `Vec<serde_json::Value>`. A field of any other type is a compile error on that field: store an enum as a `String` or an integer, and mark a field that is not a column `#[tideorm(skip)]`.
 
-On MySQL and MariaDB every timestamp is a `DATETIME(6)`: MySQL's `TIMESTAMP` only spans 1970–2038 and a column without fractional digits drops microseconds. The connection runs in UTC, so a `DateTime<Utc>` is stored as its UTC wall time. Text and binary columns are `LONGTEXT`/`LONGBLOB` because `TEXT` and `BLOB` stop at 64 KB, and tables are created `DEFAULT CHARSET=utf8mb4` whatever the database default is, so any Rust `String` fits.
+On MySQL and MariaDB every timestamp is a `DATETIME(6)`: MySQL's `TIMESTAMP` only spans 1970–2038 and a column without fractional digits drops microseconds. The connection runs in UTC, so a `DateTime<Utc>` is stored as its UTC wall time. Each connection also takes `NO_BACKSLASH_ESCAPES` out of its session's SQL mode, since SQL written for MySQL escapes with backslashes. Text and binary columns are `LONGTEXT`/`LONGBLOB` because `TEXT` and `BLOB` stop at 64 KB, and tables are created `DEFAULT CHARSET=utf8mb4` whatever the database default is, so any Rust `String` fits.
 
 ### Date and Time Types
 
@@ -271,7 +284,7 @@ See the [TideORM Examples repository](https://github.com/mohamadzoh/tideorm-exam
 
 ## Testing
 
-Use the smallest command that covers your change.
+To test an application built on TideORM, see [Testing](testing.md). The commands below test TideORM itself; use the smallest one that covers your change.
 
 ```bash
 # Fast library validation

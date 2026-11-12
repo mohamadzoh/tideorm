@@ -567,8 +567,14 @@ fn a_replacement_rejected_by_cache_policy_removes_only_its_old_value() {
             .set_tagged("key", &replacement, None, &["t".to_string()])
             .unwrap();
         assert_eq!(cache.get::<Vec<i32>>("key"), None, "{policy}");
-        assert_eq!(cache.get::<i32>("other"), Some(42), "{policy}");
-        assert_eq!(cache.stats().entries, 1, "{policy}");
+        // a limit lowered to zero entries already evicted the other one
+        let kept = (policy != "zero entries").then_some(42);
+        assert_eq!(cache.get::<i32>("other"), kept, "{policy}");
+        assert_eq!(
+            cache.stats().entries,
+            usize::from(kept.is_some()),
+            "{policy}"
+        );
     }
 }
 

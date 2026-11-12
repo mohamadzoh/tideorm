@@ -301,7 +301,9 @@ fn engine_bookkeeping_errors_carry_no_driver_failure() {
 }
 
 /// The engine quotes a URL it cannot parse, with its credentials masked, and
-/// a connection error is exactly what gets logged.
+/// a connection error is exactly what gets logged. A build without the
+/// PostgreSQL driver refuses the URL before the engine reads it.
+#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn connect_errors_mask_the_url_credentials() {
     let password = format!("pw{}", std::process::id());
@@ -375,4 +377,16 @@ fn masking_covers_the_whole_userinfo_and_nothing_else() {
         let shown = mask_url_credentials(&format!("mysql://app:{password}@db:3306/app?a=1"));
         assert_eq!(shown, "mysql://***@db:3306/app?a=1", "{password}");
     }
+}
+
+/// PostgreSQL's exclusion constraints are constraint violations, never retried.
+#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+#[test]
+fn exclusion_violations_are_classified() {
+    use crate::orm::driver::error::ErrorKind;
+
+    let kind = super::error_translation::database_failure_kind(ErrorKind::ExclusionViolation);
+    assert_eq!(kind, DbFailureKind::ExclusionViolation);
+    assert!(kind.is_constraint_violation());
+    assert!(!kind.is_retryable());
 }

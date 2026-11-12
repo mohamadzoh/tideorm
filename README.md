@@ -32,7 +32,7 @@ A Rust ORM with field-declared relations and a fluent query builder.
 
 ```toml
 [dependencies]
-tideorm = { version = "0.17.3", default-features = false, features = ["sqlite", "runtime-tokio"] }
+tideorm = { version = "0.17.4", default-features = false, features = ["sqlite", "runtime-tokio"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -177,7 +177,7 @@ Use model-level encrypted fields when you want selected persisted columns, such 
 
 ```toml
 [dependencies]
-tideorm = { version = "0.17.3", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
+tideorm = { version = "0.17.4", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
 ```
 
 ```rust,ignore
@@ -223,31 +223,31 @@ driver stack.
 ```toml
 [dependencies]
 # PostgreSQL
-tideorm = { version = "0.17.3", default-features = false, features = ["postgres", "runtime-tokio"] }
+tideorm = { version = "0.17.4", default-features = false, features = ["postgres", "runtime-tokio"] }
 
 # MySQL / MariaDB
-tideorm = { version = "0.17.3", default-features = false, features = ["mysql", "runtime-tokio"] }
+tideorm = { version = "0.17.4", default-features = false, features = ["mysql", "runtime-tokio"] }
 
 # SQLite
-tideorm = { version = "0.17.3", default-features = false, features = ["sqlite", "runtime-tokio"] }
+tideorm = { version = "0.17.4", default-features = false, features = ["sqlite", "runtime-tokio"] }
 
 # Enable attachments support explicitly
-tideorm = { version = "0.17.3", default-features = false, features = ["postgres", "runtime-tokio", "attachments"] }
+tideorm = { version = "0.17.4", default-features = false, features = ["postgres", "runtime-tokio", "attachments"] }
 
 # Enable translations support explicitly
-tideorm = { version = "0.17.3", default-features = false, features = ["postgres", "runtime-tokio", "translations"] }
+tideorm = { version = "0.17.4", default-features = false, features = ["postgres", "runtime-tokio", "translations"] }
 
 # Enable full-text search support explicitly
-tideorm = { version = "0.17.3", default-features = false, features = ["postgres", "runtime-tokio", "fulltext"] }
+tideorm = { version = "0.17.4", default-features = false, features = ["postgres", "runtime-tokio", "fulltext"] }
 
 # Enable the entity manager explicitly
-tideorm = { version = "0.17.3", default-features = false, features = ["postgres", "runtime-tokio", "entity-manager"] }
+tideorm = { version = "0.17.4", default-features = false, features = ["postgres", "runtime-tokio", "entity-manager"] }
 
 # Enable model dirty tracking explicitly
-tideorm = { version = "0.17.3", default-features = false, features = ["postgres", "runtime-tokio", "dirty-tracking"] }
+tideorm = { version = "0.17.4", default-features = false, features = ["postgres", "runtime-tokio", "dirty-tracking"] }
 
 # Enable model encrypted fields explicitly
-tideorm = { version = "0.17.3", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
+tideorm = { version = "0.17.4", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
 ```
 
 Swap `runtime-tokio` for `runtime-async-std` if you run on async-std.
@@ -274,7 +274,7 @@ works without it.
 | `fulltext` | Compile-time-only feature gate for the full-text search API and fulltext-specific benchmarks/tests; adds no extra dependencies |
 | `entity-manager` | Enables the `EntityManager` facade (`find`, `find_managed`, `load`, `save`, `persist`, `merge`, `remove`, `detach`, `flush`), entity-manager-aware relation loads, and aggregate synchronization for loaded `HasOne`, `HasMany`, and `HasManyThrough` relations |
 | `dirty-tracking` | Enables the model-level `changed_fields()` and `original_value()` helpers and their persisted-state tracking hooks |
-| `encrypted-fields` | Enables `#[tideorm(encrypted = "...")]` model auto-encrypt/decrypt hooks for persisted string columns |
+| `encrypted-fields` | Enables `#[tideorm(encrypted = "...")]` model auto-encrypt/decrypt hooks for persisted columns of any serializable type |
 
 Attachments are opt-in. Enable the `attachments` feature when you want to use `tideorm::attachments`, `HasAttachments`, or attachment URL generation helpers. This is a compile-time API gate only; it does not pull in additional crates.
 
@@ -286,7 +286,7 @@ The entity manager is opt-in. Enable the `entity-manager` feature when you want 
 
 Dirty tracking is opt-in. Enable the `dirty-tracking` feature when you want model instances to expose `changed_fields()` and `original_value()` based on the latest persisted snapshot TideORM loaded or saved.
 
-Model encrypted fields are opt-in. Enable the `encrypted-fields` feature when you want `#[tideorm(encrypted = "...")]` to automatically encrypt configured string columns on writes and decrypt them on model loads.
+Model encrypted fields are opt-in. Enable the `encrypted-fields` feature when you want `#[tideorm(encrypted = "...")]` to automatically encrypt configured columns on writes and decrypt them on model loads.
 
 Schema sync can also register compiled models by source path with glob-style patterns such as `models_matching("src/models/*")` or `models_matching("src/models/*.model.rs")`. The matching files still need to be part of the crate through normal Rust `mod` declarations because TideORM filters compiled model metadata rather than loading source files dynamically.
 

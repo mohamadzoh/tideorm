@@ -2,7 +2,7 @@ use super::*;
 
 use crate::parse::{
     RelationKind, db_field_candidates, find_db_field, find_derived_db_field, is_utc_datetime_type,
-    option_inner_type, required_field, resolve_db_field,
+    option_inner_type, path_segment, required_field, resolve_db_field, unraw_ident,
 };
 
 /// The names a comma-separated attribute lists, trimmed; an empty one, such as
@@ -76,7 +76,7 @@ pub(super) fn validate_primary_key_fields(
         // of an attribute, so the struct name is the tightest honest span.
         return Err(syn::Error::new_spanned(
             struct_ident,
-            "TideORM models require exactly one #[tideorm(primary_key)] field",
+            "TideORM models require a #[tideorm(primary_key)] field; mark each field of a composite key",
         ));
     }
 
@@ -144,7 +144,10 @@ pub(super) fn validate_primary_key_fields(
 /// The wrapper type decides the relation kind, so a `has_one = ".."` style
 /// attribute has to sit on the wrapper it names, and each kind has to spell out
 /// the keys it has no sensible default for rather than silently joining on `id`.
-pub(super) fn validate_relation_fields(fields: &[ModelField]) -> syn::Result<()> {
+pub(super) fn validate_relation_fields(
+    struct_ident: &Ident,
+    fields: &[ModelField],
+) -> syn::Result<()> {
     let mut errors = None;
 
     for field in fields {
@@ -174,24 +177,41 @@ pub(super) fn validate_relation_fields(fields: &[ModelField]) -> syn::Result<()>
             continue;
         }
 
-        let required: &[(&str, &Option<String>)] = match kind {
-            RelationKind::HasOne | RelationKind::HasMany | RelationKind::BelongsTo => {
-                &[("foreign_key", &field.foreign_key)]
+        // Each key with the name it conventionally has, which the message
+        // suggests; it is never assumed, since a model with two relations to
+        // one model would silently join both on it.
+        let own_key = || Some(key_of(&unraw_ident(struct_ident)));
+        let required: Vec<(&str, &Option<String>, Option<String>)> = match kind {
+            RelationKind::HasOne | RelationKind::HasMany => {
+                vec![("foreign_key", &field.foreign_key, own_key())]
             }
-            RelationKind::HasManyThrough => &[
-                ("pivot", &field.pivot),
-                ("foreign_key", &field.foreign_key),
-                ("related_key", &field.related_key),
+            RelationKind::BelongsTo => {
+                vec![(
+                    "foreign_key",
+                    &field.foreign_key,
+                    Some(format!("{}_id", field.name())),
+                )]
+            }
+            RelationKind::HasManyThrough => vec![
+                ("foreign_key", &field.foreign_key, own_key()),
+                (
+                    "related_key",
+                    &field.related_key,
+                    field
+                        .related_types()
+                        .first()
+                        .and_then(path_segment)
+                        .map(|segment| key_of(&unraw_ident(&segment.ident))),
+                ),
             ],
             RelationKind::MorphOne | RelationKind::MorphMany | RelationKind::MorphTo => {
-                &[("morph_name", &field.morph_name)]
+                vec![("morph_name", &field.morph_name, None)]
             }
-            RelationKind::SelfRef | RelationKind::SelfRefMany => &[],
+            RelationKind::SelfRef | RelationKind::SelfRefMany => vec![],
         };
-        let missing: Vec<String> = required
+        let missing: Vec<_> = required
             .iter()
-            .filter(|(_, value)| value.is_none())
-            .map(|(name, _)| format!("#[tideorm({name} = \"...\")]"))
+            .filter(|(_, value, _)| value.is_none())
             .collect();
         if missing.is_empty() {
             continue;
@@ -201,11 +221,28 @@ pub(super) fn validate_relation_fields(fields: &[ModelField]) -> syn::Result<()>
             Some(attribute) => format!("{attribute} relations"),
             None => "polymorphic relation fields".to_string(),
         };
-        let message = format!("{subject} require {}", missing.join(", "));
+        let attributes: Vec<String> = missing
+            .iter()
+            .map(|(name, ..)| format!("#[tideorm({name} = \"...\")]"))
+            .collect();
+        let examples: Vec<String> = missing
+            .iter()
+            .filter_map(|(name, _, example)| Some(format!("{name} = \"{}\"", example.as_ref()?)))
+            .collect();
+        let mut message = format!("{subject} require {}", attributes.join(", "));
+        if !examples.is_empty() {
+            message.push_str(&format!(", such as {}", examples.join(", ")));
+        }
         combine_error(&mut errors, syn::Error::new_spanned(field.ident(), message));
     }
 
     into_result(errors)
+}
+
+/// The column conventionally holding a key of the model named `model`:
+/// `BlogPost` → `blog_post_id`.
+fn key_of(model: &str) -> String {
+    format!("{}_id", crate::case::to_snake_case(model))
 }
 
 pub(super) fn resolve_encrypted_fields<'a>(

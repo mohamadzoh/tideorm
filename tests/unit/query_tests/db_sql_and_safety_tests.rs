@@ -472,9 +472,10 @@ fn test_inline_parameters() {
     }
 }
 
-/// A HAVING description writes each value as its backend's preview does.
+/// A HAVING description, which error contexts carry, leaves its values out:
+/// each is its backend's marker.
 #[test]
-fn test_having_descriptions_write_values_per_backend() {
+fn test_having_descriptions_leave_values_out() {
     let clause = crate::query::HavingClause::Raw {
         sql: "MAX(name) = ?".to_string(),
         values: vec![Value::String(Some("it's".to_string()))],
@@ -482,9 +483,9 @@ fn test_having_descriptions_write_values_per_backend() {
     let query = QueryBuilder::<QueryTestUser>::new();
     let describe = |db_type| query.describe_having_clause(db_type, &clause);
 
-    assert_eq!(describe(DatabaseType::Postgres), "MAX(name) = E'it\\'s'");
-    assert_eq!(describe(DatabaseType::SQLite), "MAX(name) = 'it''s'");
-    assert_eq!(describe(DatabaseType::MySQL), "MAX(name) = 'it\\'s'");
+    assert_eq!(describe(DatabaseType::Postgres), "MAX(name) = $1");
+    assert_eq!(describe(DatabaseType::SQLite), "MAX(name) = ?");
+    assert_eq!(describe(DatabaseType::MySQL), "MAX(name) = ?");
 }
 
 /// `format_column` quotes anything that is not a plain `column` or

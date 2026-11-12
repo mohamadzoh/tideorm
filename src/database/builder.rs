@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use crate::config::DatabaseType;
 use crate::error::{Error, Result};
 use crate::internal::{ConnectTarget, InternalConnection};
 
@@ -140,6 +141,9 @@ impl DatabaseBuilder {
         let target = self
             .target
             .ok_or_else(|| Error::configuration("Database URL or driver options are required"))?;
+        if let ConnectTarget::Url(url) = &target {
+            ensure_backend_compiled(url)?;
+        }
         match (self.min_connections, self.max_connections) {
             (_, Some(0)) => {
                 return Err(Error::configuration(
@@ -182,4 +186,19 @@ impl DatabaseBuilder {
         let connection = InternalConnection::open(conn).await?;
         Ok(Database::from_internal_connection(connection))
     }
+}
+
+/// Refuse a URL for a backend whose driver feature this build leaves out,
+/// naming the feature, before the engine reports it without one.
+fn ensure_backend_compiled(url: &str) -> Result<()> {
+    let feature = match DatabaseType::from_url(url) {
+        Some(DatabaseType::Postgres) if !cfg!(feature = "postgres") => "postgres",
+        Some(DatabaseType::MySQL | DatabaseType::MariaDB) if !cfg!(feature = "mysql") => "mysql",
+        Some(DatabaseType::SQLite) if !cfg!(feature = "sqlite") => "sqlite",
+        _ => return Ok(()),
+    };
+    Err(Error::configuration(format!(
+        "this is a {feature} URL, and this build of TideORM leaves out its driver: \
+         enable the `{feature}` feature (tideorm = {{ version = \"..\", features = [\"{feature}\"] }})"
+    )))
 }

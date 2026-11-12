@@ -216,14 +216,18 @@ impl LedgerLock {
 /// The named lock `kind` takes in `database`. `GET_LOCK` names are
 /// server-wide, so the database's name is in it: applications on one server
 /// do not wait on each other's migrations. MySQL refuses a name past 64
-/// characters, so a long one is cut, and two databases whose names share
-/// their first 45 characters take turns.
+/// characters, so a name that would pass it takes 160 bits of the database
+/// name's BLAKE2s digest instead, which two databases do not share.
 #[cfg(feature = "mysql")]
 fn mysql_lock_name(kind: LockKind, database: Option<&str>) -> String {
-    format!("{}:{}", kind.name(), database.unwrap_or_default())
-        .chars()
-        .take(64)
-        .collect()
+    let database = database.unwrap_or_default();
+    let name = format!("{}:{database}", kind.name());
+    if name.chars().count() <= 64 {
+        return name;
+    }
+    let mut digest = crate::cache::KeyDigest::new();
+    std::hash::Hasher::write(&mut digest, database.as_bytes());
+    format!("{}:{}", kind.name(), &digest.hex()[..40])
 }
 
 /// Poll a nonblocking OS lock with a runtime-independent timer. Cancelling

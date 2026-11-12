@@ -1,6 +1,6 @@
 [package]
 name = "tideorm"
-version = "0.17.3"
+version = "0.17.4"
 edition = "2024"
 authors = ["Mohamad Al Zohbie <alzoubi528@gmail.com>"]
 description = "A developer-friendly ORM for Rust with clean, expressive syntax"
@@ -59,8 +59,8 @@ mysql = ["tideorm-engine/mysql"]
 # engine's `sqlite` feature writes an insert or update as one statement instead of
 # the write plus a `SELECT` of the row.
 sqlite = ["tideorm-engine/sqlite", "dep:async-io"]
-runtime-tokio = ["tideorm-engine/runtime-tokio"]
-runtime-async-std = ["tideorm-engine/runtime-async-std"]
+runtime-tokio = ["tideorm-engine/runtime-tokio", "dep:tokio"]
+runtime-async-std = ["tideorm-engine/runtime-async-std", "dep:async-std"]
 # These module flags intentionally gate TideORM's public API surface via #[cfg(feature = ...)]
 # and feature-specific tests/benches only. They do not enable extra dependencies.
 attachments = []
@@ -74,12 +74,16 @@ encrypted-fields = []
 # The execution engine, from its own repository (rust-ocean/tideorm-engine).
 # `src/orm.rs` re-exports it, with the ORM derive macros from `tideorm-macros`,
 # and macro-generated models reach both through that module's paths.
-tideorm-engine = { version = "0.1.1", default-features = false }
+tideorm-engine = { version = "0.1.2", default-features = false }
 
 # Async runtime
 async-trait = "0.1.92"
 # Runtime-independent, cancellable timers for SQLite migration lock waits.
 async-io = { version = "2.6.0", optional = true }
+# The current task's id, which keeps one task's dirty-tracking baselines apart
+# from another's. The drivers already build both for the same runtime feature.
+tokio = { version = "1.54.1", default-features = false, features = ["rt"], optional = true }
+async-std = { version = "1.13.2", optional = true }
 
 # Serialization
 serde = { version = "1.0.229", features = ["derive"] }
@@ -94,7 +98,7 @@ rust_decimal = { version = "1.43.0", features = ["serde"] }
 thiserror = "2.0.21"
 
 # Derive macros (our own crate)
-tideorm-macros = { version = "0.17.3", path = "tideorm-macros" }
+tideorm-macros = { version = "=0.17.4", path = "tideorm-macros" }
 
 # Utils
 parking_lot = "0.12.5"

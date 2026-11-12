@@ -130,7 +130,7 @@ Enable the `encrypted-fields` Cargo feature before using `encrypted = "..."`.
 
 ```toml
 [dependencies]
-tideorm = { version = "0.17.3", features = ["postgres", "encrypted-fields"] }
+tideorm = { version = "0.17.4", features = ["postgres", "encrypted-fields"] }
 ```
 
 Use `encrypted = "..."` on the model when specific persisted columns should be stored encrypted in the database but keep their own plaintext type in your Rust model.
@@ -271,9 +271,9 @@ if user.is_field_dirty(User::columns.email)? == Some(true) {
 }
 ```
 
-`changed_fields()` only reports persisted model fields, not runtime relation wrappers. The tracked baseline is refreshed by TideORM loads such as `find()`, query results, `reload()`, `save()`, and `update()`. Bulk mutation helpers such as `update_all()` and query-builder deletes invalidate the baseline for that model type.
+`changed_fields()` only reports persisted model fields, not runtime relation wrappers. The tracked baseline is refreshed by TideORM loads such as `find()`, query results, `reload()`, `save()`, and `update()`. Bulk mutation helpers such as `update_all()` and query-builder deletes invalidate the baselines for that model type in the task that runs them.
 
-Because TideORM models are plain Rust structs without hidden instance-local tracking state, dirty tracking follows the latest persisted snapshot TideORM knows for a primary key. A snapshot taken inside a transaction that then rolls back is withdrawn, and the one before it comes back, unless the row got a newer snapshot from outside the transaction in the meantime. If you keep multiple in-memory copies of the same row and one of them saves first, reload the stale copies before relying on their original values.
+Because TideORM models are plain Rust structs without hidden instance-local tracking state, baselines are kept per async task: each task (a request a server handles, a background job) compares a row with the copy it last read or wrote, so two tasks editing one row side by side never see each other's writes. A task that did not read the row itself, and code outside any task (the body of `#[tokio::main]` or `block_on`), compares with the latest snapshot TideORM knows for the primary key. A snapshot taken inside a transaction that then rolls back is withdrawn, and the one before it comes back, unless the row got a newer snapshot from outside the transaction in the meantime. Copies of one row within one task share a baseline: if one of them saves first, reload the others before relying on their original values.
 
 Each database keeps its own snapshots, since two databases can hold different rows under one key (`query_with(db)`, `find_with(id, db)`). A model does not record which database it came from, so when TideORM has read different rows for a key from two databases, both methods return `None` for that key rather than compare the model with the wrong row, and they keep doing so after one database's snapshot is forgotten, until the row is read again.
 
@@ -605,6 +605,30 @@ let user = tenant_db.scope(async {
 }).await?;
 ```
 
+### Nested Transactions
+
+A transaction opened inside another one is a savepoint of it. When the inner closure returns `Err`, only the inner work is rolled back; the outer transaction can catch the error and go on, or return it and roll back everything:
+
+```rust
+db.transaction(async move |_tx| {
+    let order = Order::create(order).await?;
+
+    // Optional work: if it fails, the order is still placed
+    let gift = require_db()?.transaction(async move |_tx| {
+        let card = GiftCard::create(card).await?;
+        Ledger::record(&card).await?;
+        Ok(card)
+    }).await;
+    if let Err(error) = gift {
+        eprintln!("gift card skipped: {error}");
+    }
+
+    Ok(order)
+}).await?;
+```
+
+An inner commit only ends the savepoint: its rows are written for good when the outermost transaction commits, and are rolled back with it. Code that opens its own transaction can therefore be called both on its own and inside a caller's transaction. Two nested transactions run side by side with `join!` take turns, one savepoint at a time.
+
 ### Choosing the Database a Call Uses
 
 | You want | Use |
@@ -882,7 +906,26 @@ if let Err(errors) = user.validate() {
 }
 ```
 
-Supported rules: `required`, `email`, `url`, `alpha`, `alphanumeric`, `numeric`, `uuid`, `min_length = n`, `max_length = n`, `length = n`, `min = n`, `max = n`, `range(min, max)` (or `range(min..=max)`, or `range = "min..max"`, all including `max`), and `regex = "pattern"`. The string rules apply to `String` and `Text` fields, `min`, `max` and `range` to numbers, `Decimal` and numeric strings, and `required` to an `Option` of any common type (a `Uuid`, a date, a `bool`, JSON, a `Vec`). Lengths count characters, not bytes. `min`, `max` and `range` reject `NaN`, compare an `f32` at its own precision (so `min = 0.7` takes `0.7_f32`), and take finite bounds only; `numeric` refuses `NaN`, `inf` and a value past `f64`. Errors come out in the order the struct declares its fields. A `regex` pattern that does not compile fails validation for every value, with an error naming the pattern.
+Supported rules: `required`, `email`, `url`, `alpha`, `alphanumeric`, `numeric`, `uuid`, `min_length = n`, `max_length = n`, `length = n`, `min = n`, `max = n`, `range(min, max)` (or `range(min..=max)`, or `range = "min..max"`, all including `max`), `regex = "pattern"`, and `custom = "function"` (or `custom = function`). The string rules apply to `String` and `Text` fields, `min`, `max` and `range` to numbers, `Decimal` and numeric strings, and `required` to an `Option` of any common type (a `Uuid`, a date, a `bool`, JSON, a `Vec`). Lengths count characters, not bytes. `min`, `max` and `range` reject `NaN`, compare an `f32` at its own precision (so `min = 0.7` takes `0.7_f32`), and take finite bounds only; `numeric` refuses `NaN`, `inf` and a value past `f64`. Errors come out in the order the struct declares its fields. A `regex` pattern that does not compile fails validation for every value, with an error naming the pattern.
+
+`custom` calls a function with a reference to the field; the error it returns, any type that implements `Display`, is the field's message. It runs beside the field's other rules, wherever they run:
+
+```rust,ignore
+fn not_reserved(name: &str) -> Result<(), String> {
+    match name {
+        "admin" | "root" => Err(format!("'{name}' is reserved")),
+        _ => Ok(()),
+    }
+}
+
+#[tideorm::model(table = "accounts")]
+pub struct Account {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    #[validate(custom = "not_reserved", max_length = 32)]
+    pub name: String,
+}
+```
 
 Rules on a `#[tideorm(skip)]` field run too, for a value that is checked but never stored, such as a password confirmation. A skip field holds its `Default` on every model a query returns, so make it an `Option`: `None` passes every rule except `required`. `#[validate]` on a relation field is a compile error; the rules belong on the related model's fields.
 

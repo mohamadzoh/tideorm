@@ -15,8 +15,36 @@ type RowKey = (TypeId, Vec<ValueKey>);
 /// The pool a baseline's row was read from: the same key in two databases is
 /// two rows, and each keeps its own baseline.
 type Origin = Option<u64>;
+/// Whose baseline an entry is: the pool its row came from, and the task that
+/// read or wrote it, `None` for the one every task shares.
+type Slot = (Origin, Option<Task>);
 /// Each field's value, by field name, shared so a reader copies no values.
 type SnapshotValues = Arc<HashMap<&'static str, Value>>;
+
+/// An async task. Two requests a server handles side by side run in two
+/// tasks, so each compares its copy of a row with the one it read or wrote,
+/// whatever the other writes meanwhile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Task {
+    #[cfg(feature = "runtime-tokio")]
+    Tokio(tokio::task::Id),
+    #[cfg(feature = "runtime-async-std")]
+    AsyncStd(async_std::task::TaskId),
+}
+
+/// The task running this code; `None` outside one, such as in a `block_on`
+/// body (`#[tokio::main]`, `#[tokio::test]`).
+fn current_task() -> Option<Task> {
+    #[cfg(feature = "runtime-tokio")]
+    if let Some(id) = tokio::task::try_id() {
+        return Some(Task::Tokio(id));
+    }
+    #[cfg(feature = "runtime-async-std")]
+    if let Some(task) = async_std::task::try_current() {
+        return Some(Task::AsyncStd(task.id()));
+    }
+    None
+}
 
 /// Upper bound on how many dirty-tracking baselines are kept in memory.
 ///
@@ -24,8 +52,9 @@ type SnapshotValues = Arc<HashMap<&'static str, Value>>;
 /// read-heavy service paging through a large table grows until it runs out of
 /// memory. Once the bound is reached, the oldest remembered baselines are
 /// evicted first; a model whose baseline was evicted stops reporting dirty
-/// state instead of returning stale data.
-const DEFAULT_SNAPSHOT_CAPACITY: usize = 10_000;
+/// state instead of returning stale data. A row read in a task takes two
+/// entries, the task's and the shared one, which share their values.
+const DEFAULT_SNAPSHOT_CAPACITY: usize = 20_000;
 
 struct SnapshotEntry {
     sequence: u64,
@@ -37,13 +66,13 @@ struct SnapshotEntry {
 
 /// Bounded, insertion-ordered store of dirty-tracking baselines.
 ///
-/// `entries` holds each row's snapshots by the pool they were read from, and
-/// `order` maps insertion sequence to row and pool, one per snapshot, so
-/// eviction is O(log n) instead of an O(n) scan. Every mutation keeps the two
-/// in sync, so `order` can never accumulate stale keys.
+/// `entries` holds each row's snapshots by slot (pool and task), and `order`
+/// maps insertion sequence to row and slot, one per snapshot, so eviction is
+/// O(log n) instead of an O(n) scan. Every mutation keeps the two in sync, so
+/// `order` can never accumulate stale keys.
 struct SnapshotStore {
-    entries: HashMap<RowKey, HashMap<Origin, SnapshotEntry>>,
-    order: BTreeMap<u64, (RowKey, Origin)>,
+    entries: HashMap<RowKey, HashMap<Slot, SnapshotEntry>>,
+    order: BTreeMap<u64, (RowKey, Slot)>,
     next_sequence: u64,
     capacity: usize,
 }
@@ -58,59 +87,67 @@ impl SnapshotStore {
         }
     }
 
-    /// The baseline of `row`, when it is the same in every pool the row was
-    /// read from.
+    /// The baseline of `row` for `task`: the task's own, if it read or wrote
+    /// the row, or else the shared one, and either only when it is the same
+    /// in every pool the row was read from.
     ///
     /// A model does not record which database it came from, so where two
     /// databases gave the key different rows, or one pool's baseline of it
     /// was forgotten, no baseline is known for it: the scope a model is
     /// inspected in need not be the one it was loaded through, and guessing
     /// would report another row's values.
-    fn get(&self, row: &RowKey) -> Option<&SnapshotValues> {
-        let mut baselines = self
-            .entries
-            .get(row)?
-            .values()
-            .map(|entry| entry.values.as_ref());
+    fn get(&self, row: &RowKey, task: Option<Task>) -> Option<&SnapshotValues> {
+        let slots = self.entries.get(row)?;
+        let task = task.filter(|task| slots.keys().any(|(_, owner)| *owner == Some(*task)));
+        let mut baselines = slots
+            .iter()
+            .filter(|((_, owner), _)| *owner == task)
+            .map(|(_, entry)| entry.values.as_ref());
         let first = baselines.next()??;
         baselines.all(|other| other == Some(first)).then_some(first)
     }
 
-    /// Store one pool's baseline of `row` and return its sequence.
-    fn insert(&mut self, row: RowKey, origin: Origin, values: Option<SnapshotValues>) -> u64 {
+    /// Store one slot's baseline of `row` and return its sequence.
+    fn insert(&mut self, row: RowKey, slot: Slot, values: Option<SnapshotValues>) -> u64 {
         let sequence = self.next_sequence;
         self.next_sequence = self.next_sequence.wrapping_add(1);
-        self.put(row, origin, SnapshotEntry { sequence, values });
+        self.put(row, slot, SnapshotEntry { sequence, values });
         sequence
     }
 
-    fn put(&mut self, row: RowKey, origin: Origin, entry: SnapshotEntry) {
-        self.order.insert(entry.sequence, (row.clone(), origin));
-        if let Some(previous) = self.entries.entry(row).or_default().insert(origin, entry) {
+    fn put(&mut self, row: RowKey, slot: Slot, entry: SnapshotEntry) {
+        self.order.insert(entry.sequence, (row.clone(), slot));
+        if let Some(previous) = self.entries.entry(row).or_default().insert(slot, entry) {
             self.order.remove(&previous.sequence);
         }
 
-        // A row leaves with every pool's baseline of it, so no pool's
-        // baseline outlives another's and becomes the key's.
+        // A row leaves the evicted baseline's task with every pool's baseline
+        // of it, and the shared ones with it, so neither another pool's
+        // baseline nor the shared one becomes what that task reads.
         while self.order.len() > self.capacity {
-            let Some((_, (row, _))) = self.order.pop_first() else {
+            let Some((_, (row, (_, task)))) = self.order.pop_first() else {
                 break;
             };
-            for entry in self
-                .entries
-                .remove(&row)
-                .into_iter()
-                .flat_map(HashMap::into_values)
-            {
-                self.order.remove(&entry.sequence);
+            let Some(slots) = self.entries.get_mut(&row) else {
+                continue;
+            };
+            slots.retain(|(_, owner), entry| {
+                let keep = owner.is_some() && *owner != task;
+                if !keep {
+                    self.order.remove(&entry.sequence);
+                }
+                keep
+            });
+            if slots.is_empty() {
+                self.entries.remove(&row);
             }
         }
     }
 
-    /// Remove one pool's baseline of `row`.
-    fn take(&mut self, row: &RowKey, origin: Origin) -> Option<SnapshotEntry> {
+    /// Remove one slot's baseline of `row`.
+    fn take(&mut self, row: &RowKey, slot: Slot) -> Option<SnapshotEntry> {
         let baselines = self.entries.get_mut(row)?;
-        let entry = baselines.remove(&origin)?;
+        let entry = baselines.remove(&slot)?;
         if baselines.is_empty() {
             self.entries.remove(row);
         }
@@ -118,25 +155,29 @@ impl SnapshotStore {
         Some(entry)
     }
 
-    /// Set one pool's baseline of `row` to `values`, or forget it for `None`.
+    /// Set one slot's baseline of `row` to `values`, or forget it for `None`.
     /// Returns the entry it replaces, and the sequence of the entry left in
     /// its place, if any, for [`restore`](Self::restore).
     fn replace(
         &mut self,
         row: RowKey,
-        origin: Origin,
+        slot: Slot,
         values: Option<SnapshotValues>,
     ) -> (Option<SnapshotEntry>, Option<u64>) {
-        let previous = self.take(&row, origin);
+        let previous = self.take(&row, slot);
         let values = match values {
             Some(values) => Some(values),
             // Forgotten while another pool still holds a different baseline
-            // of the key: that baseline must not become the key's.
+            // of the key for the same task: that baseline must not become
+            // the key's.
             None if previous.as_ref().is_some_and(|previous| {
                 self.entries.get(&row).is_some_and(|others| {
                     others
-                        .values()
-                        .any(|other| previous.values.is_none() || other.values != previous.values)
+                        .iter()
+                        .filter(|((_, owner), _)| *owner == slot.1)
+                        .any(|(_, other)| {
+                            previous.values.is_none() || other.values != previous.values
+                        })
                 })
             }) =>
             {
@@ -144,32 +185,32 @@ impl SnapshotStore {
             }
             None => return (previous, None),
         };
-        let sequence = self.insert(row, origin, values);
+        let sequence = self.insert(row, slot, values);
         (previous, Some(sequence))
     }
 
     /// Undo a [`replace`](Self::replace) that left `standing` behind, by
-    /// putting `previous` back, unless the pool's baseline of `row` changed
+    /// putting `previous` back, unless the slot's baseline of `row` changed
     /// again since: a transaction that rolls back undoes its own reads and
     /// writes, not a later one's.
     fn restore(
         &mut self,
         row: RowKey,
-        origin: Origin,
+        slot: Slot,
         standing: Option<u64>,
         previous: Option<SnapshotEntry>,
     ) {
         let current = self
             .entries
             .get(&row)
-            .and_then(|baselines| baselines.get(&origin))
+            .and_then(|baselines| baselines.get(&slot))
             .map(|entry| entry.sequence);
         if current != standing {
             return;
         }
-        self.take(&row, origin);
+        self.take(&row, slot);
         if let Some(previous) = previous {
-            self.put(row, origin, previous);
+            self.put(row, slot, previous);
         }
     }
 
@@ -199,12 +240,12 @@ fn row_key_for_model<M: Model>(model: &M) -> Option<RowKey> {
     Some((TypeId::of::<M>(), key))
 }
 
-/// What `read` takes from `model`'s baseline, read under the store's lock;
-/// `None` when no baseline is known.
+/// What `read` takes from `model`'s baseline in the current task, read under
+/// the store's lock; `None` when no baseline is known.
 fn read_snapshot<M: Model, T>(model: &M, read: impl FnOnce(&SnapshotValues) -> T) -> Option<T> {
     let row = row_key_for_model(model)?;
     let store = snapshot_store().read();
-    store.get(&row).map(read)
+    store.get(&row, current_task()).map(read)
 }
 
 fn capture_snapshot<M: Model>(model: &M) -> SnapshotValues {
@@ -227,20 +268,31 @@ pub(crate) fn remember_model_from<M: Model>(model: &M, origin: Origin) {
     }
 }
 
-/// Set the pool `origin`'s baseline of `row`, or drop it for `None`.
+/// Set the pool `origin`'s baseline of `row`, or drop it for `None`, for the
+/// current task and for the shared one, which a task that never read the row
+/// falls back to.
 ///
 /// A row read or written inside a transaction is only what the database
-/// holds once it commits, so if it rolls back instead, the baseline this
-/// replaced comes back, unless the pool's baseline of the row changed again
+/// holds once it commits, so if it rolls back instead, the baselines this
+/// replaced come back, unless the slot's baseline of the row changed again
 /// in the meantime.
 fn set_baseline(row: RowKey, origin: Origin, values: Option<SnapshotValues>) {
-    let (previous, standing) = snapshot_store()
-        .write()
-        .replace(row.clone(), origin, values);
+    let own = current_task().map(|task| (origin, Some(task)));
+    let mut store = snapshot_store().write();
+    let undo: Vec<_> = own
+        .into_iter()
+        .chain([(origin, None)])
+        .map(|slot| {
+            let (previous, standing) = store.replace(row.clone(), slot, values.clone());
+            (slot, standing, previous)
+        })
+        .collect();
+    drop(store);
     crate::cache::undo_on_rollback(move || {
-        snapshot_store()
-            .write()
-            .restore(row, origin, standing, previous);
+        let mut store = snapshot_store().write();
+        for (slot, standing, previous) in undo.into_iter().rev() {
+            store.restore(row.clone(), slot, standing, previous);
+        }
     });
 }
 
@@ -256,35 +308,43 @@ pub(crate) fn forget_model_from<M: Model>(model: &M, origin: Origin) {
     }
 }
 
-/// Forget every dirty-tracking baseline for one model type.
+/// Forget every dirty-tracking baseline for one model type: the current
+/// task's and the shared ones. Another task's stay, as that task's copies
+/// were read before this write.
 pub fn invalidate_model<M: Model>() {
     let model_type = TypeId::of::<M>();
+    let task = current_task();
     let mut store = snapshot_store().write();
     let keys: Vec<_> = store
         .entries
         .iter()
         .filter(|((type_id, _), _)| *type_id == model_type)
-        .flat_map(|(row, baselines)| baselines.keys().map(move |origin| (row.clone(), *origin)))
+        .flat_map(|(row, baselines)| {
+            baselines
+                .keys()
+                .filter(|(_, owner)| owner.is_none() || *owner == task)
+                .map(move |slot| (row.clone(), *slot))
+        })
         .collect();
     let mut undo = Vec::with_capacity(keys.len());
-    for (row, origin) in keys {
-        let previous = store.take(&row, origin);
-        let standing = store.insert(row.clone(), origin, None);
-        undo.push((row, origin, standing, previous));
+    for (row, slot) in keys {
+        let previous = store.take(&row, slot);
+        let standing = store.insert(row.clone(), slot, None);
+        undo.push((row, slot, standing, previous));
     }
     drop(store);
     let mut undo = InvalidatedBaselines(undo);
     crate::cache::undo_on_rollback(move || {
         let mut store = snapshot_store().write();
-        for (row, origin, standing, previous) in undo.0.drain(..) {
-            store.restore(row, origin, Some(standing), previous);
+        for (row, slot, standing, previous) in undo.0.drain(..) {
+            store.restore(row, slot, Some(standing), previous);
         }
     });
 }
 
 /// A committed invalidation forgets its tombstones. Until then they retain
 /// mutation identities so rollback cannot overwrite a newer baseline.
-struct InvalidatedBaselines(Vec<(RowKey, Origin, u64, Option<SnapshotEntry>)>);
+struct InvalidatedBaselines(Vec<(RowKey, Slot, u64, Option<SnapshotEntry>)>);
 
 impl Drop for InvalidatedBaselines {
     fn drop(&mut self) {
@@ -292,13 +352,13 @@ impl Drop for InvalidatedBaselines {
             return;
         }
         let mut store = snapshot_store().write();
-        for (row, origin, standing, _) in self.0.drain(..) {
+        for (row, slot, standing, _) in self.0.drain(..) {
             let current = store
                 .entries
                 .get(&row)
-                .and_then(|baselines| baselines.get(&origin));
+                .and_then(|baselines| baselines.get(&slot));
             if current.is_some_and(|entry| entry.sequence == standing) {
-                store.take(&row, origin);
+                store.take(&row, slot);
             }
         }
     }

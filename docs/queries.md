@@ -844,7 +844,7 @@ TideORM provides full-text search capabilities across PostgreSQL (tsvector/tsque
 Enable the feature explicitly when you need the full-text search API:
 
 ```toml
-tideorm = { version = "0.17.3", features = ["postgres", "fulltext"] }
+tideorm = { version = "0.17.4", features = ["postgres", "fulltext"] }
 ```
 
 ### Search Basics
@@ -1179,6 +1179,8 @@ applies optimizations based on your database:
 | CTEs | ✅ | ✅ (8.0+) | ✅ (3.8+) |
 | Full-Text Search | ✅ | ✅ | ✅ (FTS5) |
 | Schemas | ✅ | ✅ | ❌ |
+| `DISTINCT ON` | ✅ | ❌ | ❌ |
+| Row Locks (`lock_for_update`) | ✅ | ✅ | ❌ (locks the whole database) |
 
 ---
 
@@ -1386,7 +1388,8 @@ fn error_response(e: &Error) -> (u16, JsonValue) {
 
 - **What the client sees.** An error's `Display` text can hold the server's
   message, table, column and constraint names and SQL; `log_format()` adds the
-  query and its context. Send `code()` (`TIDE_NOT_FOUND`, `TIDE_VALIDATION`, ..),
+  query and its context, whose conditions show `?` for the values you filtered
+  by (use `debug()` on the query to see them). Send `code()` (`TIDE_NOT_FOUND`, `TIDE_VALIDATION`, ..),
   which does not change between releases, and keep the rest in your logs.
   Validation messages are written for users, so they can go out as they are.
 - **The database is unavailable.** Every failure to open a connection is an

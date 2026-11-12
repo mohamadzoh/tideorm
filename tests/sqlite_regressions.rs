@@ -26,6 +26,9 @@ mod cache;
 mod databases;
 #[path = "sqlite_regressions/derive.rs"]
 mod derive;
+#[cfg(feature = "dirty-tracking")]
+#[path = "sqlite_regressions/dirty_tracking.rs"]
+mod dirty_tracking;
 #[cfg(feature = "encrypted-fields")]
 #[path = "sqlite_regressions/encryption.rs"]
 mod encryption;

@@ -1,4 +1,4 @@
-error: has_one relations require #[tideorm(foreign_key = "...")]
+error: has_one relations require #[tideorm(foreign_key = "...")], such as foreign_key = "user_id"
   --> tests/ui/invalid_relation_missing_has_one_foreign_key.rs:15:5
    |
 15 |     profile: HasOne<Profile>,

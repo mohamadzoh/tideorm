@@ -44,7 +44,8 @@ pub(crate) struct BuildContext {
     pub(crate) has_many_files: Vec<String>,
     pub(crate) searchable_fields: Vec<String>,
     /// `#[validate(..)]` rules, per field that declares any: columns and `skip`
-    /// fields alike, since a rule only reads the field's value.
+    /// fields alike, since a rule only reads the field's value. Each is a
+    /// statement of `Validate::validate` adding its failures to `errors`.
     pub(crate) validation_rules: Vec<(Ident, Vec<TokenStream2>)>,
     /// Errors in attributes the rest of the model does not depend on, reported
     /// beside the generated code rather than instead of it, so a typo in one
@@ -201,7 +202,7 @@ impl BuildContext {
             .collect();
 
         validate_primary_key_fields(&input.ident, &db_fields, input.tokenize)?;
-        validate_relation_fields(&fields)?;
+        validate_relation_fields(&input.ident, &fields)?;
         validate_index_definitions(&indexes, &db_fields)?;
 
         let resolved_encrypted_fields =

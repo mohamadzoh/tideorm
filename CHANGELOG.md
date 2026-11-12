@@ -5,6 +5,115 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.4] - 2026-11-12
+
+### Added
+
+- `#[validate(custom = "function")]` (or `custom = function`) calls the function with a
+  reference to the field and records the error it returns, any `Display` type, as the field's
+  message. It runs wherever the other rules do, `insert_all()` included. It used to be a compile
+  error.
+- The pivot of a `has_many_through` relation defaults to its pivot model's table, the only one
+  it can be; `pivot = ".."` may be left out.
+- `DbFailureKind::ExclusionViolation`, for PostgreSQL's `EXCLUDE` constraints (SQLSTATE
+  `23P01`), such as overlapping reservations. It is a constraint violation, never retried; it
+  used to be unclassified.
+- Book pages on testing an application (a database per test, fixtures, rolled-back tests, one
+  test on several backends) and on troubleshooting common mistakes, a section on nested
+  transactions, and the environment variables TideORM reads.
+
+### Changed
+
+- An error's context (`Error::context()`, `log_format()`) leaves the caller's filter values out
+  (`email = ?`), since it is written to logs; `debug()` still shows them.
+- Connecting with a URL for a backend whose feature the build leaves out fails with
+  `Error::Configuration` naming the feature to enable, instead of a connection error that did not.
+- Compile errors: a model with no primary key says composite keys are allowed; a relation missing
+  a key names the conventional one (`foreign_key = "user_id"`); a relation key a model lacks is
+  reported at the relation field instead of the model attribute; `#[tideorm::model]` with a
+  `#[derive(Model)]` below it is one error instead of a page of conflicting implementations; a
+  type that is not a model, used where one is required, says so and how to make it one.
+- The trait `#[tideorm::scopes]` generates, and each of its methods, carry documentation (the
+  scope's own doc comments), so a crate with `#![deny(missing_docs)]` compiles.
+- `tideorm` requires exactly its own version of `tideorm-macros`, whose generated code it must
+  match.
+- `GlobalProfiler` and `GlobalStats` appear in the API documentation.
+- A query cache hit under the LRU strategy (the default) takes only the cache's shared lock: it
+  marks the entry with an atomic access stamp instead of pushing a new eviction candidate under
+  the write lock, so concurrent readers no longer queue behind each other.
+- A `.cache(..)` query while the cache is disabled skips the cache key, the invalidation
+  checkpoint and the table list it would only have used to store its rows.
+- An encrypted field is sealed straight from its serialized text, without first copying it into
+  a `serde_json::Value`.
+- On PostgreSQL, a statement evicted from a connection's full statement cache is closed in the
+  round trip of the statement that evicts it (after an explicit prepare, of the next statement
+  run), not in a round trip of its own.
+- A pool hands out the idle connection released last, not the one idle longest. Under a light
+  load a few warm connections serve every checkout, with their statements prepared and no
+  checkout ping, and the others reach `idle_timeout` and close. A checkout that finds a free
+  slot no longer allocates a listener for the pool closing.
+- On SQLite, returning a connection to the pool after its statements finished no longer waits
+  for a round trip to the connection's worker thread. A text parameter is copied once instead
+  of twice, and a UUID stored as text decodes without copying it.
+- On PostgreSQL, the first run of a statement takes one round trip instead of two: its parse,
+  description and execution go out together, and its types are looked up afterwards only when
+  its result holds a type the connection has not met yet. With the statement cache off
+  (`statement_cache_capacity(0)`) that is every run.
+- On SQLite, a large result's rows leave the connection's worker thread in batches of up to 64
+  instead of one at a time, which about halves the time a large `fetch_all` takes per row.
+
+### Fixed
+
+- The `force_sync` refusal in production read "TIDEORM_ENV is" followed by a run of spaces.
+- A `Migrator` holding two migrations of one version refuses every operation before it runs
+  anything. It used to run both, and on MySQL and MariaDB the second one's DDL stayed when the
+  ledger refused its row.
+- Dirty tracking keeps its baselines per async task (Tokio or async-std). Two tasks editing one
+  row side by side, such as two requests, each compare with the copy they read or wrote, so one
+  task's `update()` or `update_all()` no longer changes what `changed_fields()`,
+  `original_value()`, `is_dirty()` and `is_field_dirty()` report in the other. A task that did
+  not read the row, or code outside any task, compares with the latest baseline, as before.
+  Models need no change.
+- A password passed as a URL query parameter whose key is percent-encoded (`?pass%77ord=..`,
+  which the PostgreSQL driver reads as `password`) is masked in connection errors and `{:?}`
+  output, as is a client key passed as `?sslkey=..`.
+- `{:?}` of the drivers' `PgConnectOptions` and `MySqlConnectOptions` no longer prints the password
+  or a client key held in memory, and the PostgreSQL driver's warning about an unknown URL
+  parameter names only the key, not its value.
+- On MySQL and MariaDB, a character set, collation or time zone that is not a plain name (letters,
+  digits and `_`, plus `+ - : /` in a time zone) fails the connection with
+  `Error::Configuration`, instead of being written into the `SET` each connection runs.
+- On MySQL and MariaDB, each connection takes `NO_BACKSLASH_ESCAPES` out of its session's SQL
+  mode. SQL written for MySQL escapes with backslashes, so on a server whose global SQL mode has
+  it a string literal TideORM writes, such as a migration's column default, was read with a
+  different value or ended early.
+- On MySQL and MariaDB, a migration or seed lock name that would pass MySQL's 64 characters
+  takes a digest of the database name instead of cutting it, so two databases whose names share
+  their first 45 characters no longer wait on each other. Such a database's lock name changes,
+  so do not run migrations from this version and an earlier one at once.
+- Lowering `QueryCache::set_max_entries`, `set_max_size_bytes` or the limits given to
+  `apply_config` evicts entries at once, instead of only when the next entry is stored.
+- A pool's maintenance pass no longer restarts the idle time of the connections it keeps, so
+  `idle_timeout` closes a connection that sat idle that long, and one idle for a second or more
+  is pinged before a checkout hands it out. `num_idle()` no longer reports a huge number for a
+  moment while a connection is returned and taken at once.
+- On PostgreSQL, a `COPY` left the connection one reply behind when its `PgCopyIn` was dropped,
+  its `COPY .. TO STDOUT` stream was dropped before the end or refused by the server, or its
+  start was cancelled, so later statements read the replies of earlier ones. The next statement
+  now finishes the copy first; after a dropped `PgCopyIn` it still reports the abort once, as
+  documented.
+- On PostgreSQL, a statement prepare cancelled before the server answered left the statement
+  open on the server until the connection closed; it is now closed with the next statement.
+- On PostgreSQL, an empty binary `jsonb`, `ltree` or `lquery` value, or an `lquery` star level
+  followed by anything but braces (`*a`), panicked instead of failing to decode; an `lquery`
+  level with an open bound (`*{2,}`, `*{,3}`) now decodes.
+- On SQLite, a cached statement whose column count changed under it, such as a `SELECT *` run
+  again after `ALTER TABLE .. ADD COLUMN`, crashed the connection's worker; it now reads the new
+  columns.
+- On MySQL and MariaDB, a query that reads one row reads the rest of the server's reply before
+  returning it, so an error the server sends after the first row fails that query. It used to
+  fail the next statement on the connection, or close the connection as the pool took it back.
+
 ## [0.17.3] - 2026-11-11
 
 ### Breaking Changes

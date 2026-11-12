@@ -118,3 +118,53 @@ fn exact_validation_compares_fractional_scientific_and_over_precision_bounds() {
         .is_some()
     );
 }
+
+fn not_reserved(name: &str) -> Result<(), String> {
+    match name {
+        "admin" | "root" => Err(format!("'{name}' is reserved")),
+        _ => Ok(()),
+    }
+}
+
+fn even(seats: &Option<i64>) -> Result<(), &'static str> {
+    match seats {
+        Some(seats) if seats % 2 != 0 => Err("must be even"),
+        _ => Ok(()),
+    }
+}
+
+#[tideorm::model(table = "audit_custom_rules")]
+struct Account {
+    #[tideorm(primary_key)]
+    id: i64,
+    #[validate(custom = "not_reserved", max_length = 8)]
+    name: String,
+    #[validate(custom = even)]
+    seats: Option<i64>,
+}
+
+/// `custom` calls its function with the field, the error it returns being the
+/// message, beside the field's other rules.
+#[test]
+fn custom_rules_call_their_function() {
+    use tideorm::validation::Validate;
+
+    let mut account = Account {
+        id: 1,
+        name: "ada".into(),
+        seats: Some(2),
+    };
+    account.validate().unwrap();
+
+    account.name = "administrator".into();
+    account.seats = None;
+    let errors = account.validate().unwrap_err();
+    assert_eq!(errors.field_errors("name").len(), 1, "{errors:?}");
+    assert!(errors.field_errors("seats").is_empty());
+
+    account.name = "admin".into();
+    account.seats = Some(3);
+    let errors = account.validate().unwrap_err();
+    assert_eq!(errors.field_errors("name"), ["'admin' is reserved"]);
+    assert_eq!(errors.field_errors("seats"), ["must be even"]);
+}

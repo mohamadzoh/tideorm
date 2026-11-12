@@ -43,14 +43,14 @@ pub(crate) fn encode_payload(key: &[u8; 32], plaintext: &[u8]) -> Result<String>
     ))
 }
 
-pub(crate) fn encrypt_json_value_for_attribute(
-    value: &serde_json::Value,
+/// Seal a JSON document's text for `table_name.column_name`.
+pub(crate) fn encrypt_json_for_attribute(
+    plaintext: &[u8],
     table_name: &str,
     column_name: &str,
 ) -> Result<String> {
-    let plaintext = serde_json::to_vec(value)?;
     let key = field_key(table_name, column_name, "serialization")?;
-    encode_payload(&key, &plaintext)
+    encode_payload(&key, plaintext)
 }
 
 pub(crate) fn decrypt_json_value_for_attribute(

@@ -62,7 +62,17 @@ fn build_relation_assignment(ctx: &BuildContext, field: &ModelField) -> syn::Res
                 _ => {
                     let related_key = field.related_key.as_deref().expect("validated related_key");
                     let related_local_key = field.owner_key.as_deref().unwrap_or("id");
-                    let pivot_table = field.pivot.as_deref().expect("validated pivot");
+                    // The pivot rows are read through the pivot model, so its
+                    // table is the pivot's unless one is named.
+                    let pivot_table = match field.pivot.as_deref() {
+                        Some(pivot) => quote!(#pivot),
+                        None => {
+                            let pivot_ty = field.related_types().into_iter().nth(1);
+                            let pivot_ty =
+                                pivot_ty.expect("relation checks require the pivot type");
+                            quote!(<#pivot_ty as ::tideorm::model::ModelMeta>::table_name())
+                        }
+                    };
                     quote!(::tideorm::relations::HasManyThrough::new(
                         #foreign_key,
                         #related_key,

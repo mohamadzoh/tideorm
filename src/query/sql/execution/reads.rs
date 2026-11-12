@@ -165,13 +165,16 @@ impl<M: Model> QueryBuilder<M> {
         // a hit would hide rows the transaction itself has already written.
         // A model whose own serde skips or converts a stored field is not
         // cached: the copy read back would lack those values.
-        let cache_fill = if self.clauses.cache_options.is_some()
+        let cache = (self.clauses.cache_options.is_some()
             && M::__serde_round_trips()
             && !self.clauses.lock_for_update
-            && !self.runs_in_transaction()
-        {
-            let cache = crate::cache::QueryCache::global();
+            && !self.runs_in_transaction())
+        .then(crate::cache::QueryCache::global);
+        if let Some(cache) = cache {
             cache.warn_once_if_disabled();
+        }
+        // A disabled cache neither serves nor stores, so skip its key and fill point.
+        let cache_fill = if let Some(cache) = cache.filter(|cache| cache.is_enabled()) {
             let key = self.generate_cache_key();
             if let Some(cached) = cache.get::<Vec<M>>(&key) {
                 let connection = self.current_db()?.__get_connection()?;

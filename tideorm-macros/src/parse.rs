@@ -391,7 +391,7 @@ pub(crate) fn type_string(ty: &Type) -> String {
 
 /// The last path segment `ty` names, seen through references, parentheses and
 /// the invisible groups macro substitution wraps types in.
-fn path_segment(ty: &Type) -> Option<&PathSegment> {
+pub(crate) fn path_segment(ty: &Type) -> Option<&PathSegment> {
     match ty {
         Type::Group(group) => path_segment(&group.elem),
         Type::Paren(paren) => path_segment(&paren.elem),

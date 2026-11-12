@@ -9,3 +9,5 @@
 - [Relations](relations.md)
 - [Entity Manager](entity-manager.md)
 - [Migrations](migrations.md)
+- [Testing](testing.md)
+- [Troubleshooting](troubleshooting.md)

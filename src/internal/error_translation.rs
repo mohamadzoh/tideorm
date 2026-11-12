@@ -25,7 +25,7 @@ fn runtime_failure(runtime: &RuntimeErr) -> DbFailure {
 }
 
 #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
-fn database_failure_kind(kind: crate::orm::driver::error::ErrorKind) -> DbFailureKind {
+pub(super) fn database_failure_kind(kind: crate::orm::driver::error::ErrorKind) -> DbFailureKind {
     use crate::orm::driver::error::ErrorKind;
 
     match kind {
@@ -46,7 +46,8 @@ fn database_failure_kind(kind: crate::orm::driver::error::ErrorKind) -> DbFailur
         ErrorKind::StatementTimeout => DbFailureKind::StatementTimeout,
         ErrorKind::TooManyConnections => DbFailureKind::ConnectionTimeout,
         ErrorKind::ConnectionClosed => DbFailureKind::ConnectionClosed,
-        ErrorKind::ExclusionViolation | ErrorKind::Other => DbFailureKind::Unclassified,
+        ErrorKind::ExclusionViolation => DbFailureKind::ExclusionViolation,
+        ErrorKind::Other => DbFailureKind::Unclassified,
     }
 }
 

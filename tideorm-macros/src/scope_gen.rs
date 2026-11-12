@@ -241,10 +241,15 @@ pub(crate) fn generate_query_scope_support(item_impl: ItemImpl) -> syn::Result<T
         ));
     }
 
+    let trait_doc = format!(
+        "The query scopes of [`{model_ident}`], from its `#[tideorm::scopes]` block, \
+         callable on `QueryBuilder<{model_ident}>`."
+    );
     Ok(quote! {
         #item_impl
 
         #(#cfg_attrs)*
+        #[doc = #trait_doc]
         pub trait #trait_ident {
             #(#trait_methods)*
         }
@@ -375,8 +380,12 @@ fn generate_scope_method(
         #[must_use]
         fn #method_ident(self #(, #forwarded_inputs)*) -> ::tideorm::QueryBuilder<#model_ty>
     };
+    let docs = method
+        .attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("doc"));
     Ok(GeneratedScopeMethod {
-        trait_method: quote!(#signature;),
+        trait_method: quote!(#(#docs)* #signature;),
         extension_method: quote! {
             #signature {
                 #model_ty::#method_ident(self #(, #forwarded_args)*)

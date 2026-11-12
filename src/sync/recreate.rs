@@ -16,7 +16,8 @@ pub(super) fn refuse_in_production(environment: Option<&str>, allowed: bool) -> 
     let production = environment.is_some_and(|name| name.trim().eq_ignore_ascii_case("production"));
     if production && !allowed {
         return Err(crate::Error::configuration(
-            "force_sync drops and recreates every registered table, and TIDEORM_ENV is              production; set TIDEORM_ALLOW_FORCE_SYNC=true to run it anyway",
+            "force_sync drops and recreates every registered table, and TIDEORM_ENV is \
+             production; set TIDEORM_ALLOW_FORCE_SYNC=true to run it anyway",
         ));
     }
     Ok(())

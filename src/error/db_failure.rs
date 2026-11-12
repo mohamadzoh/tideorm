@@ -25,6 +25,9 @@ pub enum DbFailureKind {
     NotNullViolation,
     /// `CHECK` constraint violation (SQLSTATE `23514`).
     CheckViolation,
+    /// PostgreSQL `EXCLUDE` constraint violation, such as overlapping
+    /// reservations (SQLSTATE `23P01`).
+    ExclusionViolation,
     /// A value does not fit its column: too long, out of range, or not valid
     /// for the column's type (SQLSTATE class `22`, such as `22001`).
     InvalidValue,
@@ -76,6 +79,7 @@ impl DbFailureKind {
             Self::ForeignKeyViolation => "foreign key constraint violation",
             Self::NotNullViolation => "not-null constraint violation",
             Self::CheckViolation => "check constraint violation",
+            Self::ExclusionViolation => "exclusion constraint violation",
             Self::InvalidValue => "invalid value",
             Self::SyntaxError => "SQL syntax error",
             Self::UndefinedColumn => "undefined column",
@@ -105,6 +109,7 @@ impl DbFailureKind {
                 | Self::ForeignKeyViolation
                 | Self::NotNullViolation
                 | Self::CheckViolation
+                | Self::ExclusionViolation
         )
     }
 

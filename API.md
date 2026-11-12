@@ -156,7 +156,7 @@ Default features: `postgres`, `runtime-tokio`. To use only SQLite:
 
 ```toml
 [dependencies]
-tideorm = { version = "0.17.3", default-features = false, features = ["sqlite", "runtime-tokio"] }
+tideorm = { version = "0.17.4", default-features = false, features = ["sqlite", "runtime-tokio"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 

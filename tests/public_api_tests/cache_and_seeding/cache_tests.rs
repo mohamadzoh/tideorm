@@ -143,3 +143,24 @@ fn test_cache_key_builder_hash() {
 
     assert_ne!(hash1, hash3);
 }
+
+#[test]
+fn test_query_cache_lowered_limits_evict_at_once() {
+    let cache = enabled_cache(10, CacheStrategy::FIFO);
+    for key in ["a", "b", "c", "d"] {
+        cache.set(key, &key.repeat(10), None, "model").unwrap();
+    }
+
+    cache.set_max_entries(2);
+    assert_eq!(cache.len(), 2);
+    assert!(cache.contains("c") && cache.contains("d"));
+
+    let one_entry = cache.stats().size_bytes / 2;
+    cache.set_max_size_bytes(one_entry);
+    assert_eq!(cache.len(), 1);
+    assert!(cache.contains("d"));
+    assert!(cache.stats().size_bytes <= one_entry);
+
+    cache.apply_config(CacheConfig::default().enabled(true).max_entries(0));
+    assert!(cache.is_empty());
+}

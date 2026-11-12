@@ -13,17 +13,18 @@ pub(crate) fn encrypt_model_field<T: Serialize>(
     field_name: &str,
     column_name: &str,
 ) -> Result<Option<String>> {
-    let json = serde_json::to_value(value).map_err(|error| {
+    // Straight to text: a `serde_json::Value` in between would copy the field.
+    let plaintext = serde_json::to_vec(value).map_err(|error| {
         Error::conversion(format!(
             "Failed to serialize encrypted field '{}' before write: {}",
             encrypted_field_label(field_name, column_name),
             error
         ))
     })?;
-    if json.is_null() {
+    if plaintext == b"null" {
         return Ok(None);
     }
-    seal(&json, table_name, field_name, column_name).map(Some)
+    seal(&plaintext, table_name, field_name, column_name).map(Some)
 }
 
 /// The field a column's text `stored` decrypts into; `None` for NULL when
@@ -84,13 +85,8 @@ fn decrypt_text(
         .map_err(|error| annotate_crypto_error(error, "decrypt", field_name, column_name))
 }
 
-fn seal(
-    document: &serde_json::Value,
-    table_name: &str,
-    field_name: &str,
-    column_name: &str,
-) -> Result<String> {
-    encrypted::encrypt_json_value_for_attribute(document, table_name, column_name)
+fn seal(plaintext: &[u8], table_name: &str, field_name: &str, column_name: &str) -> Result<String> {
+    encrypted::encrypt_json_for_attribute(plaintext, table_name, column_name)
         .map_err(|error| annotate_crypto_error(error, "encrypt", field_name, column_name))
 }
 
@@ -142,7 +138,13 @@ fn encrypt_batch_value<M: ModelMeta>(
     if document.is_null() {
         return Ok(value);
     }
-    seal(&document, M::table_name(), field_name, column_name).map(crate::DbValue::from)
+    seal(
+        &serde_json::to_vec(&document)?,
+        M::table_name(),
+        field_name,
+        column_name,
+    )
+    .map(crate::DbValue::from)
 }
 
 fn json_kind(value: &serde_json::Value) -> &'static str {
