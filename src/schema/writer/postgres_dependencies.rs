@@ -7,6 +7,18 @@ pub(super) struct PostgresObjects {
     pub(super) indexes: Vec<String>,
     pub(super) postlude: Vec<String>,
     pub(super) nodes: BTreeMap<(String, i64), Vec<String>>,
+    domain_checks: Vec<DomainCheck>,
+}
+
+/// A domain's CHECK. PostgreSQL 16.16 and 18.7 refuse `ALTER DOMAIN .. ADD CONSTRAINT` once a
+/// routine takes a row type holding the domain, so a valid check goes into its `CREATE DOMAIN`,
+/// and is added afterwards only when the objects it calls depend on the domain.
+struct DomainCheck {
+    id: i64,
+    domain: i64,
+    validated: bool,
+    clause: String,
+    statement: String,
 }
 
 pub(super) async fn postgres_dependencies(conn: &impl ConnectionTrait) -> Result<PostgresObjects> {
@@ -166,14 +178,26 @@ pub(super) async fn postgres_dependencies(conn: &impl ConnectionTrait) -> Result
          FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace
          WHERE t.typtype='d' AND t.typdefaultbin IS NOT NULL
            AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
-           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid='pg_catalog.pg_type'::regclass AND d.objid=t.oid AND d.deptype='e')
-         UNION ALL
-         SELECT format('ALTER DOMAIN %I.%I ADD CONSTRAINT %I %s', n.nspname, t.typname, c.conname, pg_catalog.pg_get_constraintdef(c.oid))
+           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid='pg_catalog.pg_type'::regclass AND d.objid=t.oid AND d.deptype='e')",
+        Vec::new(), &["definition"]).await?;
+    let mut domain_checks = Vec::new();
+    for row in query(conn, DatabaseType::Postgres,
+        "SELECT c.oid AS id, t.oid AS domain, c.convalidated AS validated,
+                format(' CONSTRAINT %I %s', c.conname, pg_catalog.pg_get_constraintdef(c.oid)) AS clause,
+                format('ALTER DOMAIN %I.%I ADD CONSTRAINT %I %s', n.nspname, t.typname, c.conname, pg_catalog.pg_get_constraintdef(c.oid)) AS statement
          FROM pg_catalog.pg_constraint c JOIN pg_catalog.pg_type t ON t.oid=c.contypid
          JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace
          WHERE c.contype='c' AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
-           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid='pg_catalog.pg_type'::regclass AND d.objid=t.oid AND d.deptype='e')",
-        Vec::new(), &["definition"]).await?;
+           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid='pg_catalog.pg_type'::regclass AND d.objid=t.oid AND d.deptype='e')
+         ORDER BY n.nspname, t.typname, c.conname", Vec::new()).await? {
+        domain_checks.push(DomainCheck {
+            id: get(&row, "id")?,
+            domain: get(&row, "domain")?,
+            validated: get(&row, "validated")?,
+            clause: get(&row, "clause")?,
+            statement: get(&row, "statement")?,
+        });
+    }
     let mut nodes = BTreeMap::new();
     let mut indexes = Vec::new();
     for row in rows {
@@ -254,6 +278,7 @@ pub(super) async fn postgres_dependencies(conn: &impl ConnectionTrait) -> Result
         nodes,
         indexes,
         postlude,
+        domain_checks,
     })
 }
 
@@ -262,7 +287,11 @@ pub(super) fn literal(value: &str) -> String {
 }
 
 impl PostgresObjects {
-    pub(super) async fn ordered(mut self, conn: &impl ConnectionTrait) -> Result<Vec<String>> {
+    /// The nodes' statements in dependency order, and the postlude to run after the tables.
+    pub(super) async fn ordered(
+        mut self,
+        conn: &impl ConnectionTrait,
+    ) -> Result<(Vec<String>, Vec<String>)> {
         // Attribute defaults are restored later. Generated expressions and
         // CHECKs without routine dependencies are part of CREATE TABLE. Checks
         // calling user routines are restored after tables to avoid row-type cycles.
@@ -282,14 +311,14 @@ impl PostgresObjects {
                     o.kind='type' AND r.kind IN ('routine','table') AND EXISTS (
                         SELECT 1 FROM pg_catalog.pg_type t WHERE t.oid=o.oid AND t.typtype='d'))
                 UNION
-                SELECT CASE WHEN c.contypid <> 0 THEN 'type' ELSE 'table' END,
-                       CASE WHEN c.contypid <> 0 THEN c.contypid ELSE c.conrelid END, r.kind, r.oid
+                SELECT CASE WHEN c.contypid <> 0 THEN 'check' ELSE 'table' END,
+                       CASE WHEN c.contypid <> 0 THEN c.oid ELSE c.conrelid END, r.kind, r.oid
                 FROM pg_catalog.pg_constraint c
                 JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_constraint'::regclass AND d.objid=c.oid
                 JOIN objects r ON r.classid=d.refclassid AND r.oid=d.refobjid
-                WHERE c.contype='c' AND c.contypid=0 AND c.convalidated AND NOT EXISTS (
+                WHERE c.contype='c' AND (c.contypid <> 0 OR (c.convalidated AND NOT EXISTS (
                     SELECT 1 FROM pg_catalog.pg_depend f WHERE f.classid='pg_catalog.pg_constraint'::regclass
-                    AND f.objid=c.oid AND f.refclassid='pg_catalog.pg_proc'::regclass)
+                    AND f.objid=c.oid AND f.refclassid='pg_catalog.pg_proc'::regclass)))
                 UNION
                 SELECT 'table', rw.ev_class, r.kind, r.oid FROM pg_catalog.pg_rewrite rw
                 JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_rewrite'::regclass AND d.objid=rw.oid
@@ -317,6 +346,30 @@ impl PostgresObjects {
                 dependencies.entry(owner).or_default().push(dependency);
             }
         }
+        for check in std::mem::take(&mut self.domain_checks) {
+            let domain = ("type".to_string(), check.domain);
+            let calls: Vec<_> = dependencies
+                .remove(&("check".to_string(), check.id))
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|dependency| *dependency != domain)
+                .collect();
+            let inline = check.validated
+                && !calls
+                    .iter()
+                    .any(|call| depends_on(&dependencies, call, &domain));
+            match self
+                .nodes
+                .get_mut(&domain)
+                .and_then(|node| node.first_mut())
+            {
+                Some(create) if inline => {
+                    create.push_str(&check.clause);
+                    dependencies.entry(domain).or_default().extend(calls);
+                }
+                _ => self.postlude.push(check.statement),
+            }
+        }
         let mut statements = self.prelude;
         while !self.nodes.is_empty() {
             let ready: Vec<_> = self
@@ -338,6 +391,25 @@ impl PostgresObjects {
                 statements.extend(self.nodes.remove(&key).unwrap());
             }
         }
-        Ok(statements)
+        Ok((statements, self.postlude))
     }
+}
+
+/// Whether `from` depends on `to`, directly or through other objects.
+fn depends_on(
+    dependencies: &BTreeMap<(String, i64), Vec<(String, i64)>>,
+    from: &(String, i64),
+    to: &(String, i64),
+) -> bool {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut pending = vec![from];
+    while let Some(key) = pending.pop() {
+        if key == to {
+            return true;
+        }
+        if seen.insert(key) {
+            pending.extend(dependencies.get(key).into_iter().flatten());
+        }
+    }
+    false
 }

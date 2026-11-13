@@ -40,6 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and later the same filter with an `i64`) failed with `22P03 incorrect binary data format`: the
   connection reused the statement it had prepared for the first type. Such a run now prepares a
   statement of its own (`tideorm-driver-postgres` 0.1.3).
+- A PostgreSQL schema export with a domain CHECK failed to replay on PostgreSQL 16.16 and 18.7
+  (`cannot alter type .. because function .. uses it`) when a function takes a row type holding
+  the domain: those releases refuse `ALTER DOMAIN .. ADD CONSTRAINT` then. The check is now
+  written into the domain's `CREATE DOMAIN`, after the routines it calls, and added afterwards
+  only when it is `NOT VALID` or the routines it calls depend on the domain.
 
 ## [0.17.4] - 2026-11-12
 

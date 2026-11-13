@@ -80,10 +80,9 @@ async fn introspect_postgres_catalog(conn: &impl ConnectionTrait) -> Result<Cata
     catalog
         .verbatim
         .extend(std::mem::take(&mut objects.indexes));
-    catalog
-        .constraints
-        .extend(std::mem::take(&mut objects.postlude));
-    catalog.definitions = objects.ordered(conn).await?;
+    let (definitions, postlude) = objects.ordered(conn).await?;
+    catalog.constraints.extend(postlude);
+    catalog.definitions = definitions;
     // Add local child checks first, then let parent additions recurse and
     // merge them. This preserves local/inherited ownership of matching checks.
     for checks in routine_checks.into_iter().rev() {
