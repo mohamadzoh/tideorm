@@ -2,10 +2,11 @@ error[E0277]: the trait bound `User: Default` is not satisfied
  --> tests/ui/invalid_skip_default.rs:8:19
   |
 8 |     let _: User = Default::default();
-  |                   ^^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `User`
+  |                   ^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
   |
-help: consider annotating `User` with `#[derive(Default)]`
+help: the trait `Default` is not implemented for `User`
+ --> tests/ui/invalid_skip_default.rs:1:1
   |
-1 + #[derive(Default)]
-2 | #[tideorm::model(table = "users", skip_default)]
-  |
+1 | #[tideorm::model(table = "users", skip_default)]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = note: this error originates in the attribute macro `tideorm::model` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -96,7 +96,6 @@ note: required by a bound in `tideorm::orm::entity::ActiveValue`
  --> $CARGO/tideorm-engine-$VERSION/src/entity/active_value.rs
   |
   | pub enum ActiveValue<V>
-  |          ----------- required by a bound in this enum
   | where
   |     V: Into<Value>,
   |        ^^^^^^^^^^^ required by this bound in `ActiveValue`
@@ -195,7 +194,6 @@ note: required by a bound in `tideorm::orm::entity::ActiveValue`
  --> $CARGO/tideorm-engine-$VERSION/src/entity/active_value.rs
   |
   | pub enum ActiveValue<V>
-  |          ----------- required by a bound in this enum
   | where
   |     V: Into<Value>,
   |        ^^^^^^^^^^^ required by this bound in `ActiveValue`
@@ -539,7 +537,6 @@ note: required by a bound in `tideorm::orm::entity::ActiveValue::Set`
   |        ^^^^^^^^^^^ required by this bound in `tideorm::orm::entity::ActiveValue::Set`
 ...
   |     Set(V),
-  |     --- required by a bound in this tuple variant
   = note: this error originates in the derive macro `tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: the trait bound `tideorm::orm::entity::Value: From<Status>` is not satisfied
@@ -615,7 +612,6 @@ note: required by a bound in `tideorm::orm::entity::ActiveValue::NotSet`
   |        ^^^^^^^^^^^ required by this bound in `tideorm::orm::entity::ActiveValue::NotSet`
 ...
   |     NotSet,
-  |     ------ required by a bound in this unit variant
   = note: this error originates in the derive macro `tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0599]: the method `is_not_set` exists for enum `tideorm::orm::entity::ActiveValue<Status>`, but its trait bounds were not satisfied
