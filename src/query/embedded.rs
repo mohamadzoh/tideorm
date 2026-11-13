@@ -28,6 +28,8 @@ pub(crate) trait Embedded: Send + Sync {
     fn hash_shape(&self, hasher: &mut dyn Hasher);
     /// Write its model's table and clauses, for `Debug`.
     fn debug(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result;
+    /// Why the project rules refuse raw SQL in it, if they do.
+    fn raw_sql_refusal(&self) -> Option<crate::Error>;
 }
 
 impl std::fmt::Debug for dyn Embedded {
@@ -70,6 +72,10 @@ impl<N: Model> Embedded for QueryBuilder<N> {
             .field("table", &N::table_name())
             .field("clauses", &self.clauses)
             .finish()
+    }
+
+    fn raw_sql_refusal(&self) -> Option<crate::Error> {
+        QueryBuilder::raw_sql_refusal(self)
     }
 }
 
@@ -135,6 +141,15 @@ impl Correlation {
 }
 
 impl Subquery {
+    /// Why the project rules refuse raw SQL in the query it embeds, if they do.
+    pub(crate) fn raw_sql_refusal(&self) -> Option<crate::Error> {
+        match &*self.0 {
+            SubqueryKind::Select { query, .. } => query.raw_sql_refusal(),
+            SubqueryKind::Related { related, .. } => related.raw_sql_refusal(),
+            SubqueryKind::Table { .. } => None,
+        }
+    }
+
     pub(crate) fn select(keyword: &'static str, query: impl Embedded + 'static) -> Self {
         Self(Arc::new(SubqueryKind::Select {
             keyword,

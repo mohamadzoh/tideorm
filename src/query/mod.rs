@@ -25,6 +25,7 @@ mod embedded;
 mod filters;
 mod or_clauses;
 mod predicates;
+mod rules;
 mod sql;
 mod structure;
 

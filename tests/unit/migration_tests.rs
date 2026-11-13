@@ -98,7 +98,7 @@ fn test_column_types_render_what_the_drivers_bind_and_decode() {
                 variants: vec!["happy".to_string().into(), "it's".to_string().into()],
             },
             "\"mood\"",
-            "ENUM('happy', 'it\\'s')",
+            "ENUM('happy', 'it''s')",
             "TEXT",
         ),
         (
@@ -140,8 +140,8 @@ fn test_default_value() {
     let path = DefaultValue::String(r"C:\temp\ it's".to_string());
     assert_eq!(path.to_sql(pg), r"E'C:\\temp\\ it\'s'");
     assert_eq!(path.to_sql(DatabaseType::SQLite), r"'C:\temp\ it''s'");
-    assert_eq!(path.to_sql(DatabaseType::MySQL), r"'C:\\temp\\ it\'s'");
-    assert_eq!(path.to_sql(DatabaseType::MariaDB), r"'C:\\temp\\ it\'s'");
+    assert_eq!(path.to_sql(DatabaseType::MySQL), r"'C:\\temp\\ it''s'");
+    assert_eq!(path.to_sql(DatabaseType::MariaDB), r"'C:\\temp\\ it''s'");
 }
 
 #[test]

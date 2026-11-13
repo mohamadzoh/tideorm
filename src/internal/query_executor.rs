@@ -20,6 +20,7 @@ impl QueryExecutor {
     where
         M: crate::model::Model,
     {
+        crate::rules::ensure_rows_allowed::<M>("all()", None)?;
         let connection = crate::database::__current_connection()?;
         let rows = run_statement(scoped_find::<M>().all(&connection.executor()), || {
             model_error_context::<M>("find_all()")
@@ -121,6 +122,10 @@ impl QueryExecutor {
         // which it already bounds both by.
         let offset = crate::query::page_offset(page, per_page)
             .map_err(|(field, message)| Error::validation(field, message))?;
+        crate::rules::ensure_rows_allowed::<M>(
+            format_args!("paginate(_, {per_page})"),
+            Some(per_page),
+        )?;
         let total = Self::count::<M>().await?;
         let mut select = scoped_find::<M>().limit(per_page).offset(offset);
         for pk_col in M::primary_key_columns() {

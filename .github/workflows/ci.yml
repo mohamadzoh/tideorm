@@ -240,6 +240,11 @@ jobs:
           cargo test --locked --package tideorm --test sqlite_regressions --no-default-features --features "sqlite,runtime-tokio,attachments,translations,fulltext,entity-manager,dirty-tracking,encrypted-fields"
           cargo test --locked --package tideorm --test developer_experience --no-default-features --features sqlite,runtime-tokio
 
+      # Builds a crate with a [rules] table in its tideorm.toml against this
+      # checkout, the only way to run the derive against a rules file.
+      - name: Run the project rules end to end
+        run: cargo test --locked --package tideorm --test project_rules --no-default-features --features sqlite,runtime-tokio
+
   # Integration targets that never touch a database. Targets are named
   # explicitly rather than using `--tests`, because the postgres, mysql and
   # mariadb integration targets all need a live server.

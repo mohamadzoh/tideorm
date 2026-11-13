@@ -5,6 +5,42 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.5] - 2026-11-13
+
+### Added
+
+- Project rules: a `[rules]` table in `tideorm.toml` sets limits every model and query is held
+  to, such as `max_columns`, `max_json_columns`, `sensitive_fields`, `max_relation_depth`,
+  `require_foreign_key_index`, `max_rows` or `forbid_raw_sql`, with `[rules.allow]` exempting
+  named models from named rules. Nothing is enforced without the table. A model that breaks a
+  rule makes connecting fail with every broken rule listed; a query that breaks one fails as it
+  runs; a mistake in the table is a compile error. See the book's Project Rules page.
+
+### Changed
+
+- MariaDB's statements are written by a SQL builder of their own instead of MySQL's
+  (`tideorm-engine` 0.1.3, `tideorm-sql-builder` 0.1.1): a shared row lock is
+  `LOCK IN SHARE MODE` on MariaDB and `FOR SHARE` on MySQL, and only MySQL writes `ROW(..)` in a
+  `VALUES` list. A clause the backend lacks is an error when the statement renders instead of
+  SQL the server refuses: `RETURNING` and a joined `UPDATE`'s `ORDER BY`/`LIMIT` on MySQL, an
+  aggregate's `FILTER` on MySQL and MariaDB, and `BIT_AND`/`BIT_OR`/`MD5` and
+  `UPDATE`/`DELETE .. ORDER BY/LIMIT` on SQLite.
+
+### Fixed
+
+- `array_remove` on a JSON array past 1 MiB failed on MariaDB (`1260 .. was cut by
+  JSON_ARRAYAGG()`), or kept only part of the array without strict mode: every MySQL and MariaDB
+  connection now raises `group_concat_max_len` to its maximum (`tideorm-driver-mysql` 0.1.4).
+  The elements it keeps are now put in their original order explicitly on both servers, not left
+  to `JSON_ARRAYAGG` (`tideorm-sql-builder` 0.1.1).
+- A quote in a string written into MySQL or MariaDB SQL, such as a migration's default or a
+  `debug()` preview, is doubled (`''`) instead of escaped as `\'`, which a server running with
+  `NO_BACKSLASH_ESCAPES` reads as the end of the literal (`tideorm-sql-builder` 0.1.1).
+- On PostgreSQL, a statement run again with a value of another type (`where_gt("price", 10000)`
+  and later the same filter with an `i64`) failed with `22P03 incorrect binary data format`: the
+  connection reused the statement it had prepared for the first type. Such a run now prepares a
+  statement of its own (`tideorm-driver-postgres` 0.1.3).
+
 ## [0.17.4] - 2026-11-12
 
 ### Added

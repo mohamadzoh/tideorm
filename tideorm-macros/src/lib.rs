@@ -15,6 +15,7 @@ mod model_trait;
 mod orm;
 mod parse;
 mod relation_gen;
+mod rules;
 mod scope_gen;
 mod serde_gen;
 mod serde_names;

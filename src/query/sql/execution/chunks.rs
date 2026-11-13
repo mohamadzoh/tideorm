@@ -173,6 +173,12 @@ impl<M: Model> QueryBuilder<M> {
     pub fn chunks(self, chunk_size: u64) -> Result<Chunks<M>> {
         self.ensure_query_is_executable()?;
         self.ensure_query_is_chunkable(chunk_size)?;
+        if self.clauses.rule_scope.checks_rows() {
+            crate::rules::ensure_rows_allowed::<M>(
+                format_args!("a batch of {chunk_size}"),
+                Some(chunk_size),
+            )?;
+        }
 
         let primary_key = Self::chunk_primary_key_column()?;
         self.ensure_chunk_key_is_original(primary_key)?;
@@ -186,6 +192,10 @@ impl<M: Model> QueryBuilder<M> {
             query = query.order_by(cursor_column.as_str(), order);
         }
         let joins_repeat_keys = !query.clauses.joins.is_empty();
+        // A batch that ends in a run of one key reads a row past the chunk size.
+        if query.clauses.rule_scope == crate::rules::RuleScope::Developer {
+            query.clauses.rule_scope = crate::rules::RuleScope::RowsChecked;
+        }
         Ok(Chunks {
             query: Some(query),
             chunk_size,

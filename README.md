@@ -21,6 +21,7 @@ A Rust ORM with field-declared relations and a fluent query builder.
 - **Several Databases at Once** - The global connection is only the default: `Database::connect(url)` opens more, and `db.scope(async { .. })` runs every model call inside it on that database, for tenants and replicas
 - **Query Builder** - Fluent filtering, OR groups, joins, unions, CTEs, and window functions
 - **Typed Results** - Aggregates read as the type you ask for (`sum::<Decimal>`, `min::<DateTime<Utc>>`), `pluck`/`value` read one column, `get_as::<T>()` reads rows into your own struct, and `paginate()` returns a page with its total
+- **Project Rules** - Opt-in limits in `tideorm.toml` (`max_columns = 20`, `max_json_columns = 2`, `forbid_raw_sql = true`, ..) that every model and query is held to, with per-model exceptions
 - **Profiling & Logging** - Built-in query logging plus execution counters and slow-query stats
 - **Data Lifecycle Tools** - Migrations, seeding, validation, callbacks, soft deletes, and transactions
 - **Entity Manager** - Optional persistence context for aggregate workflows and managed entity lifecycles
@@ -32,7 +33,7 @@ A Rust ORM with field-declared relations and a fluent query builder.
 
 ```toml
 [dependencies]
-tideorm = { version = "0.17.4", default-features = false, features = ["sqlite", "runtime-tokio"] }
+tideorm = { version = "0.17.5", default-features = false, features = ["sqlite", "runtime-tokio"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -177,7 +178,7 @@ Use model-level encrypted fields when you want selected persisted columns, such 
 
 ```toml
 [dependencies]
-tideorm = { version = "0.17.4", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
+tideorm = { version = "0.17.5", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
 ```
 
 ```rust,ignore
@@ -223,31 +224,31 @@ driver stack.
 ```toml
 [dependencies]
 # PostgreSQL
-tideorm = { version = "0.17.4", default-features = false, features = ["postgres", "runtime-tokio"] }
+tideorm = { version = "0.17.5", default-features = false, features = ["postgres", "runtime-tokio"] }
 
 # MySQL / MariaDB
-tideorm = { version = "0.17.4", default-features = false, features = ["mysql", "runtime-tokio"] }
+tideorm = { version = "0.17.5", default-features = false, features = ["mysql", "runtime-tokio"] }
 
 # SQLite
-tideorm = { version = "0.17.4", default-features = false, features = ["sqlite", "runtime-tokio"] }
+tideorm = { version = "0.17.5", default-features = false, features = ["sqlite", "runtime-tokio"] }
 
 # Enable attachments support explicitly
-tideorm = { version = "0.17.4", default-features = false, features = ["postgres", "runtime-tokio", "attachments"] }
+tideorm = { version = "0.17.5", default-features = false, features = ["postgres", "runtime-tokio", "attachments"] }
 
 # Enable translations support explicitly
-tideorm = { version = "0.17.4", default-features = false, features = ["postgres", "runtime-tokio", "translations"] }
+tideorm = { version = "0.17.5", default-features = false, features = ["postgres", "runtime-tokio", "translations"] }
 
 # Enable full-text search support explicitly
-tideorm = { version = "0.17.4", default-features = false, features = ["postgres", "runtime-tokio", "fulltext"] }
+tideorm = { version = "0.17.5", default-features = false, features = ["postgres", "runtime-tokio", "fulltext"] }
 
 # Enable the entity manager explicitly
-tideorm = { version = "0.17.4", default-features = false, features = ["postgres", "runtime-tokio", "entity-manager"] }
+tideorm = { version = "0.17.5", default-features = false, features = ["postgres", "runtime-tokio", "entity-manager"] }
 
 # Enable model dirty tracking explicitly
-tideorm = { version = "0.17.4", default-features = false, features = ["postgres", "runtime-tokio", "dirty-tracking"] }
+tideorm = { version = "0.17.5", default-features = false, features = ["postgres", "runtime-tokio", "dirty-tracking"] }
 
 # Enable model encrypted fields explicitly
-tideorm = { version = "0.17.4", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
+tideorm = { version = "0.17.5", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
 ```
 
 Swap `runtime-tokio` for `runtime-async-std` if you run on async-std.
@@ -324,6 +325,7 @@ Core chapters:
 - [Relations](docs/relations.md) - Field-declared relations, attachments, translations, and runtime relation wrappers
 - [Entity Manager](docs/entity-manager.md) - Persistence-context identity map, aggregate synchronization helpers, and managed entity lifecycle operations
 - [Migrations](docs/migrations.md) - Schema builder column types, migration authoring, and schema sync guidance
+- [Project Rules](docs/project-rules.md) - Opt-in limits on models and queries, written in `tideorm.toml`, with per-model exceptions
 
 ## Ecosystem
 

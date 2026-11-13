@@ -34,6 +34,14 @@ pub(super) fn generate_sync_impl(ctx: &BuildContext) -> TokenStream2 {
         }
     });
 
+    let forbids_raw_sql = ctx.project_rules.forbids_raw_sql;
+    // Read by the build, so editing the rules recompiles the model.
+    let rules_file = ctx.project_rules.file.as_ref().map(|file| {
+        quote!(
+            const _: &[u8] = include_bytes!(#file);
+        )
+    });
+
     quote! {
         impl #struct_name {
             #[doc(hidden)]
@@ -66,8 +74,11 @@ pub(super) fn generate_sync_impl(ctx: &BuildContext) -> TokenStream2 {
                 schema_name: <#struct_name as ::tideorm::model::ModelMeta>::schema_name,
                 column_names: <#struct_name as ::tideorm::model::ModelMeta>::column_names,
                 encrypted_column: ::tideorm::model::__encrypted_column::<#struct_name>,
+                outline: ::tideorm::rules::__outline::<#struct_name>,
+                forbids_raw_sql: #forbids_raw_sql,
             }
         }
+        #rules_file
     }
 }
 

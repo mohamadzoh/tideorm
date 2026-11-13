@@ -275,6 +275,7 @@ impl<M: Model> QueryBuilder<M> {
                 || !query.clauses.subquery_select_expressions.is_empty()
                 || !query.clauses.window_functions.is_empty());
         query.ensure_query_is_executable()?;
+        query.ensure_row_limit()?;
         let (offset, limit) = if scalar_distinct {
             (
                 query.clauses.offset_value.take().unwrap_or(0),
@@ -481,6 +482,7 @@ impl<M: Model> QueryBuilder<M> {
         let rows = self.clone().page(page, per_page);
         // `page()` checks the numbers; its verdict comes before any statement.
         rows.ensure_query_is_executable()?;
+        rows.ensure_row_limit()?;
         let total = self.count().await?;
         let items = rows.get().await?;
         Ok(Paginated {

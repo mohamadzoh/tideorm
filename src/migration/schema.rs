@@ -392,7 +392,7 @@ impl Schema {
             return Ok(());
         }
         let db = crate::database::__current_db()?;
-        db.exec_raw(sql)
+        db.exec_unprepared(sql)
             .await
             .map_err(|error| error.with_context(ErrorContext::new().query(sql)))?;
 

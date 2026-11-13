@@ -117,7 +117,8 @@ impl<M: Model> QueryBuilder<M> {
     /// rejected here instead of being silently dropped from the WHERE clause.
     pub(crate) fn ensure_query_is_executable(&self) -> Result<()> {
         self.ensure_query_is_valid()?;
-        self.ensure_conditions_are_representable()
+        self.ensure_conditions_are_representable()?;
+        self.ensure_query_follows_rules()
     }
 
     /// Mix the identity of the connection this query runs on into the cache key.
@@ -354,6 +355,7 @@ impl<M: Model> QueryBuilder<M> {
     /// ```
     pub async fn get_json(self) -> Result<Vec<serde_json::Value>> {
         self.ensure_query_is_executable()?;
+        self.ensure_row_limit()?;
         let (sql, params) = self.build_select_sql_with_params()?;
         self.fetch_json(&sql, params).await
     }

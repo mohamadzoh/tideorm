@@ -158,6 +158,7 @@ impl<M: Model> QueryBuilder<M> {
     /// ```
     pub async fn get(self) -> Result<Vec<M>> {
         self.ensure_query_is_executable()?;
+        self.ensure_row_limit()?;
         self.ensure_projection_covers_model()?;
 
         // A read performed inside a transaction never touches the process-global

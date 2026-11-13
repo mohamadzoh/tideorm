@@ -105,4 +105,21 @@ impl RelationTree {
     pub fn is_empty(&self) -> bool {
         self.children.is_empty()
     }
+
+    /// How many levels the longest path nests.
+    pub(crate) fn depth(&self) -> usize {
+        self.children
+            .values()
+            .map(|child| child.depth() + 1)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// How many relations the tree resolves, at every level.
+    pub(crate) fn relations(&self) -> usize {
+        self.children
+            .values()
+            .map(|child| child.relations() + 1)
+            .sum()
+    }
 }

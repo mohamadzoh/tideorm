@@ -1,0 +1,23 @@
+# The rules tests/project_rules.rs builds this crate against.
+[project]
+name = "project-rules"
+
+[rules]
+max_columns = 5
+max_json_columns = 1
+sensitive_fields = ["password"]
+primary_key_types = ["bigint"]
+require_foreign_key_index = true
+max_relation_depth = 1
+forbid_relation_cycles = true
+snake_case_names = true
+max_rows = 3
+max_joins = 1
+max_in_values = 2
+max_eager_depth = 1
+max_eager_relations = 1
+forbid_raw_sql = true
+
+[rules.allow]
+AuditLog = ["forbid_raw_sql", "max_rows"]
+Legacy = ["max_columns"]

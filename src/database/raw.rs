@@ -121,6 +121,10 @@ impl Database {
         sql: &str,
         params: impl IntoIterator<Item = DbValue>,
     ) -> Result<Vec<T>> {
+        crate::rules::ensure_raw_sql_allowed(
+            "Database::raw()",
+            Some((std::any::type_name::<T>(), T::__rules())),
+        )?;
         let params = params.into_iter().collect();
         self.invalidating(self.raw_models::<T>(sql, params, EngineLog::On))
             .await
@@ -209,6 +213,13 @@ impl Database {
     /// The instance form of [`Database::execute`]. The statement is sent
     /// unprepared, so it may contain several `;`-separated statements.
     pub async fn exec_raw(&self, sql: &str) -> Result<u64> {
+        crate::rules::ensure_raw_sql_allowed("Database::execute()", None)?;
+        self.exec_unprepared(sql).await
+    }
+
+    /// [`exec_raw`](Self::exec_raw) for TideORM's own statements, which the
+    /// project rules on raw SQL do not hold: a migration's DDL.
+    pub(crate) async fn exec_unprepared(&self, sql: &str) -> Result<u64> {
         use crate::internal::ConnectionTrait;
 
         let connection = self.__get_connection()?;
@@ -244,6 +255,7 @@ impl Database {
         sql: &str,
         params: impl IntoIterator<Item = DbValue>,
     ) -> Result<u64> {
+        crate::rules::ensure_raw_sql_allowed("Database::execute_with_params()", None)?;
         let params = params.into_iter().collect();
         self.invalidating(self.__execute_with_params(sql, params))
             .await
@@ -327,6 +339,7 @@ impl Database {
         sql: &str,
         params: impl IntoIterator<Item = DbValue>,
     ) -> Result<Vec<serde_json::Value>> {
+        crate::rules::ensure_raw_sql_allowed("Database::raw_json()", None)?;
         let params = params.into_iter().collect();
         self.invalidating(self.__raw_json_with_params(sql, params))
             .await
@@ -385,6 +398,7 @@ impl Database {
         sql: &str,
         params: impl IntoIterator<Item = DbValue>,
     ) -> Result<Vec<T>> {
+        crate::rules::ensure_raw_sql_allowed("Database::raw_as()", None)?;
         let params = params.into_iter().collect();
         self.invalidating(self.fetch_rows(sql, params))
             .await?

@@ -20,6 +20,11 @@ pub struct CompiledModelRegistration {
     /// The model's type for one of its columns, which binds a filter value on
     /// that column when another model's query joins the table.
     pub column_type: ColumnTypeOf,
+    /// The model as the project rules check it.
+    pub outline: fn() -> crate::rules::ModelOutline,
+    /// Whether the project's rules forbid raw SQL, whatever the model's
+    /// exceptions: what a raw statement naming no model is held to.
+    pub forbids_raw_sql: bool,
 }
 
 /// A model's column-type lookup, as its registration carries it.

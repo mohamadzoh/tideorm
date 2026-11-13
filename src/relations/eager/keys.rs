@@ -57,7 +57,9 @@ async fn grouped_by_key<M: EagerLoadModel>(
     // A chunk per query keeps each IN list under the backends'
     // bind-parameter limits however many parents there are.
     for chunk in lookup_keys.chunks(5_000) {
-        let mut query = M::query().where_in(foreign_key, chunk.to_vec());
+        let mut query = M::query()
+            .with_rule_scope(crate::rules::RuleScope::Internal)
+            .where_in(foreign_key, chunk.to_vec());
         if let Some((type_column, type_value)) = morph_type {
             query = query.where_eq(type_column, type_value);
         }
@@ -153,6 +155,7 @@ async fn matching_keys<M: Model>(
             .dialect()
             .exact_key(&crate::query::db_sql::format_column(db_type, column));
         let mut query = M::query()
+            .with_rule_scope(crate::rules::RuleScope::Internal)
             .distinct()
             .select(vec![column])
             .select_raw(&format!("{exact} AS tideorm_exact_key"))

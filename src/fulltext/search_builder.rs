@@ -238,6 +238,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
 
     /// Execute the search and return results
     pub async fn get(self) -> Result<Vec<T>> {
+        crate::rules::ensure_rows_allowed::<T>("search()", self.limit)?;
         let db = crate::database::__current_db()?;
         let (sql, params) = self.build_sql(db.execution_backend())?;
         db.raw_models::<T>(&sql, params, crate::logging::EngineLog::On)
@@ -246,6 +247,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
 
     /// Execute the search and return ranked results
     pub async fn get_ranked(self) -> Result<Vec<SearchResult<T>>> {
+        crate::rules::ensure_rows_allowed::<T>("search()", self.limit)?;
         let db = crate::database::__current_db()?;
         let (sql, params) = self.build_ranked_sql(db.execution_backend())?;
 

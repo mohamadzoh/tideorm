@@ -13,7 +13,10 @@ mod relations;
 
 use columns::{generate_columns_impl, generate_sync_impl};
 use engine::{engine_model_parts, nested_visibility};
-use relations::{build_entity_manager_meta, build_relation_checks, build_relation_payload_filters};
+use relations::{
+    build_entity_manager_meta, build_relation_checks, build_relation_outline,
+    build_relation_payload_filters,
+};
 
 pub(crate) fn generate_entity_support(ctx: &BuildContext) -> syn::Result<TokenStream2> {
     // `ModelMeta`'s checks run first: a model failing one there and one in the
@@ -309,6 +312,15 @@ fn generate_model_meta_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
     let primary_key_display_impl = build_primary_key_display_impl(ctx);
     let primary_key_is_new_impl = build_primary_key_is_new_impl(ctx);
     let entity_manager_meta_impl = build_entity_manager_meta(ctx);
+    let relation_outline_impl = build_relation_outline(ctx);
+    let rules_impl = ctx.project_rules.rules.as_ref().map(|rules| {
+        quote! {
+            fn __rules() -> &'static ::tideorm::rules::Rules {
+                const RULES: ::tideorm::rules::Rules = #rules;
+                &RULES
+            }
+        }
+    });
 
     Ok(quote! {
         impl ::tideorm::model::ModelMeta for #struct_name {
@@ -349,6 +361,8 @@ fn generate_model_meta_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
             #has_timestamps_impl
             #indexes_impl
             #entity_manager_meta_impl
+            #relation_outline_impl
+            #rules_impl
         }
     })
 }

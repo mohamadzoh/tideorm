@@ -51,6 +51,8 @@ pub(crate) struct BuildContext {
     /// beside the generated code rather than instead of it, so a typo in one
     /// rule is the only error and not the first of a page of missing impls.
     pub(crate) attribute_errors: Vec<syn::Error>,
+    /// The project rules of the crate's `tideorm.toml` this model is held to.
+    pub(crate) project_rules: crate::rules::ModelRules,
     pub(crate) pk_ident: Ident,
     pub(crate) pk_idents: Vec<Ident>,
     pub(crate) pk_type: Type,
@@ -241,6 +243,10 @@ impl BuildContext {
                 Err(error) => attribute_errors.push(error),
             }
         }
+        let project_rules = crate::rules::model_rules(&struct_name_str).unwrap_or_else(|error| {
+            attribute_errors.push(error);
+            crate::rules::ModelRules::default()
+        });
 
         let pk_fields: Vec<&ModelField> =
             db_fields.iter().filter(|field| field.primary_key).collect();
@@ -315,6 +321,7 @@ impl BuildContext {
             searchable_fields,
             validation_rules,
             attribute_errors,
+            project_rules,
             pk_ident,
             pk_idents,
             pk_type,

@@ -939,6 +939,36 @@ async fn query_builder_comparisons() {
     }
 }
 
+/// One filter's statement bound with an `i32` and then an `i64` on a `BIGINT`
+/// column, on one connection (a transaction's): PostgreSQL's cached statement
+/// for one parameter type reads the other's bytes as malformed (`22P03`)
+/// unless it is parsed again.
+#[tokio::test]
+async fn one_statement_takes_values_of_either_integer_width() {
+    if !setup().await {
+        return;
+    }
+    seed_users(3).await;
+
+    tideorm::db()
+        .transaction(async |_tx| {
+            for (label, filtered) in [
+                ("i32", TestUser::query().where_gt("id", 0_i32)),
+                ("i64", TestUser::query().where_gt("id", 0_i64)),
+                ("i32 again", TestUser::query().where_gt("id", 0_i32)),
+            ] {
+                let users = filtered
+                    .get()
+                    .await
+                    .unwrap_or_else(|error| panic!("{label} failed: {error}"));
+                assert_eq!(users.len(), 3, "{label}");
+            }
+            Ok(())
+        })
+        .await
+        .expect("the transaction commits");
+}
+
 #[tokio::test]
 async fn query_builder_ordering_paging_and_terminals() {
     if !setup().await {

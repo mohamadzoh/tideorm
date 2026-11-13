@@ -1,6 +1,6 @@
 [package]
 name = "tideorm"
-version = "0.17.4"
+version = "0.17.5"
 edition = "2024"
 authors = ["Mohamad Al Zohbie <alzoubi528@gmail.com>"]
 description = "A developer-friendly ORM for Rust with clean, expressive syntax"
@@ -35,6 +35,7 @@ exclude = [
     "tests/*.rs",
     "tests/edge_case/**",
     "tests/or_clause/**",
+    "tests/project_rules/**",
     "tests/sqlite_ci_smoke_test/**",
     "tests/sqlite_regressions/**",
     "tests/typed_columns_and_join_tests/**",
@@ -74,7 +75,7 @@ encrypted-fields = []
 # The execution engine, from its own repository (rust-ocean/tideorm-engine).
 # `src/orm.rs` re-exports it, with the ORM derive macros from `tideorm-macros`,
 # and macro-generated models reach both through that module's paths.
-tideorm-engine = { version = "0.1.2", default-features = false }
+tideorm-engine = { version = "0.1.3", default-features = false }
 
 # Async runtime
 async-trait = "0.1.92"
@@ -98,7 +99,7 @@ rust_decimal = { version = "1.43.0", features = ["serde"] }
 thiserror = "2.0.21"
 
 # Derive macros (our own crate)
-tideorm-macros = { version = "=0.17.4", path = "tideorm-macros" }
+tideorm-macros = { version = "=0.17.5", path = "tideorm-macros" }
 
 # Utils
 parking_lot = "0.12.5"
@@ -181,6 +182,12 @@ required-features = ["sqlite", "runtime-async-std"]
 [[test]]
 name = "sqlite_integration_tests"
 path = "tests/sqlite_integration_tests.rs"
+required-features = ["sqlite", "runtime-tokio"]
+
+# Builds tests/project_rules/ with cargo against this checkout.
+[[test]]
+name = "project_rules"
+path = "tests/project_rules.rs"
 required-features = ["sqlite", "runtime-tokio"]
 
 [[test]]

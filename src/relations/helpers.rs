@@ -133,10 +133,11 @@ impl QuerySource {
 
     /// A query over `M` that runs where this relation's statements do.
     pub(crate) fn query<M: Model>(&self) -> QueryBuilder<M> {
-        match self.attached() {
+        let query = match self.attached() {
             Some(database) => M::query_with(&database),
             None => M::query(),
-        }
+        };
+        query.with_rule_scope(crate::rules::RuleScope::Relation)
     }
 
     /// The database this relation's raw statements run on.

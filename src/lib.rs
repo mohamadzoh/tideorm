@@ -70,6 +70,8 @@ pub mod prelude;
 pub mod profiling;
 pub mod query;
 pub mod relations;
+#[doc(hidden)]
+pub mod rules;
 pub mod schema;
 pub mod seeding;
 pub mod soft_delete;

@@ -404,3 +404,63 @@ async fn json_equality_follows_the_pool_not_the_configuration() {
     }
     tideorm::TideConfig::reset();
 }
+
+#[tideorm::model(table = "large_arrays")]
+pub struct LargeArray {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub items: serde_json::Value,
+}
+
+/// `array_remove` keeps every other element of an array past 1 MiB, in
+/// order. MariaDB's `JSON_ARRAYAGG` stops at `group_concat_max_len` (1 MiB by
+/// default): an error in strict mode, a shorter array otherwise; the driver
+/// raises the limit for every connection.
+#[tokio::test]
+async fn array_remove_keeps_every_element_of_a_large_array() {
+    if !backend::connect().await {
+        return;
+    }
+    Database::execute("DROP TABLE IF EXISTS `large_arrays`")
+        .await
+        .expect("failed to drop large_arrays");
+    Database::execute(
+        "CREATE TABLE `large_arrays` (`id` BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, `items` JSON NOT NULL)",
+    )
+    .await
+    .expect("failed to create large_arrays");
+
+    let kept: Vec<serde_json::Value> = (0..3_000)
+        .map(|i| format!("{i:05}-{}", "x".repeat(500)).into())
+        .collect();
+    let mut items = Vec::new();
+    for (i, item) in kept.iter().enumerate() {
+        if i % 100 == 0 {
+            items.push("drop".into());
+        }
+        items.push(item.clone());
+    }
+    LargeArray {
+        id: 0,
+        items: items.into(),
+    }
+    .save()
+    .await
+    .expect("save failed");
+
+    LargeArray::update_all()
+        .where_gt("id", 0)
+        .array_remove("items", "drop")
+        .execute()
+        .await
+        .expect("array_remove failed");
+
+    let row = LargeArray::query()
+        .first()
+        .await
+        .expect("query failed")
+        .expect("the row is there");
+    let items = row.items.as_array().expect("still an array");
+    assert_eq!(items.len(), kept.len(), "elements were lost");
+    assert!(*items == kept, "the kept elements changed or moved");
+}

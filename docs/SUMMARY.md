@@ -9,5 +9,6 @@
 - [Relations](relations.md)
 - [Entity Manager](entity-manager.md)
 - [Migrations](migrations.md)
+- [Project Rules](project-rules.md)
 - [Testing](testing.md)
 - [Troubleshooting](troubleshooting.md)

@@ -242,10 +242,23 @@ impl<M: Model> EagerQueryBuilder<M> {
     where
         M: EagerLoadModel,
     {
-        M::__validate_relations(&self.relation_tree)?;
+        self.ensure_relations_allowed()?;
         let database = self.query.named_database();
         let models = self.query.get().await?;
         Self::load_relations(&self.relation_tree, database, models).await
+    }
+
+    /// Refuse relations the model does not declare, or more of them, or
+    /// nested deeper, than the project rules allow.
+    fn ensure_relations_allowed(&self) -> Result<()>
+    where
+        M: EagerLoadModel,
+    {
+        M::__validate_relations(&self.relation_tree)?;
+        crate::rules::ensure_eager_load_allowed::<M>(
+            self.relation_tree.depth(),
+            self.relation_tree.relations(),
+        )
     }
 
     /// `models` with `relation_tree` resolved across them, read from
@@ -278,7 +291,7 @@ impl<M: Model> EagerQueryBuilder<M> {
     where
         M: EagerLoadModel,
     {
-        M::__validate_relations(&self.relation_tree)?;
+        self.ensure_relations_allowed()?;
         let database = self.query.named_database();
         let found = self.query.paginate(page, per_page).await?;
         Ok(crate::query::Paginated {

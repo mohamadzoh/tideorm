@@ -83,6 +83,9 @@ pub(crate) struct Clauses {
     /// `lock_for_update()`. **Sticky**: merged clauses that lock make the
     /// query lock.
     pub(crate) lock_for_update: bool,
+    /// Which project rules the query is held to. **Not merged**: a query
+    /// keeps its own.
+    pub(crate) rule_scope: crate::rules::RuleScope,
 }
 
 impl Clauses {

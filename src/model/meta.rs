@@ -371,6 +371,19 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
         Vec::new()
     }
 
+    /// The project rules of `tideorm.toml` the model is held to, its
+    /// exceptions left out.
+    #[doc(hidden)]
+    fn __rules() -> &'static crate::rules::Rules {
+        &crate::rules::Rules::NONE
+    }
+
+    /// The model's relations, as the project rules read them.
+    #[doc(hidden)]
+    fn __relations() -> Vec<crate::rules::RelationOutline> {
+        Vec::new()
+    }
+
     /// Make every relation query `database`: the pool the model was loaded
     /// from, or the one an entity manager that holds it reads through.
     #[doc(hidden)]

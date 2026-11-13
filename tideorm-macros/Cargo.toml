@@ -1,6 +1,6 @@
 [package]
 name = "tideorm-macros"
-version = "0.17.4"
+version = "0.17.5"
 edition = "2024"
 description = "Procedural macros for TideORM"
 license = "MIT"
@@ -24,3 +24,4 @@ quote = "1.0.47"
 syn = { version = "3.0.9", features = ["full", "extra-traits", "parsing"] }
 darling = "0.24.1"
 unicode-segmentation = "1.13.3"
+toml = { version = "1.1.8", default-features = false, features = ["std", "serde", "parse"] }

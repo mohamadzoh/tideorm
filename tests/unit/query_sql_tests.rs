@@ -480,12 +480,13 @@ fn sql_preview_escapes_values_the_way_the_backend_reads_them() {
         "{postgres}"
     );
 
-    // MySQL reads `\'` as an escaped quote, so the backslash is doubled.
+    // MySQL reads a backslash as an escape, so it is doubled; the quote is
+    // doubled too, which reads the same with NO_BACKSLASH_ESCAPES.
     let mysql = QueryCountGuardUser::query()
         .where_eq("name", r#"\' OR 1=1 --"#)
         .build_sql_preview_for(DatabaseType::MySQL);
     assert!(
-        mysql.ends_with(r#"WHERE `name` = '\\\' OR 1=1 --'"#),
+        mysql.ends_with(r#"WHERE `name` = '\\'' OR 1=1 --'"#),
         "{mysql}"
     );
 }

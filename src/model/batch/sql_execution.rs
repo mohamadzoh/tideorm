@@ -92,6 +92,14 @@ impl<M: Model> BatchUpdateBuilder<M> {
         self.ensure_base_is_updatable()?;
         let query = self.build_where_query();
         query.ensure_query_is_executable()?;
+        if self
+            .updates
+            .values()
+            .any(|value| matches!(value, UpdateValue::UnsafeRaw(_)))
+        {
+            let model = (std::any::type_name::<M>(), M::__rules());
+            crate::rules::ensure_raw_sql_allowed("set_trusted_raw()", Some(model))?;
+        }
         query.ensure_mutation_has_explicit_filters(operation)
     }
 
