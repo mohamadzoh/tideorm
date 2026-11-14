@@ -5,6 +5,20 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.6] - 2026-11-14
+
+### Changed
+
+- The model rules of `tideorm.toml` (`max_columns`, `max_json_columns`, `sensitive_fields`,
+  `primary_key_types`, `max_relation_depth`, `forbid_relation_cycles`,
+  `require_foreign_key_index` and the rest of the Project Rules page's model table) are checked
+  as the models compile: `cargo check` fails with an error at the model, field or relation that
+  breaks one, naming the rule, instead of connecting failing with `Error::Configuration`. A
+  relation now leads only to the struct it names, so a foreign key must lead an index that the
+  struct holding it declares. The query rules are still checked as each query runs. The column
+  rules read a field's `ValueType::COLUMN_KIND`, a new associated constant with a default
+  (`tideorm-sql-builder` 0.1.2, `tideorm-engine` 0.1.4).
+
 ## [0.17.5] - 2026-11-13
 
 ### Added

@@ -97,6 +97,12 @@ impl ActiveEnum {
         } else {
             quote! { None }
         };
+        let column_kind = match &self.db_type {
+            DbType::Enum => quote!(::tideorm::orm::sql_builder::ColumnKind::Other),
+            DbType::Other(column_type) => {
+                super::super::value_type_match::declared_column_kind(column_type)
+            }
+        };
 
         quote! {
             #[automatically_derived]
@@ -119,6 +125,8 @@ impl ActiveEnum {
                         .to_owned()
                         .into()
                 }
+
+                const COLUMN_KIND: ::tideorm::orm::sql_builder::ColumnKind = #column_kind;
 
                 fn enum_type_name() -> Option<&'static str> {
                     #enum_type_name

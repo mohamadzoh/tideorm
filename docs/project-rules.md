@@ -30,7 +30,17 @@ The rules file is the first `tideorm.toml` in the crate's directory or one above
 
 ### Model rules
 
-These are checked when the application first connects to a database (`TideConfig::..connect()`, `Database::connect`, `DatabaseBuilder::build`), over every compiled model. If any model breaks a rule, the connection fails with `Error::Configuration`, which lists every broken rule at once.
+These are checked as the models compile, so `cargo check`, like every build, fails on a model that breaks one. Each broken rule is an error of its own at the model, field or relation that breaks it, naming the rule:
+
+```text
+error: Account has 6 columns, over the limit of 5 (max_columns in tideorm.toml)
+ --> src/models/account.rs:7:12
+  |
+7 | pub struct Account {
+  |            ^^^^^^^
+```
+
+The rules that read a field's type (`max_json_columns`, `primary_key_types`, `forbid_float_columns`) or other models (`max_relation_depth`, `forbid_relation_cycles`, `require_foreign_key_index`) are checked by the compiler as it evaluates constants, so their errors read `error[E0080]: evaluation panicked: ..` with the same message. Nothing is checked when the application starts.
 
 | Rule | Value | Refuses |
 |---|---|---|
@@ -52,7 +62,7 @@ These are checked when the application first connects to a database (`TideConfig
 | `max_relation_depth` | number | a longer chain of owned relations from the model |
 | `forbid_relation_cycles` | `true` | a model that its owned relations lead back to |
 
-Relation depth and cycles follow *owned* relations only: `has_one`, `has_many`, `morph_one` and `morph_many`. A `belongs_to`, `has_many_through`, `morph_to` or self-reference points at rows the model does not own, so it adds no depth and closes no cycle; nor does an owned relation to the model's own table (a tree's children), whose depth is in the data. When several structs read one table, a relation to it reaches all of them, and an index any of them declares counts.
+Relation depth and cycles follow *owned* relations only: `has_one`, `has_many`, `morph_one` and `morph_many`. A `belongs_to`, `has_many_through`, `morph_to` or self-reference points at rows the model does not own, so it adds no depth and closes no cycle; nor does an owned relation to the model's own table (a tree's children), whose depth is in the data. A relation leads to the struct it names, not to other structs reading the same table, and a foreign key must lead an index (or the primary key) that the struct holding the key declares.
 
 ### Query rules
 

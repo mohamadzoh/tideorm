@@ -1,9 +1,10 @@
 //! The project rules of `tideorm.toml` end to end: `tests/project_rules/` is a
 //! crate with a `[rules]` table, copied into the target directory, pointed at
 //! this checkout and built by cargo, which is the only way to run the derive
-//! against a rules file. Its `startup` binary holds models that break the
-//! model rules, its `queries` binary checks each query rule itself, and a copy
-//! with a mistake in the table must fail to compile.
+//! against a rules file. Its `broken` binary holds models that break the
+//! model rules, which must fail `cargo check`; its `queries` binary checks
+//! each query rule itself, and a copy with a mistake in the table must fail
+//! to compile.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -16,7 +17,7 @@ fn project(name: &str, rules: &str) -> PathBuf {
     let dir = root.join(name);
     let bin = dir.join("src/bin");
     std::fs::create_dir_all(&bin).expect("create the project");
-    for file in ["startup.rs", "queries.rs"] {
+    for file in ["broken.rs", "queries.rs"] {
         std::fs::copy(
             Path::new(FIXTURE).join("src/bin").join(file),
             bin.join(file),
@@ -72,20 +73,23 @@ fn rules() -> String {
 fn models_and_queries_are_held_to_the_project_rules() {
     let dir = project("valid", &rules());
 
-    let startup = cargo(&dir, &["run", "--quiet", "--bin", "startup"]);
-    let printed = text(&startup);
-    assert!(startup.status.success(), "{printed}");
+    let broken = cargo(&dir, &["check", "--bin", "broken"]);
+    let printed = text(&broken);
+    assert!(!broken.status.success(), "{printed}");
     for broken in [
-        "Account has 6 columns, over the 5 max_columns allows",
-        "Account has 2 JSON columns, over the 1 max_json_columns allows",
-        "Account's column `password` looks sensitive and is neither hidden nor encrypted (sensitive_fields)",
-        "Token's primary key `id` is string, not one of bigint (primary_key_types)",
-        "BadName's table name `BadNames` is not lowercase snake_case (snake_case_names)",
-        "Author's relations nest 2 deep (Author → Book → Chapter), over the 1 max_relation_depth allows",
-        "Team's relations lead back to it: Team → Member → Team (forbid_relation_cycles)",
-        "Member's relations lead back to it: Member → Team → Member (forbid_relation_cycles)",
-        "Team's relations reach a cycle, so they nest without end (max_relation_depth)",
-        "Chapter's foreign key `book_id` leads no index (require_foreign_key_index)",
+        "Account has 6 columns, over the limit of 5 (max_columns in tideorm.toml)",
+        "Account has 2 JSON columns, over the limit of 1 (max_json_columns in tideorm.toml)",
+        "Account's column `password` looks sensitive and is neither hidden nor encrypted \
+         (sensitive_fields in tideorm.toml)",
+        "Token's primary key `id` is string, not one of bigint (primary_key_types in tideorm.toml)",
+        "BadName's table name `BadNames` is not lowercase snake_case (snake_case_names in tideorm.toml)",
+        "Author's relations nest 2 deep (Author → Book → Chapter), over the limit of 1 \
+         (max_relation_depth in tideorm.toml)",
+        "Team's relations lead back to it: Team → Member → Team (forbid_relation_cycles in tideorm.toml)",
+        "Member's relations lead back to it: Member → Team → Member \
+         (forbid_relation_cycles in tideorm.toml)",
+        "Team's relations reach a cycle, so they nest without end (max_relation_depth in tideorm.toml)",
+        "Chapter's foreign key `book_id` leads no index (require_foreign_key_index in tideorm.toml)",
     ] {
         assert!(
             printed.contains(broken),
@@ -93,7 +97,6 @@ fn models_and_queries_are_held_to_the_project_rules() {
         );
     }
     assert!(!printed.contains("Legacy"), "Legacy is exempt:\n{printed}");
-    assert!(!printed.contains("connected"), "{printed}");
 
     let queries = cargo(&dir, &["run", "--quiet", "--bin", "queries"]);
     let printed = text(&queries);

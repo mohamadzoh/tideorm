@@ -10,7 +10,7 @@ Create one per request or unit of work. Its identity map keeps every model it ha
 
 ```toml
 [dependencies]
-tideorm = { version = "0.17.5", features = ["postgres", "entity-manager"] }
+tideorm = { version = "0.17.6", features = ["postgres", "entity-manager"] }
 ```
 
 Use the backend feature you need (`postgres`, `mysql`, or `sqlite`) alongside `entity-manager`.

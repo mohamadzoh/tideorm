@@ -136,10 +136,8 @@ impl DatabaseBuilder {
 
     /// Connect using the configured URL or driver options and pool settings.
     ///
-    /// Returns a configuration error if neither was provided, or while a
-    /// compiled model breaks the project rules of `tideorm.toml`.
+    /// Returns a configuration error if neither was provided.
     pub async fn build(self) -> Result<Database> {
-        crate::rules::ensure_models_follow_rules()?;
         let target = self
             .target
             .ok_or_else(|| Error::configuration("Database URL or driver options are required"))?;

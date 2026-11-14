@@ -1,9 +1,13 @@
-use super::parse_rules;
+use super::{Limits, ModelRules, parse_rules};
 
+fn parsed(text: &str, model: &str) -> ModelRules {
+    parse_rules(text, model).expect("valid rules")
+}
+
+/// The query rules' `Rules` tokens, spaces removed.
 fn rules_of(text: &str, model: &str) -> Option<String> {
-    parse_rules(text, model)
-        .expect("valid rules")
-        .rules
+    parsed(text, model)
+        .query_rules
         .map(|tokens| tokens.to_string().replace(' ', ""))
 }
 
@@ -18,6 +22,7 @@ fn refusal(text: &str) -> String {
 fn a_file_without_rules_sets_none() {
     assert_eq!(rules_of("[project]\nname = \"app\"\n", "User"), None);
     assert_eq!(rules_of("", "User"), None);
+    assert_eq!(parsed("", "User").limits, Limits::default());
 }
 
 #[test]
@@ -27,41 +32,59 @@ fn rules_are_written_with_the_rest_left_unset() {
         "User",
     )
     .unwrap();
-    assert!(rules.contains("max_columns:::core::option::Option::Some(20u32)"));
     assert!(rules.contains("max_rows:::core::option::Option::Some(500u64)"));
     assert!(rules.contains("forbid_raw_sql:true"));
-    assert!(rules.contains("sensitive_fields:&[\"password\"]"));
     assert!(rules.ends_with("..::tideorm::rules::Rules::NONE}"));
+    // Model rules are checked as the model compiles, not written for queries.
+    assert!(!rules.contains("max_columns"));
+    let limits = parsed(
+        "[rules]\nmax_columns = 20\nsensitive_fields = [\"Password\"]\n",
+        "User",
+    )
+    .limits;
+    assert_eq!(limits.max_columns, Some(20));
+    assert_eq!(limits.sensitive_fields, ["password"]);
 }
 
 #[test]
 fn a_false_flag_applies_nothing() {
-    assert_eq!(
-        rules_of("[rules]\nrequire_timestamps = false\n", "User"),
-        None
+    let rules = parsed(
+        "[rules]\nrequire_timestamps = false\nforbid_raw_sql = false\n",
+        "User",
     );
+    assert!(rules.query_rules.is_none());
+    assert!(!rules.forbids_raw_sql);
+    assert_eq!(rules.limits, Limits::default());
 }
 
 #[test]
 fn exceptions_exempt_only_the_named_model() {
     let text = "[rules]\nmax_columns = 20\nmax_joins = 2\n\n[rules.allow]\nLegacyUser = [\"max_columns\"]\n";
-    let legacy = rules_of(text, "LegacyUser").unwrap();
-    assert!(!legacy.contains("max_columns"));
-    assert!(legacy.contains("max_joins"));
-    assert!(rules_of(text, "User").unwrap().contains("max_columns"));
+    let legacy = parsed(text, "LegacyUser");
+    assert_eq!(legacy.limits.max_columns, None);
+    assert!(
+        legacy
+            .query_rules
+            .unwrap()
+            .to_string()
+            .contains("max_joins")
+    );
+    assert_eq!(parsed(text, "User").limits.max_columns, Some(20));
 }
 
 #[test]
 fn a_model_exempt_from_every_rule_has_none() {
-    let text = "[rules]\nmax_columns = 20\n\n[rules.allow]\nUser = [\"max_columns\"]\n";
-    assert_eq!(rules_of(text, "User"), None);
+    let text = "[rules]\nmax_columns = 20\nmax_rows = 9\n\n[rules.allow]\nUser = [\"max_columns\", \"max_rows\"]\n";
+    let rules = parsed(text, "User");
+    assert!(rules.query_rules.is_none());
+    assert_eq!(rules.limits, Limits::default());
 }
 
 #[test]
 fn raw_sql_stays_forbidden_for_the_project_when_a_model_is_exempt() {
     let text = "[rules]\nforbid_raw_sql = true\n\n[rules.allow]\nReport = [\"forbid_raw_sql\"]\n";
     let report = parse_rules(text, "Report").unwrap();
-    assert!(report.rules.is_none());
+    assert!(report.query_rules.is_none());
     assert!(report.forbids_raw_sql);
 }
 
@@ -87,12 +110,12 @@ fn mistakes_are_refused() {
 
 #[test]
 fn key_types_are_read_in_any_case() {
-    let rules = rules_of(
+    let limits = parsed(
         "[rules]\nprimary_key_types = [\"BigInt\", \"uuid\"]\n",
         "User",
     )
-    .unwrap();
-    assert!(rules.contains("primary_key_types:&[\"bigint\",\"uuid\"]"));
+    .limits;
+    assert_eq!(limits.primary_key_types, ["bigint", "uuid"]);
 }
 
 #[test]

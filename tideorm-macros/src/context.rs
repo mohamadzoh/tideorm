@@ -79,6 +79,8 @@ pub(crate) struct BuildContext {
     pub(crate) columns_struct_name: Ident,
     pub(crate) index_impls: Vec<TokenStream2>,
     pub(crate) unique_index_impls: Vec<TokenStream2>,
+    /// The `#[index(..)]`/`#[unique_index(..)]` declarations, unique ones included.
+    pub(crate) indexes: Vec<IndexDef>,
     pub(crate) tokenize_enabled: bool,
     /// Every field of the struct, in declaration order.
     pub(crate) fields: Vec<ModelField>,
@@ -359,12 +361,15 @@ impl BuildContext {
             internal_entity_mod,
             index_impls,
             unique_index_impls,
+            indexes,
             tokenize_enabled: input.tokenize,
             fields,
             relation_fields,
             db_fields,
         };
         ctx.relation_wiring = build_relation_wiring(&ctx)?;
+        let broken_rules = crate::rules::checks::broken_rules(&ctx);
+        ctx.attribute_errors.extend(broken_rules);
         Ok(ctx)
     }
 

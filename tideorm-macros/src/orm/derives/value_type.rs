@@ -1,5 +1,7 @@
 use super::attributes::ValueTypeAttrs;
-use super::value_type_match::{array_type_expr, can_try_from_u64, column_type_expr};
+use super::value_type_match::{
+    array_type_expr, can_try_from_u64, column_type_expr, declared_column_kind,
+};
 use crate::parse::option_inner_type;
 use proc_macro2::{Span, TokenStream};
 use quote::quote;
@@ -15,6 +17,7 @@ struct DeriveValueTypeStruct {
     name: syn::Ident,
     ty: Type,
     column_type: TokenStream,
+    column_kind: TokenStream,
     array_type: TokenStream,
     can_try_from_u64: bool,
     /// Opt-in `#[orm(try_getable_array)]`: also implement `TryGetableArray`.
@@ -148,6 +151,10 @@ impl DeriveValueTypeStruct {
         let option_inner = option_inner_type(&ty);
         let field_type = option_inner.unwrap_or(&ty);
 
+        let column_kind = attrs.column_type.as_ref().map_or_else(
+            || quote!(<#field_type as ::tideorm::orm::sql_builder::ValueType>::COLUMN_KIND),
+            declared_column_kind,
+        );
         let column_type = column_type_expr(attrs.column_type, field_type, field_span);
         let array_type = array_type_expr(attrs.array_type, field_type, field_span);
         let can_try_from_u64 =
@@ -157,6 +164,7 @@ impl DeriveValueTypeStruct {
             name,
             ty,
             column_type,
+            column_kind,
             array_type,
             can_try_from_u64,
             try_getable_array: attrs.try_getable_array,
@@ -211,6 +219,7 @@ impl DeriveValueTypeStruct {
             quote!(<#field_type as ::tideorm::orm::sql_builder::ValueType>::try_from(#value).map(|v| #name(v))),
             array_type,
             column_type,
+            &self.column_kind,
         );
         let shared = shared_impls(name);
 
@@ -288,6 +297,7 @@ impl DeriveValueTypeString {
             ),
             &quote!(::tideorm::orm::sql_builder::ArrayType::String),
             &quote!(::tideorm::orm::sql_builder::ColumnType::#column_type),
+            &declared_column_kind(column_type),
         );
         let shared = shared_impls(name);
 
@@ -335,6 +345,7 @@ fn value_type_impl(
     try_from: TokenStream,
     array_type: &TokenStream,
     column_type: &TokenStream,
+    column_kind: &TokenStream,
 ) -> TokenStream {
     quote!(
         #[automatically_derived]
@@ -354,6 +365,8 @@ fn value_type_impl(
             fn column_type() -> ::tideorm::orm::sql_builder::ColumnType {
                 #column_type
             }
+
+            const COLUMN_KIND: ::tideorm::orm::sql_builder::ColumnKind = #column_kind;
         }
     )
 }

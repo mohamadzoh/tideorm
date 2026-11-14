@@ -1,5 +1,5 @@
-//! Models that break the model rules of `../../tideorm.toml`: connecting
-//! must fail and name every broken rule, which this prints.
+//! Models that break the model rules of `../../tideorm.toml`: `cargo check`
+//! must fail, naming every broken rule.
 
 use tideorm::prelude::*;
 
@@ -84,14 +84,4 @@ pub struct Member {
     pub captained: HasMany<Team>,
 }
 
-#[tokio::main]
-async fn main() {
-    match TideConfig::init()
-        .database("sqlite::memory:")
-        .connect()
-        .await
-    {
-        Ok(_) => println!("connected"),
-        Err(error) => println!("{error}"),
-    }
-}
+fn main() {}

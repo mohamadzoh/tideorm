@@ -74,7 +74,6 @@ pub(super) fn generate_sync_impl(ctx: &BuildContext) -> TokenStream2 {
                 schema_name: <#struct_name as ::tideorm::model::ModelMeta>::schema_name,
                 column_names: <#struct_name as ::tideorm::model::ModelMeta>::column_names,
                 encrypted_column: ::tideorm::model::__encrypted_column::<#struct_name>,
-                outline: ::tideorm::rules::__outline::<#struct_name>,
                 forbids_raw_sql: #forbids_raw_sql,
             }
         }

@@ -1,177 +1,253 @@
 //! The rules that read several models at once: how deep owned relations nest,
-//! whether they cycle, and whether every foreign key is indexed.
+//! whether they cycle, and whether every foreign key is indexed. Each model's
+//! derive writes a [`ModelNode`] and the `const` items calling the checks
+//! here and panicking with the message they return, so a broken rule fails
+//! `cargo check`.
 
-use super::{ModelOutline, short_name};
+use super::message::Message;
 
-/// Every cross-model rule `models` break, one line each.
-pub(super) fn broken_rules(models: &[ModelOutline]) -> Vec<String> {
-    let owned: Vec<Vec<usize>> = models
-        .iter()
-        .map(|model| owned_models(models, model))
-        .collect();
-    let mut depths = vec![Depth::Unknown; models.len()];
-    let mut broken = Vec::new();
-    for (index, model) in models.iter().enumerate() {
-        let name = short_name(model.name);
-        if model.rules.forbid_relation_cycles
-            && let Some(cycle) = cycle_through(&owned, index)
-        {
-            broken.push(format!(
-                "{name}'s relations lead back to it: {} (forbid_relation_cycles)",
-                chain(models, &cycle)
-            ));
+/// A model as the relation rules read it at compile time. Each model's
+/// derive writes one in a `static`, which its `__rules_node()` returns.
+#[doc(hidden)]
+pub struct ModelNode {
+    /// Tells the model apart from another of the same name: [`__model_id`]
+    /// of where it is declared.
+    pub id: u64,
+    /// The model's type, without its module path.
+    pub name: &'static str,
+    /// Its table, `schema.table` when it names a schema.
+    pub table: &'static str,
+    /// The models whose rows it owns: the related models of its `has_one`,
+    /// `has_many`, `morph_one` and `morph_many`.
+    pub owned: &'static [&'static ModelNode],
+    /// The columns its primary key and its indexes lead with, each also under
+    /// its field's name, which a relation's `foreign_key` may name.
+    pub leading_columns: &'static [&'static str],
+    /// Whether its project's rules require every foreign key it holds to lead
+    /// an index.
+    pub indexes_foreign_keys: bool,
+}
+
+/// The id of the model declared at `place`: its FNV-1a hash.
+#[doc(hidden)]
+pub const fn __model_id(place: &str) -> u64 {
+    let bytes = place.as_bytes();
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    let mut at = 0;
+    while at < bytes.len() {
+        hash = (hash ^ bytes[at] as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        at += 1;
+    }
+    hash
+}
+
+/// What is broken when `model`'s owned relations lead back to it.
+#[doc(hidden)]
+pub const fn __check_relation_cycles(model: &'static ModelNode) -> Option<Message> {
+    let mut walk = Walk::new();
+    if !walk.run(model, true) {
+        return None;
+    }
+    let mut message = Message::new();
+    message
+        .push(model.name)
+        .push("'s relations lead back to it: ");
+    walk.push_chain(&mut message);
+    message.push(" → ").push(model.name);
+    Some(*message.rule("forbid_relation_cycles"))
+}
+
+/// What is broken when `model`'s owned relations nest deeper than `max`.
+#[doc(hidden)]
+pub const fn __check_relation_depth(model: &'static ModelNode, max: usize) -> Option<Message> {
+    let mut walk = Walk::new();
+    walk.run(model, false);
+    let mut message = Message::new();
+    message.push(model.name);
+    if walk.endless[0] {
+        message.push("'s relations reach a cycle, so they nest without end");
+    } else if walk.depth[0] > max {
+        message
+            .push("'s relations nest ")
+            .number(walk.depth[0])
+            .push(" deep (");
+        walk.push_deepest(&mut message);
+        message.push("), over the limit of ").number(max);
+    } else {
+        return None;
+    }
+    Some(*message.rule("max_relation_depth"))
+}
+
+/// What is broken when `column`, a foreign key `holder` holds, leads none of
+/// its indexes while its project requires it to.
+#[doc(hidden)]
+pub const fn __check_foreign_key(holder: &'static ModelNode, column: &str) -> Option<Message> {
+    if !holder.indexes_foreign_keys {
+        return None;
+    }
+    let mut at = 0;
+    while at < holder.leading_columns.len() {
+        if crate::model::__str_eq(holder.leading_columns[at], column) {
+            return None;
         }
-        if let Some(max) = model.rules.max_relation_depth {
-            match depth(&owned, &mut depths, index) {
-                Some((deepest, _)) if deepest <= max as usize => {}
-                Some((deepest, _)) => broken.push(format!(
-                    "{name}'s relations nest {deepest} deep ({}), over the {max} max_relation_depth allows",
-                    chain(models, &deepest_chain(&depths, index))
-                )),
-                None => broken.push(format!(
-                    "{name}'s relations reach a cycle, so they nest without end (max_relation_depth)"
-                )),
-            }
+        at += 1;
+    }
+    let mut message = Message::new();
+    message
+        .push(holder.name)
+        .push("'s foreign key `")
+        .push(column)
+        .push("` leads no index");
+    Some(*message.rule("require_foreign_key_index"))
+}
+
+// shortcut: a walk reaches at most this many models, failing the build past
+// it; raise it if a project's relations ever reach more.
+const MAX_MODELS: usize = 1024;
+const SLOTS: usize = 2 * MAX_MODELS;
+const EMPTY: usize = usize::MAX;
+const NEW: u8 = 0;
+const ON_PATH: u8 = 1;
+const DONE: u8 = 2;
+
+/// A depth-first walk of the owned relations from one model, which is the
+/// walk's model 0. A model is numbered as the walk reaches it.
+struct Walk {
+    models: [Option<&'static ModelNode>; MAX_MODELS],
+    count: usize,
+    /// Model numbers by id, open addressing.
+    slots: [usize; SLOTS],
+    state: [u8; MAX_MODELS],
+    /// The longest owned chain below each model, and the next model on it.
+    depth: [usize; MAX_MODELS],
+    next: [usize; MAX_MODELS],
+    /// Whether a cycle is reachable from each model, which makes it endless.
+    endless: [bool; MAX_MODELS],
+    /// The path from model 0: each model and the next relation to follow.
+    path: [(usize, usize); MAX_MODELS],
+    length: usize,
+}
+
+impl Walk {
+    const fn new() -> Self {
+        Self {
+            models: [None; MAX_MODELS],
+            count: 0,
+            slots: [EMPTY; SLOTS],
+            state: [NEW; MAX_MODELS],
+            depth: [0; MAX_MODELS],
+            next: [EMPTY; MAX_MODELS],
+            endless: [false; MAX_MODELS],
+            path: [(0, 0); MAX_MODELS],
+            length: 0,
         }
     }
-    broken.extend(unindexed_foreign_keys(models));
-    broken
-}
 
-/// The models whose rows `model` owns, by index: every model on an owned
-/// relation's table. A relation to the model's own table (a tree's children)
-/// nests data, not the schema, so it is left out.
-fn owned_models(models: &[ModelOutline], model: &ModelOutline) -> Vec<usize> {
-    let mut owned: Vec<usize> = model
-        .relations
-        .iter()
-        .filter(|relation| relation.owns)
-        .filter_map(|relation| relation.related.as_deref())
-        .filter(|related| *related != model.table)
-        .flat_map(|related| on_table(models, related))
-        .collect();
-    owned.sort_unstable();
-    owned.dedup();
-    owned
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Depth {
-    Unknown,
-    Visiting,
-    /// The longest owned chain below a model and the next model on it; `None`
-    /// when a cycle is reachable.
-    Known(Option<(usize, Option<usize>)>),
-}
-
-/// The longest chain of owned relations from `index`, and the next model on
-/// it; `None` when a cycle is reachable, which makes it endless.
-fn depth(
-    owned: &[Vec<usize>],
-    depths: &mut [Depth],
-    index: usize,
-) -> Option<(usize, Option<usize>)> {
-    match depths[index] {
-        Depth::Known(known) => return known,
-        Depth::Visiting => return None,
-        Depth::Unknown => {}
+    const fn model(&self, number: usize) -> &'static ModelNode {
+        match self.models[number] {
+            Some(model) => model,
+            None => panic!("every numbered model is held"),
+        }
     }
-    depths[index] = Depth::Visiting;
-    let mut deepest = Some((0, None));
-    for &next in &owned[index] {
-        deepest = match (deepest, depth(owned, depths, next)) {
-            (Some((best, _)), Some((below, _))) if below + 1 > best => {
-                Some((below + 1, Some(next)))
+
+    /// `model`'s number, numbering it when the walk first reaches it.
+    const fn number(&mut self, model: &'static ModelNode) -> usize {
+        let mut slot = (model.id % SLOTS as u64) as usize;
+        loop {
+            let number = self.slots[slot];
+            if number == EMPTY {
+                break;
             }
-            (Some(best), Some(_)) => Some(best),
-            _ => None,
-        };
-    }
-    depths[index] = Depth::Known(deepest);
-    deepest
-}
-
-fn deepest_chain(depths: &[Depth], start: usize) -> Vec<usize> {
-    let mut chain = vec![start];
-    let mut at = start;
-    while let Depth::Known(Some((_, Some(next)))) = depths[at] {
-        chain.push(next);
-        at = next;
-    }
-    chain
-}
-
-/// A chain of owned relations from `start` back to it, if there is one.
-fn cycle_through(owned: &[Vec<usize>], start: usize) -> Option<Vec<usize>> {
-    let mut path = vec![start];
-    let mut seen = vec![false; owned.len()];
-    fn walk(owned: &[Vec<usize>], start: usize, path: &mut Vec<usize>, seen: &mut [bool]) -> bool {
-        let at = *path.last().expect("the path holds its start");
-        for &next in &owned[at] {
-            if next == start {
-                path.push(next);
-                return true;
+            if self.model(number).id == model.id {
+                return number;
             }
-            if !seen[next] {
-                seen[next] = true;
-                path.push(next);
-                if walk(owned, start, path, seen) {
-                    return true;
+            slot = (slot + 1) % SLOTS;
+        }
+        if self.count == MAX_MODELS {
+            panic!("the project rules reach more than 1024 models through owned relations");
+        }
+        let number = self.count;
+        self.count += 1;
+        self.models[number] = Some(model);
+        self.slots[slot] = number;
+        number
+    }
+
+    /// Walk every model `start` owns, directly or not. With `to_start`, stop
+    /// at the first relation back to `start`, the path then leading to it,
+    /// and say whether there was one.
+    const fn run(&mut self, start: &'static ModelNode, to_start: bool) -> bool {
+        let first = self.number(start);
+        self.state[first] = ON_PATH;
+        self.path[0] = (first, 0);
+        self.length = 1;
+        while self.length > 0 {
+            let (at, relation) = self.path[self.length - 1];
+            let model = self.model(at);
+            if relation == model.owned.len() {
+                self.length -= 1;
+                self.state[at] = DONE;
+                if self.length > 0 {
+                    self.reach(self.path[self.length - 1].0, at);
                 }
-                path.pop();
+                continue;
+            }
+            self.path[self.length - 1].1 = relation + 1;
+            let owned = model.owned[relation];
+            // A relation to the model's own table (a tree's children) nests
+            // data, not the schema.
+            if crate::model::__str_eq(owned.table, model.table) {
+                continue;
+            }
+            let next = self.number(owned);
+            match self.state[next] {
+                NEW => {
+                    self.state[next] = ON_PATH;
+                    self.path[self.length] = (next, 0);
+                    self.length += 1;
+                }
+                ON_PATH => {
+                    self.endless[at] = true;
+                    if to_start && next == first {
+                        return true;
+                    }
+                }
+                _ => self.reach(at, next),
             }
         }
         false
     }
-    walk(owned, start, &mut path, &mut seen).then_some(path)
-}
 
-fn chain(models: &[ModelOutline], chain: &[usize]) -> String {
-    chain
-        .iter()
-        .map(|index| short_name(models[*index].name))
-        .collect::<Vec<_>>()
-        .join(" → ")
-}
+    /// Count `to`, which `from` owns, in `from`'s depth.
+    const fn reach(&mut self, from: usize, to: usize) {
+        if self.endless[to] {
+            self.endless[from] = true;
+        } else if self.depth[to] + 1 > self.depth[from] {
+            self.depth[from] = self.depth[to] + 1;
+            self.next[from] = to;
+        }
+    }
 
-/// The models on `table`, by index; several structs may read one table.
-fn on_table<'a>(models: &'a [ModelOutline], table: &'a str) -> impl Iterator<Item = usize> + 'a {
-    (0..models.len()).filter(move |index| models[*index].table == table)
-}
+    /// The names on the path, `A → B → C`.
+    const fn push_chain(&self, message: &mut Message) {
+        let mut at = 0;
+        while at < self.length {
+            if at > 0 {
+                message.push(" → ");
+            }
+            message.push(self.model(self.path[at].0).name);
+            at += 1;
+        }
+    }
 
-/// Each foreign key column that leads no index of its table, for the tables
-/// a model held to `require_foreign_key_index` reads. An index any model on
-/// the table declares counts; a key on a table no compiled model declares is
-/// left alone.
-fn unindexed_foreign_keys(models: &[ModelOutline]) -> Vec<String> {
-    let mut keys: Vec<(&str, &str)> = models
-        .iter()
-        .flat_map(|model| &model.relations)
-        .flat_map(|relation| &relation.foreign_keys)
-        .map(|(table, column)| (table.as_str(), *column))
-        .collect();
-    keys.sort_unstable();
-    keys.dedup();
-    keys.into_iter()
-        .filter_map(|(table, column)| {
-            let model = on_table(models, table)
-                .map(|index| &models[index])
-                .find(|model| model.rules.require_foreign_key_index)?;
-            let indexed = on_table(models, table)
-                .map(|index| &models[index])
-                .any(|model| {
-                    model.primary_keys.first().is_some_and(|key| key == column)
-                        || model
-                            .indexes
-                            .iter()
-                            .any(|index| index.columns.first().is_some_and(|first| first == column))
-                });
-            (!indexed).then(|| {
-                format!(
-                    "{}'s foreign key `{column}` leads no index (require_foreign_key_index)",
-                    short_name(model.name)
-                )
-            })
-        })
-        .collect()
+    /// The names on the deepest chain from model 0, `A → B → C`.
+    const fn push_deepest(&self, message: &mut Message) {
+        let mut at = 0;
+        message.push(self.model(at).name);
+        while self.next[at] != EMPTY {
+            at = self.next[at];
+            message.push(" → ").push(self.model(at).name);
+        }
+    }
 }

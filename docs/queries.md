@@ -844,7 +844,7 @@ TideORM provides full-text search capabilities across PostgreSQL (tsvector/tsque
 Enable the feature explicitly when you need the full-text search API:
 
 ```toml
-tideorm = { version = "0.17.5", features = ["postgres", "fulltext"] }
+tideorm = { version = "0.17.6", features = ["postgres", "fulltext"] }
 ```
 
 ### Search Basics

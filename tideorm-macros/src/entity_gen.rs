@@ -10,13 +10,12 @@ use crate::parse::{ModelField, RelationKind, type_string};
 mod columns;
 mod engine;
 mod relations;
+mod rules;
 
 use columns::{generate_columns_impl, generate_sync_impl};
 use engine::{engine_model_parts, nested_visibility};
-use relations::{
-    build_entity_manager_meta, build_relation_checks, build_relation_outline,
-    build_relation_payload_filters,
-};
+use relations::{build_entity_manager_meta, build_relation_checks, build_relation_payload_filters};
+use rules::generate_rule_checks;
 
 pub(crate) fn generate_entity_support(ctx: &BuildContext) -> syn::Result<TokenStream2> {
     // `ModelMeta`'s checks run first: a model failing one there and one in the
@@ -25,6 +24,7 @@ pub(crate) fn generate_entity_support(ctx: &BuildContext) -> syn::Result<TokenSt
     let entity_module = generate_entity_module(ctx)?;
     let sync_impl = generate_sync_impl(ctx);
     let columns_impl = generate_columns_impl(ctx);
+    let rule_checks = generate_rule_checks(ctx);
     // Item types are checked before bodies and in this order, so a field type
     // no column can hold is reported as that, ahead of the entity's own errors.
     let column_type_checks = ctx.db_fields.iter().map(|field| {
@@ -40,6 +40,7 @@ pub(crate) fn generate_entity_support(ctx: &BuildContext) -> syn::Result<TokenSt
         #model_meta_impl
         #sync_impl
         #columns_impl
+        #rule_checks
     })
 }
 
@@ -312,8 +313,7 @@ fn generate_model_meta_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
     let primary_key_display_impl = build_primary_key_display_impl(ctx);
     let primary_key_is_new_impl = build_primary_key_is_new_impl(ctx);
     let entity_manager_meta_impl = build_entity_manager_meta(ctx);
-    let relation_outline_impl = build_relation_outline(ctx);
-    let rules_impl = ctx.project_rules.rules.as_ref().map(|rules| {
+    let rules_impl = ctx.project_rules.query_rules.as_ref().map(|rules| {
         quote! {
             fn __rules() -> &'static ::tideorm::rules::Rules {
                 const RULES: ::tideorm::rules::Rules = #rules;
@@ -361,7 +361,6 @@ fn generate_model_meta_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
             #has_timestamps_impl
             #indexes_impl
             #entity_manager_meta_impl
-            #relation_outline_impl
             #rules_impl
         }
     })

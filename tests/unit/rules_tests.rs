@@ -1,205 +1,192 @@
+use super::message::Message;
 use super::*;
-use crate::orm::ColumnType;
+use crate::orm::sql_builder::ColumnKind;
 
-fn column(name: &str, col_type: ColumnType, nullable: bool, primary_key: bool) -> ColumnDef {
-    ColumnDef {
-        name: name.to_string(),
-        col_type,
-        nullable,
-        primary_key,
-        auto_increment: primary_key,
-        default: None,
-    }
-}
-
-fn model(name: &'static str, table: &str, rules: Rules) -> ModelOutline {
-    ModelOutline {
+const fn node(
+    id: u64,
+    name: &'static str,
+    table: &'static str,
+    owned: &'static [&'static ModelNode],
+) -> ModelNode {
+    ModelNode {
+        id,
         name,
-        table: table.to_string(),
-        rules,
-        columns: vec![column("id", ColumnType::BigInteger, false, true)],
-        primary_keys: vec!["id".to_string()],
-        indexes: Vec::new(),
-        relations: Vec::new(),
-        protected_columns: Vec::new(),
-        soft_delete: false,
-        timestamps: false,
+        table,
+        owned,
+        leading_columns: &["id"],
+        indexes_foreign_keys: true,
     }
 }
 
-fn owns(table: &str) -> RelationOutline {
-    RelationOutline {
-        field: "children",
-        related: Some(table.to_string()),
-        owns: true,
-        foreign_keys: Vec::new(),
-    }
-}
+static AUTHOR: ModelNode = node(1, "Author", "authors", &[&BOOK]);
+static BOOK: ModelNode = node(2, "Book", "books", &[&CHAPTER]);
+static CHAPTER: ModelNode = node(3, "Chapter", "chapters", &[]);
 
-#[test]
-fn no_rules_break_nothing() {
-    let mut user = model("app::User", "Users", Rules::NONE);
-    user.columns
-        .push(column("order", ColumnType::Double, true, false));
-    user.relations.push(owns("Users"));
-    assert!(broken_rules(&[user]).is_empty());
-}
+static TEAM: ModelNode = node(4, "Team", "teams", &[&MEMBER]);
+static MEMBER: ModelNode = node(5, "Member", "members", &[&TEAM]);
+static LEAGUE: ModelNode = node(6, "League", "leagues", &[&TEAM]);
 
-#[test]
-fn counts_are_capped() {
-    let rules = Rules {
-        max_columns: Some(3),
-        max_json_columns: Some(1),
-        ..Rules::NONE
-    };
-    let mut user = model("app::User", "users", rules);
-    user.columns
-        .push(column("settings", ColumnType::Json, false, false));
-    assert!(broken_rules(std::slice::from_ref(&user)).is_empty());
-    user.columns
-        .push(column("meta", ColumnType::JsonBinary, true, false));
-    user.columns
-        .push(column("name", ColumnType::Text, false, false));
-    assert_eq!(
-        broken_rules(&[user]),
-        [
-            "User has 4 columns, over the 3 max_columns allows",
-            "User has 2 JSON columns, over the 1 max_json_columns allows",
-        ]
-    );
-}
+/// A tree: its children are rows of its own table, and so are a read
+/// model's, which shares the table.
+static CATEGORY: ModelNode = node(7, "Category", "categories", &[&CATEGORY, &CATEGORY_VIEW]);
+static CATEGORY_VIEW: ModelNode = node(8, "CategoryView", "categories", &[]);
 
-#[test]
-fn names_keys_and_types_are_checked() {
-    let rules = Rules {
-        snake_case_names: true,
-        avoid_reserved_words: true,
-        max_identifier_length: Some(10),
-        primary_key_types: &["uuid"],
-        forbid_float_columns: true,
-        ..Rules::NONE
-    };
-    let mut user = model("User", "UserAccounts", rules);
-    user.columns
-        .push(column("order", ColumnType::Float, false, false));
-    let broken = broken_rules(&[user]).join("\n");
-    assert!(
-        broken.contains("table name `UserAccounts` is 12 bytes"),
-        "{broken}"
-    );
-    assert!(
-        broken.contains("`UserAccounts` is not lowercase snake_case"),
-        "{broken}"
-    );
-    assert!(
-        broken.contains("`order` is an SQL reserved word"),
-        "{broken}"
-    );
-    assert!(
-        broken.contains("primary key `id` is bigint, not one of uuid"),
-        "{broken}"
-    );
-    assert!(
-        broken.contains("`order` is a floating-point number"),
-        "{broken}"
-    );
-}
+/// Two chains meeting at one model.
+static SHOP: ModelNode = node(9, "Shop", "shops", &[&ORDER, &CART]);
+static ORDER: ModelNode = node(10, "Order", "orders", &[&LINE]);
+static CART: ModelNode = node(11, "Cart", "carts", &[&LINE]);
+static LINE: ModelNode = node(12, "Line", "lines", &[]);
 
-#[test]
-fn sensitive_columns_must_be_hidden_or_encrypted() {
-    let rules = Rules {
-        sensitive_fields: &["password", "token"],
-        ..Rules::NONE
-    };
-    let mut user = model("User", "users", rules);
-    user.columns
-        .push(column("password_hash", ColumnType::Text, false, false));
-    user.columns
-        .push(column("api_token", ColumnType::Text, false, false));
-    user.protected_columns.push("api_token".to_string());
-    assert_eq!(
-        broken_rules(&[user]),
-        [
-            "User's column `password_hash` looks sensitive and is neither hidden nor encrypted (sensitive_fields)"
-        ]
-    );
+// The checks run in a `const`, as the derive's do.
+const _: () = assert!(__check_relation_depth(&AUTHOR, 2).is_none());
+const _: () = assert!(__check_relation_cycles(&AUTHOR).is_none());
+const _: () = assert!(__check_foreign_key(&BOOK, "id").is_none());
+
+fn text(message: Option<Message>) -> Option<String> {
+    message.map(|message| message.as_str().to_string())
 }
 
 #[test]
 fn owned_relations_nest_no_deeper_than_allowed() {
-    let rules = Rules {
-        max_relation_depth: Some(1),
-        ..Rules::NONE
-    };
-    let mut user = model("User", "users", rules);
-    user.relations.push(owns("posts"));
-    let mut post = model("Post", "posts", Rules::NONE);
-    post.relations.push(owns("comments"));
-    let comment = model("Comment", "comments", Rules::NONE);
+    assert_eq!(text(__check_relation_depth(&AUTHOR, 2)), None);
     assert_eq!(
-        broken_rules(&[user.clone(), post.clone(), comment.clone()]),
-        [
-            "User's relations nest 2 deep (User → Post → Comment), over the 1 max_relation_depth allows"
-        ]
+        text(__check_relation_depth(&AUTHOR, 1)).as_deref(),
+        Some(
+            "Author's relations nest 2 deep (Author → Book → Chapter), over the limit of 1 \
+             (max_relation_depth in tideorm.toml)"
+        )
     );
-
-    // A relation the model does not own is no step deeper.
-    post.relations[0].owns = false;
-    assert!(broken_rules(&[user, post, comment]).is_empty());
-}
-
-#[test]
-fn cycles_are_reported() {
-    let rules = Rules {
-        forbid_relation_cycles: true,
-        max_relation_depth: Some(5),
-        ..Rules::NONE
-    };
-    let mut user = model("User", "users", rules);
-    user.relations.push(owns("teams"));
-    let mut team = model("Team", "teams", Rules::NONE);
-    team.relations.push(owns("users"));
     assert_eq!(
-        broken_rules(&[user, team]),
-        [
-            "User's relations lead back to it: User → Team → User (forbid_relation_cycles)",
-            "User's relations reach a cycle, so they nest without end (max_relation_depth)",
-        ]
+        text(__check_relation_depth(&SHOP, 1)).as_deref(),
+        Some(
+            "Shop's relations nest 2 deep (Shop → Order → Line), over the limit of 1 \
+             (max_relation_depth in tideorm.toml)"
+        )
     );
 }
 
 #[test]
-fn foreign_keys_lead_an_index() {
-    let rules = Rules {
-        require_foreign_key_index: true,
-        ..Rules::NONE
-    };
-    let mut user = model("User", "users", Rules::NONE);
-    user.relations.push(RelationOutline {
-        foreign_keys: vec![("posts".to_string(), "user_id")],
-        ..owns("posts")
-    });
-    let mut post = model("Post", "posts", rules);
-    post.columns
-        .push(column("user_id", ColumnType::BigInteger, false, false));
+fn cycles_are_reported_from_every_model_on_them() {
     assert_eq!(
-        broken_rules(&[user.clone(), post.clone()]),
-        ["Post's foreign key `user_id` leads no index (require_foreign_key_index)"]
+        text(__check_relation_cycles(&TEAM)).as_deref(),
+        Some(
+            "Team's relations lead back to it: Team → Member → Team \
+             (forbid_relation_cycles in tideorm.toml)"
+        )
     );
+    assert_eq!(
+        text(__check_relation_cycles(&MEMBER)).as_deref(),
+        Some(
+            "Member's relations lead back to it: Member → Team → Member \
+             (forbid_relation_cycles in tideorm.toml)"
+        )
+    );
+    assert_eq!(
+        text(__check_relation_depth(&TEAM, 9)).as_deref(),
+        Some(
+            "Team's relations reach a cycle, so they nest without end \
+             (max_relation_depth in tideorm.toml)"
+        )
+    );
+}
 
-    // An index whose first column is the key covers it; a later column does not.
-    post.indexes.push(IndexDefinition::new(
-        "posts_title_user",
-        vec!["title".into(), "user_id".into()],
-        false,
-    ));
-    assert_eq!(broken_rules(&[user.clone(), post.clone()]).len(), 1);
-    post.indexes.push(IndexDefinition::new(
-        "posts_user",
-        vec!["user_id".into()],
-        false,
-    ));
-    assert!(broken_rules(&[user, post]).is_empty());
+#[test]
+fn a_cycle_below_a_model_is_endless_but_does_not_lead_back() {
+    assert_eq!(text(__check_relation_cycles(&LEAGUE)), None);
+    assert!(
+        text(__check_relation_depth(&LEAGUE, 9))
+            .unwrap()
+            .contains("reach a cycle")
+    );
+}
+
+#[test]
+fn relations_to_the_models_own_table_are_left_alone() {
+    assert_eq!(text(__check_relation_cycles(&CATEGORY)), None);
+    assert_eq!(text(__check_relation_depth(&CATEGORY, 0)), None);
+    assert_eq!(text(__check_relation_cycles(&SHOP)), None);
+}
+
+#[test]
+fn foreign_keys_lead_an_index_where_the_holder_requires_it() {
+    assert_eq!(text(__check_foreign_key(&BOOK, "id")), None);
+    assert_eq!(
+        text(__check_foreign_key(&BOOK, "author_id")).as_deref(),
+        Some(
+            "Book's foreign key `author_id` leads no index (require_foreign_key_index in tideorm.toml)"
+        )
+    );
+    static UNRULED: ModelNode = ModelNode {
+        indexes_foreign_keys: false,
+        ..node(13, "Free", "frees", &[])
+    };
+    assert_eq!(text(__check_foreign_key(&UNRULED, "author_id")), None);
+}
+
+#[test]
+fn column_rules_read_the_column_kind() {
+    let kinds = [ColumnKind::Json, ColumnKind::Text, ColumnKind::Json];
+    assert_eq!(text(__check_json_columns("Account", &kinds, 2)), None);
+    assert_eq!(
+        text(__check_json_columns("Account", &kinds, 1)).as_deref(),
+        Some("Account has 2 JSON columns, over the limit of 1 (max_json_columns in tideorm.toml)")
+    );
+    assert_eq!(
+        text(__check_float_column("Item", "price", ColumnKind::Other)),
+        None
+    );
+    assert_eq!(
+        text(__check_float_column("Item", "price", ColumnKind::Float)).as_deref(),
+        Some(
+            "Item's column `price` is a floating-point number; use a decimal or an integer \
+             (forbid_float_columns in tideorm.toml)"
+        )
+    );
+    assert_eq!(
+        text(__check_key_type(
+            "Token",
+            "id",
+            ColumnKind::Uuid,
+            &["bigint", "uuid"]
+        )),
+        None
+    );
+    assert_eq!(
+        text(__check_key_type(
+            "Token",
+            "id",
+            ColumnKind::Text,
+            &["bigint", "uuid"]
+        ))
+        .as_deref(),
+        Some(
+            "Token's primary key `id` is string, not one of bigint, uuid \
+             (primary_key_types in tideorm.toml)"
+        )
+    );
+    assert!(
+        text(__check_key_type(
+            "Token",
+            "id",
+            ColumnKind::Other,
+            &["integer"]
+        ))
+        .unwrap()
+        .contains("is another type")
+    );
+}
+
+#[test]
+fn messages_are_cut_at_a_character() {
+    let mut message = Message::new();
+    message
+        .number(0)
+        .push(" ")
+        .number(18_446_744_073_709_551_615);
+    assert_eq!(message.as_str(), "0 18446744073709551615");
+    let mut long = Message::new();
+    long.push(&"→".repeat(400));
+    assert_eq!(long.as_str(), "→".repeat(341));
 }
 
 #[test]
@@ -216,121 +203,16 @@ fn short_names_drop_the_module_path() {
     assert_eq!(short_name("User"), "User");
 }
 
-#[test]
-fn index_names_keys_and_flags_are_checked() {
-    let rules = Rules {
-        max_identifier_length: Some(8),
-        avoid_reserved_words: true,
-        forbid_composite_primary_keys: true,
-        require_timestamps: true,
-        require_soft_delete: true,
-        snake_case_names: true,
-        ..Rules::NONE
-    };
-    let mut user = model("User", "app.users", rules);
-    user.columns
-        .push(column("ORDER", ColumnType::Text, false, false));
-    user.primary_keys.push("tenant_id".to_string());
-    user.indexes.push(IndexDefinition::new(
-        "users_email_index",
-        vec!["email".into()],
-        false,
-    ));
-    let broken = broken_rules(std::slice::from_ref(&user)).join("\n");
-    for expected in [
-        "User's index name `users_email_index` is 17 bytes, over the 8 max_identifier_length allows",
-        "User's column name `ORDER` is an SQL reserved word (avoid_reserved_words)",
-        "User's column name `ORDER` is not lowercase snake_case (snake_case_names)",
-        "User's primary key spans 2 columns (forbid_composite_primary_keys)",
-        "User has no created_at/updated_at timestamps (require_timestamps)",
-        "User does not soft delete (require_soft_delete)",
-    ] {
-        assert!(
-            broken.contains(expected),
-            "missing `{expected}` in:\n{broken}"
-        );
-    }
-    // The schema is not part of the table's name.
-    assert!(!broken.contains("app.users"), "{broken}");
-
-    user.columns.pop();
-    user.primary_keys.pop();
-    user.indexes.clear();
-    user.timestamps = true;
-    user.soft_delete = true;
-    assert!(broken_rules(&[user]).is_empty());
-}
-
-#[test]
-fn depth_follows_the_longest_owned_chain() {
-    let rules = Rules {
-        max_relation_depth: Some(2),
-        forbid_relation_cycles: true,
-        ..Rules::NONE
-    };
-    // A owns B and C, both own D, and D owns E: 3 deep along either branch.
-    let mut a = model("A", "a", rules);
-    a.relations.extend([owns("b"), owns("c")]);
-    let mut b = model("B", "b", Rules::NONE);
-    b.relations.push(owns("d"));
-    let mut c = model("C", "c", Rules::NONE);
-    c.relations.push(owns("d"));
-    let mut d = model("D", "d", Rules::NONE);
-    d.relations.push(owns("e"));
-    let e = model("E", "e", Rules::NONE);
-    assert_eq!(
-        broken_rules(&[a, b, c, d, e]),
-        ["A's relations nest 3 deep (A → B → D → E), over the 2 max_relation_depth allows"]
-    );
-}
-
-#[test]
-fn a_cycle_below_a_model_is_endless_but_does_not_lead_back() {
-    let rules = Rules {
-        max_relation_depth: Some(5),
-        forbid_relation_cycles: true,
-        ..Rules::NONE
-    };
-    let mut a = model("A", "a", rules);
-    a.relations.push(owns("b"));
-    let mut b = model("B", "b", Rules::NONE);
-    b.relations.push(owns("c"));
-    let mut c = model("C", "c", Rules::NONE);
-    c.relations.push(owns("b"));
-    assert_eq!(
-        broken_rules(&[a, b, c]),
-        ["A's relations reach a cycle, so they nest without end (max_relation_depth)"]
-    );
-}
-
-#[test]
-fn self_references_and_unknown_tables_are_left_alone() {
-    let rules = Rules {
-        max_relation_depth: Some(0),
-        forbid_relation_cycles: true,
-        require_foreign_key_index: true,
-        ..Rules::NONE
-    };
-    let mut category = model("Category", "categories", rules);
-    category.relations.push(owns("categories"));
-    category.relations.push(RelationOutline {
-        foreign_keys: vec![("archived_posts".to_string(), "category_id")],
-        ..owns("archived_posts")
-    });
-    assert!(broken_rules(&[category]).is_empty());
-}
-
-#[tideorm::model(table = "outline_teams", hidden = "pass_code")]
+#[tideorm::model(table = "outline_teams")]
 struct OutlineTeam {
     #[tideorm(primary_key, auto_increment)]
     id: i64,
-    #[tideorm(column = "secret_pass")]
-    pass_code: String,
     #[tideorm(has_many = "OutlineMember", foreign_key = "team_id")]
     members: crate::relations::HasMany<OutlineMember>,
 }
 
 #[tideorm::model(table = "outline_members")]
+#[index("team_id")]
 struct OutlineMember {
     #[tideorm(primary_key, auto_increment)]
     id: i64,
@@ -341,62 +223,17 @@ struct OutlineMember {
 }
 
 #[test]
-fn a_derived_model_outlines_its_columns_and_relations() {
-    let team = __outline::<OutlineTeam>();
-    assert!(team.name.ends_with("OutlineTeam"));
-    assert_eq!(team.table, "outline_teams");
-    assert_eq!(team.rules, Rules::NONE);
-    assert_eq!(team.primary_keys, ["id"]);
-    // A hidden field is protected by its column's name.
-    assert_eq!(team.protected_columns, ["secret_pass"]);
-    // A foreign key named by its field is read as its column.
-    assert_eq!(
-        team.relations,
-        [RelationOutline {
-            field: "members",
-            related: Some("outline_members".to_string()),
-            owns: true,
-            foreign_keys: vec![("outline_members".to_string(), "team_ref")],
-        }]
-    );
-    let member = __outline::<OutlineMember>();
-    assert_eq!(
-        member.relations,
-        [RelationOutline {
-            field: "team",
-            related: Some("outline_teams".to_string()),
-            owns: false,
-            foreign_keys: vec![("outline_members".to_string(), "team_ref")],
-        }]
-    );
-}
-
-#[test]
-fn models_on_one_table_share_its_indexes_and_relations() {
-    let rules = Rules {
-        require_foreign_key_index: true,
-        max_relation_depth: Some(1),
-        ..Rules::NONE
-    };
-    let mut user = model("User", "users", rules);
-    user.relations.push(RelationOutline {
-        foreign_keys: vec![("posts".to_string(), "user_id")],
-        ..owns("posts")
-    });
-    // A read model of `posts` declaring no index, listed before the model that does.
-    let mut summary = model("PostSummary", "posts", rules);
-    summary.relations.push(owns("comments"));
-    let mut post = model("Post", "posts", rules);
-    post.indexes.push(IndexDefinition::new(
-        "posts_user",
-        vec!["user_id".into()],
-        false,
-    ));
-    let comment = model("Comment", "comments", rules);
-    assert_eq!(
-        broken_rules(&[user, summary, post, comment]),
-        [
-            "User's relations nest 2 deep (User → PostSummary → Comment), over the 1 max_relation_depth allows"
-        ]
-    );
+fn a_derived_model_writes_its_node() {
+    let team = OutlineTeam::__rules_node();
+    let member = OutlineMember::__rules_node();
+    assert_eq!((team.name, team.table), ("OutlineTeam", "outline_teams"));
+    assert_eq!(team.owned.len(), 1);
+    assert_eq!(team.owned[0].id, member.id);
+    assert_ne!(team.id, member.id);
+    // Without rules the crate requires no index; a relation that does not
+    // own its rows is no edge.
+    assert!(!member.indexes_foreign_keys);
+    assert!(member.owned.is_empty());
+    // An index on a renamed field leads with its column, under both names.
+    assert_eq!(member.leading_columns, ["id", "team_id", "team_ref"]);
 }
