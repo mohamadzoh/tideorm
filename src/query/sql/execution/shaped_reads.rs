@@ -217,7 +217,11 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// A typed column reads as its field's type, so it needs no annotation;
     /// a column named by a string reads as the type you ask for (see
-    /// [`ColumnRead`](crate::columns::ColumnRead)).
+    /// [`ColumnRead`](crate::columns::ColumnRead)). A model column reads as
+    /// its field reads it, so an enum's stored `string_value` comes back as
+    /// its variant. Values pass through JSON, so an `Option<serde_json::Value>`
+    /// column holding the JSON `null` reads as `None`, as SQL `NULL` does;
+    /// `get()` tells them apart.
     ///
     /// ```ignore
     /// let ids = User::query().where_eq(User::ACTIVE, true).pluck(User::ID).await?; // Vec<i64>
@@ -313,7 +317,7 @@ impl<M: Model> QueryBuilder<M> {
                             output, row
                         ))
                     })?;
-                serde_json::from_value(value).map_err(|error| {
+                Self::read_cell(&column, value).map_err(|error| {
                     Error::conversion(format!(
                         "pluck() could not read {}.{} as {}: {error}",
                         M::table_name(),
@@ -323,6 +327,33 @@ impl<M: Model> QueryBuilder<M> {
                 })
             })
             .collect()
+    }
+
+    /// `cell`, the value of `column` in a JSON row, read as `T`. A model
+    /// column whose field stores another form than it serializes (an enum's
+    /// `string_value`) reads as its field: stored value, field, then `T`.
+    fn read_cell<T: serde::de::DeserializeOwned>(
+        column: &str,
+        cell: serde_json::Value,
+    ) -> std::result::Result<T, serde_json::Error> {
+        T::deserialize(&cell).or_else(|error| match Self::column_document(column, &cell) {
+            Some(document) => T::deserialize(document),
+            None => Err(error),
+        })
+    }
+
+    /// `cell`, the value a model column stores, as its field serializes it;
+    /// `None` for anything but one of the model's columns.
+    pub(in crate::query) fn column_document(
+        column: &str,
+        cell: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let name = M::own_column_name(column)?;
+        let column_type = crate::internal::column_type_of::<M>(name);
+        M::__column_document(
+            name,
+            crate::internal::json_to_column_value(cell, column_type.as_ref()),
+        )
     }
 
     /// Give equal scalar values the same database-generated group number.

@@ -369,7 +369,12 @@ impl<M: Model> QueryBuilder<M> {
                     alias, terminal
                 ))
             })?;
-        let retry = number_from_text(&value);
+        // A `MIN`/`MAX` reads as the column's field does, an enum as its variant.
+        let retry = number_from_text(&value).or_else(|| {
+            reads_as_column
+                .then(|| Self::column_document(column, &value))
+                .flatten()
+        });
         decode_aggregate(value, retry, terminal)
     }
 

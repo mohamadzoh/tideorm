@@ -871,7 +871,7 @@ fn test_each_search_mode_renders_its_own_operand() {
         (
             SearchMode::Proximity(3),
             DatabaseType::SQLite,
-            in_title("NEAR(\"rust\" \"async\", 3)"),
+            in_title("NEAR(\"rust\" \"async\", 2)"),
         ),
     ] {
         assert_eq!(render(mode, db_type).1, operand, "{mode} on {db_type:?}");

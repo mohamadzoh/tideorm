@@ -5,6 +5,51 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.7] - 2026-11-15
+
+### Fixed
+
+- With the `entity-manager` feature, a model whose relations lead back to itself (a `has_many`
+  of its own type, or `has_many_through` declared both ways) failed to compile with E0391.
+- On PostgreSQL, a batch `set()`, `increment()`, `decrement()` or `multiply()`/`divide()` of a
+  `u8`, `i8`, `u16`, `u32` or `u64` field could store a value its wider column holds but the
+  field cannot, after which the model could not read the row; the update now fails, as it
+  already did on the other backends.
+- On PostgreSQL, a batch `coalesce()` of a `json` (not `jsonb`) column failed.
+- On SQLite, a `having()` comparing `MIN`/`MAX` of a decimal column with a decimal matched the
+  wrong groups.
+- A `where_in`/`where_not_in` of a few hundred values on a JSON column overflowed the stack.
+- On SQLite, a `SearchMode::Proximity(n)` search also matched words `n + 1` positions apart.
+- A statement run on a transaction while a savepoint was open in it (from a `join!` or a spawned
+  task) ran inside the savepoint, and was rolled back with it; it now waits for the savepoint to
+  end (`tideorm-engine` 0.1.5).
+- On MySQL and MariaDB, a `NaiveDateTime` could not read a `TIMESTAMP` column, so
+  `Migrator::status()` and `applied()` (and `tideorm migrate status`) failed on every migration
+  ledger (`tideorm-driver-mysql` 0.1.5).
+- On MySQL, `change_column` of a `TIMESTAMP DEFAULT CURRENT_TIMESTAMP` column to a `DATETIME(6)`
+  failed, and so did a current-time default on a `TIMESTAMP` or `DATETIME(n)` column other than
+  `DATETIME(6)` in `create_table` and `add_column`: the default (and a kept `ON UPDATE`) is now
+  written as precise as the column.
+- A migrator run inside a transaction released the migration lock before that transaction
+  committed its ledger rows, so another migrator could apply the same migrations again; the lock
+  is now held until the transaction ends, as the seed lock already was.
+- A model whose table name holds a space, or a column name a `.`, could not be queried past
+  plain filters: `having()` matched every group on SQLite and failed elsewhere,
+  `cursor_paginate()` and `chunks()` were refused, and a dotted column was read as
+  `table.column` in filters, ordering, aggregates and window functions. The model's own names are
+  now written whole.
+- `pluck()`, `value()`, `min()` and `max()` of an enum column failed with "unknown variant" when
+  the enum's `string_value`s are not its serde names; they now read the column as the model does.
+- A broken count rule's message said "1 JSON columns" (or "1 relations", ..), and one long
+  enough to fill its 1024 bytes lost the rule's name at its end.
+
+### Changed
+
+- Reads do less work per row: a NULL cell no longer builds an error message only to drop it
+  (`tideorm-engine` 0.1.5), dirty tracking records a loaded model's fields without looking each
+  one up by name, `get_json()` moves text and JSON cells in instead of copying them, and a joined
+  table's column types are looked up by table instead of by scanning every model.
+
 ## [0.17.6] - 2026-11-14
 
 ### Changed

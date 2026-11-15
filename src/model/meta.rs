@@ -72,7 +72,8 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
 
     fn column_names() -> &'static [&'static str];
 
-    /// The Rust field's integer range intersected with SQLite's signed storage range.
+    /// The Rust field's integer range within a signed 64-bit one, the widest
+    /// SQLite and PostgreSQL store.
     /// Generated models retain signedness here even when their SQL types coincide.
     #[doc(hidden)]
     fn __sqlite_integer_bounds(_column: &str) -> Option<(i64, i64)> {
@@ -148,12 +149,15 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     /// reference that validates would be emitted as a column that does not
     /// exist.
     fn canonical_column_parts(name: &str) -> (Option<&str>, &str) {
+        if let Some((qualified, column)) = Self::own_column_reference(name) {
+            return (qualified.then(Self::table_name), column);
+        }
         match name.rsplit_once('.') {
             Some((table, column)) if Self::owns_table_reference(table) => {
-                (Some(Self::table_name()), Self::column_named(column))
+                (Some(Self::table_name()), column)
             }
             Some((table, column)) => (Some(table), column),
-            None => (None, Self::column_named(name)),
+            None => (None, name),
         }
     }
 
@@ -169,12 +173,24 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     /// another table's column or a name the model does not know.
     #[doc(hidden)]
     fn own_column_name(name: &str) -> Option<&'static str> {
-        let name = match name.trim().rsplit_once('.') {
-            Some((table, column)) if Self::owns_table_reference(table) => column,
-            Some(_) => return None,
-            None => name.trim(),
-        };
-        Self::canonical_column_name(name)
+        Self::own_column_reference(name).map(|(_, column)| column)
+    }
+
+    /// [`own_column_name`](Self::own_column_name), with whether `name` is
+    /// qualified with the model's table. An own name resolves before any
+    /// `.` is read as a qualifier, since a column's name may hold one.
+    #[doc(hidden)]
+    fn own_column_reference(name: &str) -> Option<(bool, &'static str)> {
+        let name = name.trim();
+        if let Some(column) = Self::canonical_column_name(name) {
+            return Some((false, column));
+        }
+        name.match_indices('.').find_map(|(at, _)| {
+            Self::owns_table_reference(&name[..at])
+                .then(|| Self::canonical_column_name(&name[at + 1..]))
+                .flatten()
+                .map(|column| (true, column))
+        })
     }
 
     /// Whether a bare or schema-qualified table reference identifies this model.
@@ -261,6 +277,15 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
 
     fn has_encrypted_fields() -> bool {
         !Self::encrypted_fields().is_empty()
+    }
+
+    /// The value `column` stores, as its field serializes it: what
+    /// [`pluck()`](crate::query::QueryBuilder::pluck) reads a field from when
+    /// it stores another form (an enum's `string_value`). `None` for a column
+    /// the model does not have or an encrypted one.
+    #[doc(hidden)]
+    fn __column_document(_column: &str, _value: crate::DbValue) -> Option<serde_json::Value> {
+        None
     }
 
     /// Whether the encrypted field `field` reads `document` back: a batch

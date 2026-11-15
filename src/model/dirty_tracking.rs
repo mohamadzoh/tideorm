@@ -7,6 +7,7 @@ use parking_lot::RwLock;
 use crate::error::{Error, Result};
 use crate::internal::Value;
 use crate::orm::sql_builder::ValueKey;
+use crate::orm::{EntityTrait, Iterable, ModelTrait};
 
 use super::Model;
 
@@ -235,7 +236,7 @@ fn row_key_for_model<M: Model>(model: &M) -> Option<RowKey> {
     }
     let key = M::primary_key_columns()
         .into_iter()
-        .map(|column| ValueKey::new(crate::orm::ModelTrait::get(model, column)))
+        .map(|column| ValueKey::new(ModelTrait::get(model, column)))
         .collect();
     Some((TypeId::of::<M>(), key))
 }
@@ -248,13 +249,18 @@ fn read_snapshot<M: Model, T>(model: &M, read: impl FnOnce(&SnapshotValues) -> T
     store.get(&row, current_task()).map(read)
 }
 
+/// Each field with the value its column holds. The generated entity's
+/// columns follow `field_names()`, so no name is looked up.
+fn field_values<M: Model>(model: &M) -> impl Iterator<Item = (&'static str, Value)> + '_ {
+    M::field_names()
+        .iter()
+        .copied()
+        .zip(<<M::Entity as EntityTrait>::Column as Iterable>::iter())
+        .map(|(field, column)| (field, ModelTrait::get(model, column)))
+}
+
 fn capture_snapshot<M: Model>(model: &M) -> SnapshotValues {
-    Arc::new(
-        M::field_names()
-            .iter()
-            .filter_map(|field| Some((*field, model.field_value(field)?)))
-            .collect(),
-    )
+    Arc::new(field_values(model).collect())
 }
 
 /// Remember `model`'s current persisted state as the dirty-tracking baseline
@@ -380,10 +386,9 @@ pub(crate) fn changed_fields<M: Model>(model: &M) -> Option<Vec<&'static str>> {
     // A shared handle, so the model's fields are not read under the lock.
     let snapshot = read_snapshot(model, Arc::clone)?;
     Some(
-        M::field_names()
-            .iter()
-            .filter(|field| model.field_value(field).as_ref() != snapshot.get(**field))
-            .copied()
+        field_values(model)
+            .filter(|(field, value)| Some(value) != snapshot.get(field))
+            .map(|(field, _)| field)
             .collect(),
     )
 }

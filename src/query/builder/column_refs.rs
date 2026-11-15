@@ -110,8 +110,24 @@ impl<M: Model> QueryBuilder<M> {
         crate::columns::column_reference(column, crate::columns::model_table::<M>())
     }
 
+    /// Whether `value` is a column reference a clause may write: one of the
+    /// model's own names, which may hold a `.` or a space, or a plain
+    /// `column` or `table.column`.
+    pub(in crate::query) fn is_column_reference(value: &str) -> bool {
+        M::own_column_name(value).is_some()
+            || db_sql::validate_identifier_reference("column", value).is_ok()
+    }
+
     pub(in crate::query) fn simple_column_reference(value: &str) -> Option<(&str, &str)> {
         let (value, _) = Self::split_alias(value);
+        // The model's own names resolve first: they may hold a `.` or a space.
+        if let Some((qualified, column)) = M::own_column_reference(value) {
+            return Some(if qualified {
+                (M::table_name(), column)
+            } else {
+                ("", value)
+            });
+        }
         match crate::internal::sql_safety::identifier_reference_parts(value)?.as_slice() {
             [column] => Some(("", *column)),
             [table, column] => Some((*table, *column)),
@@ -144,22 +160,23 @@ impl<M: Model> QueryBuilder<M> {
         } else {
             std::borrow::Cow::Owned(format!("{}.{}", table, column))
         };
+        let own_table = table.is_empty() || M::owns_table_reference(table);
+        // The model declared its own names; they are quoted when written.
+        if own_table && M::canonical_column_name(column).is_some() {
+            return Ok(());
+        }
         db_sql::validate_identifier_reference(kind, &reference)?;
 
-        if table.is_empty() || M::owns_table_reference(table) {
-            if M::canonical_column_name(column).is_some() {
-                Ok(())
-            } else {
-                let (known_label, known_names) = Self::known_model_column_references();
-                Err(format!(
-                    "unknown {} '{}' for model '{}'; {}: {}",
-                    kind,
-                    reference,
-                    M::table_name(),
-                    known_label,
-                    known_names
-                ))
-            }
+        if own_table {
+            let (known_label, known_names) = Self::known_model_column_references();
+            Err(format!(
+                "unknown {} '{}' for model '{}'; {}: {}",
+                kind,
+                reference,
+                M::table_name(),
+                known_label,
+                known_names
+            ))
         } else if let Some(qualifiers) = known_qualifiers {
             if qualifiers.contains(table) {
                 Ok(())
@@ -244,11 +261,14 @@ impl<M: Model> QueryBuilder<M> {
                 return Ok(());
             }
             if let Some(qualifier) = expression.strip_suffix(".*") {
+                if M::owns_table_reference(qualifier) {
+                    return Ok(());
+                }
                 return db_sql::validate_identifier("SELECT wildcard qualifier", qualifier);
             }
         }
 
-        if db_sql::validate_identifier_reference("SELECT column", expression).is_err() {
+        if !Self::is_column_reference(expression) {
             return Err(format!(
                 "unsafe SELECT column '{}': select() takes a column, table.column or `column AS alias`; use select_raw() for trusted SQL expressions and never pass user input to it",
                 trimmed
@@ -293,7 +313,11 @@ impl<M: Model> QueryBuilder<M> {
         let mut covers_everything = false;
         for column in columns {
             let column = column.trim();
-            if column == own_wildcard || (column == "*" && self.clauses.joins.is_empty()) {
+            if column
+                .strip_suffix(".*")
+                .is_some_and(M::owns_table_reference)
+                || (column == "*" && self.clauses.joins.is_empty())
+            {
                 covers_everything = true;
             } else if column.ends_with('*') {
                 return Err(Error::query(format!(
@@ -311,23 +335,14 @@ impl<M: Model> QueryBuilder<M> {
         let mut covered = BTreeSet::new();
         for column in columns {
             let column = column.trim();
-            let output = match Self::split_alias(column).1 {
-                // Aliases are literal result names, not Rust field references.
-                // The model decoder looks up the database column name.
-                Some(alias) => {
-                    if M::column_names().contains(&alias) {
-                        covered.insert(alias);
-                    }
-                    continue;
+            // Aliases are literal result names, not Rust field references.
+            // The model decoder looks up the database column name.
+            if let Some(alias) = Self::split_alias(column).1 {
+                if M::column_names().contains(&alias) {
+                    covered.insert(alias);
                 }
-                None => match column.rsplit_once('.') {
-                    // Another table's column fills none of the model's.
-                    Some((table, _)) if !M::owns_table_reference(table) => continue,
-                    Some((_, name)) => name,
-                    None => column,
-                },
-            };
-            if let Some(name) = M::canonical_column_name(output) {
+            } else if let Some(name) = M::own_column_name(column) {
+                // Only the model's own columns count: another table's fills none.
                 covered.insert(name);
             }
         }

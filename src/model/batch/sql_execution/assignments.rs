@@ -4,9 +4,10 @@ use super::*;
 
 impl<M: Model> BatchUpdateBuilder<M> {
     /// Bind `value` with the type of the column it is assigned to, as a filter
-    /// value is bound, refusing a value the column cannot hold: SQLite stores
-    /// whatever it is given, and the model could then no longer read the row.
-    /// A JSON column takes the value's document.
+    /// value is bound, refusing a value the field cannot hold: SQLite stores
+    /// whatever it is given, PostgreSQL an integer its wider column holds, and
+    /// the model could then no longer read the row. A JSON column takes the
+    /// value's document.
     fn column_value(
         column: &str,
         column_type: Option<&ColumnType>,
@@ -52,7 +53,10 @@ impl<M: Model> BatchUpdateBuilder<M> {
                     Some(_) => Ok(bound),
                 }
             }
-            Some(kind) if db_type == DatabaseType::SQLite && crate::internal::is_integer(kind) => {
+            Some(kind)
+                if matches!(db_type, DatabaseType::SQLite | DatabaseType::Postgres)
+                    && crate::internal::is_integer(kind) =>
+            {
                 // SQLite affinity would store a large number as REAL, or keep
                 // invalid text, where the model expects an integer.
                 let integer = document.as_i64().or_else(|| {
@@ -61,7 +65,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
                         .filter(|n| n.fract() == 0.0)
                         .and_then(|n| i64::try_from(n as i128).ok())
                 });
-                let (min, max) = Self::sqlite_integer_bounds(column, column_type);
+                let (min, max) = Self::integer_bounds(column, column_type);
                 match integer.is_some_and(|integer| (min..=max).contains(&integer)) {
                     true => Ok(bound),
                     false => refuse("is outside the model's integer range or is not an integer"),
@@ -130,6 +134,20 @@ impl<M: Model> BatchUpdateBuilder<M> {
                 db_type
                     .dialect()
                     .json_set(&col, &Self::json_set_path(path)?, &document)
+            }
+            // PostgreSQL binds a document as `jsonb`, which COALESCE cannot
+            // unify with a `json` column; both read as text, which keeps a
+            // `json` document's text and converts back to either type.
+            UpdateValue::Coalesce(default)
+                if db_type == DatabaseType::Postgres
+                    && matches!(kind, Some(ColumnType::Json | ColumnType::JsonBinary)) =>
+            {
+                let mut coalesced =
+                    BoundSql::sql(format!("CAST(COALESCE(CAST({col} AS TEXT), CAST("));
+                coalesced
+                    .push(Self::column_value(column, kind, default, db_type)?)
+                    .push(" AS TEXT)) AS JSON)");
+                coalesced
             }
             UpdateValue::Coalesce(default) => {
                 let mut coalesced = BoundSql::sql(format!("COALESCE({col}, "));

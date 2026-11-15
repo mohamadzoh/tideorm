@@ -18,6 +18,9 @@ mod distinct;
 #[path = "queries/decimals.rs"]
 mod decimals;
 
+#[path = "queries/enum_columns.rs"]
+mod enum_columns;
+
 #[path = "queries/filters.rs"]
 mod filters;
 
@@ -26,6 +29,9 @@ mod json_rows;
 
 #[path = "queries/projections.rs"]
 mod projections;
+
+#[path = "queries/quoted_names.rs"]
+mod quoted_names;
 
 #[path = "queries/schema_columns.rs"]
 mod schema_columns;

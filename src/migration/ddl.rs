@@ -90,8 +90,8 @@ impl ColumnDefinition {
     /// `default` as `db_type` accepts it for this column. A current-time
     /// default in any common spelling (`now()`, `CURRENT_TIMESTAMP()`, ..) is
     /// written `CURRENT_TIMESTAMP` on SQLite, the only one it reads, and on
-    /// MySQL raised to the six fractional digits of a `DATETIME(6)`, because
-    /// MySQL rejects a default less precise than its column. On MySQL a
+    /// MySQL as precise as the column, because MySQL rejects a current-time
+    /// default whose precision differs from its column's. On MySQL a
     /// `TEXT`, `BLOB` or `JSON` default (an array column is `JSON` there) is
     /// written as an expression, the only form MySQL allows on those types.
     fn default_sql(&self, db_type: DatabaseType, default: &str) -> String {
@@ -108,8 +108,13 @@ impl ColumnDefinition {
         }
         let accepted_as_is = default.eq_ignore_ascii_case("NULL")
             || (default.starts_with('(') && default.ends_with(')'));
-        match column_type_sql(&self.column_type, db_type).as_str() {
-            "DATETIME(6)" if is_current_timestamp(default) => "CURRENT_TIMESTAMP(6)".to_string(),
+        let type_sql = column_type_sql(&self.column_type, db_type);
+        if is_current_timestamp(default)
+            && let Some(now) = current_time_for(&type_sql)
+        {
+            return now;
+        }
+        match type_sql.as_str() {
             "LONGTEXT" | "LONGBLOB" | "JSON" if !accepted_as_is => format!("({default})"),
             _ => default.to_string(),
         }
@@ -200,16 +205,37 @@ macro_rules! index_methods {
 pub(crate) use index_methods;
 
 /// Whether `default` is the current timestamp in one of the spellings the
-/// backends share between them.
-fn is_current_timestamp(default: &str) -> bool {
-    matches!(
-        default.trim().to_ascii_uppercase().as_str(),
-        "CURRENT_TIMESTAMP"
-            | "CURRENT_TIMESTAMP()"
-            | "NOW()"
-            | "LOCALTIMESTAMP"
-            | "LOCALTIMESTAMP()"
-    )
+/// backends share between them, with a precision as MySQL and MariaDB write
+/// one: `CURRENT_TIMESTAMP(6)`.
+pub(super) fn is_current_timestamp(default: &str) -> bool {
+    let default = default.trim().to_ascii_uppercase();
+    let (name, called) = match default.split_once('(') {
+        Some((name, arguments)) => match arguments.strip_suffix(')') {
+            Some(digits) if digits.bytes().all(|byte| byte.is_ascii_digit()) => {
+                (name.trim_end(), true)
+            }
+            _ => return false,
+        },
+        None => (default.as_str(), false),
+    };
+    matches!(name, "CURRENT_TIMESTAMP" | "LOCALTIMESTAMP") || (called && name == "NOW")
+}
+
+/// The current time as a column of type `type_sql` takes it, as precise as
+/// the column: `CURRENT_TIMESTAMP(6)` for a `DATETIME(6)`. `None` for a type
+/// that holds no timestamp.
+pub(super) fn current_time_for(type_sql: &str) -> Option<String> {
+    let type_sql = type_sql.trim().to_ascii_uppercase();
+    let precision = ["DATETIME", "TIMESTAMP"]
+        .iter()
+        .find_map(|name| type_sql.strip_prefix(name))?
+        .trim();
+    if precision.is_empty() {
+        return Some("CURRENT_TIMESTAMP".to_string());
+    }
+    let digits = precision.strip_prefix('(')?.strip_suffix(')')?.trim();
+    (!digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| format!("CURRENT_TIMESTAMP({digits})"))
 }
 
 /// Whether SQLite can add a column with `default` to a table that has rows:

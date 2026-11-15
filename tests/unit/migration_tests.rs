@@ -475,6 +475,53 @@ fn test_change_column_keeps_a_text_columns_character_set_and_collation() {
 }
 
 #[test]
+fn test_change_column_writes_the_current_time_as_precise_as_the_new_type() {
+    // MySQL's spelling and MariaDB's.
+    let create_table = "CREATE TABLE `events` (
+  `seen` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `kept` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp() COMMENT 'c',
+  `fine` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `other` int NOT NULL DEFAULT 0
+) ENGINE=InnoDB";
+    let mut builder = AlterTableBuilder::new("events", DatabaseType::MySQL);
+    builder
+        .change_column("seen", ColumnType::DateTime)
+        .change_column("kept", ColumnType::DateTime)
+        .change_column("fine", ColumnType::Custom("TIMESTAMP".to_string().into()))
+        .change_column("other", ColumnType::BigInteger);
+    builder.keep_column_attributes(create_table);
+
+    assert_eq!(
+        builder.build().unwrap(),
+        [
+            "ALTER TABLE `events` MODIFY COLUMN `seen` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6)",
+            "ALTER TABLE `events` MODIFY COLUMN `kept` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6) COMMENT 'c'",
+            "ALTER TABLE `events` MODIFY COLUMN `fine` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP",
+            "ALTER TABLE `events` MODIFY COLUMN `other` BIGINT NOT NULL DEFAULT 0",
+        ]
+    );
+}
+
+#[test]
+fn test_add_column_writes_the_current_time_as_precise_as_its_type() {
+    let mut builder = AlterTableBuilder::new("events", DatabaseType::MySQL);
+    builder
+        .add_column("seen", ColumnType::Custom("TIMESTAMP".to_string().into()))
+        .default(DefaultValue::Raw("CURRENT_TIMESTAMP(6)".to_string()));
+    builder
+        .add_column("kept", ColumnType::Custom("DATETIME(3)".to_string().into()))
+        .default_now();
+
+    assert_eq!(
+        builder.build().unwrap(),
+        [
+            "ALTER TABLE `events` ADD COLUMN `seen` TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+            "ALTER TABLE `events` ADD COLUMN `kept` DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3)",
+        ]
+    );
+}
+
+#[test]
 fn test_change_column_after_a_rename_keeps_the_renamed_columns_attributes() {
     let create_table = "CREATE TABLE `users` (
   `old` int NOT NULL DEFAULT 5 COMMENT 'kept',

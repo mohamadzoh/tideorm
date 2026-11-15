@@ -57,3 +57,6 @@ mod removal;
 
 #[path = "entity_manager/relation_sync.rs"]
 mod relation_sync;
+
+#[path = "entity_manager/cycles.rs"]
+mod cycles;

@@ -359,3 +359,43 @@ async fn a_version_registered_twice_runs_nothing() {
         .unwrap();
     assert!(tables.is_empty(), "{tables:?}");
 }
+
+/// A migrator run inside a transaction keeps the migration lock until the
+/// transaction commits or rolls back: its ledger rows are invisible to other
+/// runners until then, and one taking the lock sooner could apply the same
+/// migrations again.
+#[tokio::test]
+async fn a_transaction_keeps_the_migration_lock_until_it_ends() {
+    const HELD: &[&str] = &["CREATE TABLE held(id INTEGER PRIMARY KEY)"];
+    for commit in [true, false] {
+        let (db, path) = crate::fixtures::file_database("migration-held").await;
+        let sidecar = format!("{}.tideorm-migrations.lock", path.display());
+        let lock_is_free = || {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&sidecar)
+                .unwrap();
+            file.try_lock().is_ok()
+        };
+        let migrator = Migrator::new().database(&db).add(sql("held", "held", HELD));
+        let ended = db
+            .transaction(async |_| {
+                assert_eq!(migrator.run().await?.applied.len(), 1);
+                assert!(
+                    !lock_is_free(),
+                    "the lock was released inside the transaction"
+                );
+                match commit {
+                    true => Ok(()),
+                    false => Err(tideorm::Error::query("roll the migration back")),
+                }
+            })
+            .await;
+        assert_eq!(ended.is_ok(), commit);
+        assert!(
+            lock_is_free(),
+            "commit {commit}: the ended transaction kept the lock"
+        );
+    }
+}

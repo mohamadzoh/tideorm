@@ -38,13 +38,14 @@ pub struct PendingInvalidations {
     databases: HashSet<Arc<str>>,
     all: bool,
     undo: Vec<Box<dyn FnOnce() + Send>>,
-    /// The seed lock survives savepoint completion until the enclosing
-    /// transaction commits or rolls back. Its mutex also serializes seed
-    /// operations sharing that transaction. The boxed guard releases on drop.
-    seed_lock: SeedLock,
+    /// The migration and seed locks, which survive savepoint completion
+    /// until the enclosing transaction commits or rolls back. Each mutex also
+    /// serializes the operations of its kind sharing that transaction. The
+    /// boxed guard releases on drop.
+    ledger_locks: [LedgerLockSlot; 2],
 }
 
-type SeedLock = Arc<futures_util::lock::Mutex<Option<Box<dyn Send>>>>;
+type LedgerLockSlot = Arc<futures_util::lock::Mutex<Option<Box<dyn Send>>>>;
 
 /// A transaction's record, shared by the transaction, its connection and the
 /// savepoints opened in it.
@@ -71,9 +72,9 @@ impl PendingInvalidations {
     /// The record of a transaction begun on its own, or, as a savepoint, in
     /// the transaction `enclosing` records.
     pub(crate) fn new(enclosing: Option<Record>) -> Self {
-        let seed_lock = match &enclosing {
-            Some(enclosing) => enclosing.lock().seed_lock.clone(),
-            None => SeedLock::default(),
+        let ledger_locks = match &enclosing {
+            Some(enclosing) => enclosing.lock().ledger_locks.clone(),
+            None => Default::default(),
         };
         Self {
             enclosing,
@@ -81,12 +82,13 @@ impl PendingInvalidations {
             databases: HashSet::new(),
             all: false,
             undo: Vec::new(),
-            seed_lock,
+            ledger_locks,
         }
     }
 
-    pub(crate) fn seed_lock(&self) -> SeedLock {
-        self.seed_lock.clone()
+    /// The migration lock's slot (0) or the seed lock's (1).
+    pub(crate) fn ledger_lock(&self, kind: usize) -> LedgerLockSlot {
+        self.ledger_locks[kind].clone()
     }
 
     pub(super) fn table(&mut self, table: &str) {

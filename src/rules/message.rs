@@ -24,11 +24,7 @@ impl Message {
         let text = text.as_bytes();
         let mut end = text.len();
         if end > Self::CAPACITY - self.len {
-            end = Self::CAPACITY - self.len;
-            // Back off to the first byte of the character the cut falls in.
-            while end > 0 && text[end] & 0b1100_0000 == 0b1000_0000 {
-                end -= 1;
-            }
+            end = char_start(text, Self::CAPACITY - self.len);
         }
         let mut at = 0;
         while at < end {
@@ -57,9 +53,16 @@ impl Message {
         }
     }
 
-    /// End with the rule's name, as every broken rule's message does.
+    /// End with the rule's name, as every broken rule's message does, cutting
+    /// the text before it when both would not fit.
     pub(crate) const fn rule(&mut self, rule: &str) -> &mut Self {
-        self.push(" (").push(rule).push(" in tideorm.toml)")
+        const BEFORE: &str = " (";
+        const AFTER: &str = " in tideorm.toml)";
+        let room = Self::CAPACITY.saturating_sub(BEFORE.len() + rule.len() + AFTER.len());
+        if self.len > room {
+            self.len = char_start(&self.bytes, room);
+        }
+        self.push(BEFORE).push(rule).push(AFTER)
     }
 
     /// The message's text.
@@ -69,4 +72,12 @@ impl Message {
             Err(_) => "",
         }
     }
+}
+
+/// `at`, backed off to the first byte of the character it falls in.
+const fn char_start(bytes: &[u8], mut at: usize) -> usize {
+    while at > 0 && bytes[at] & 0b1100_0000 == 0b1000_0000 {
+        at -= 1;
+    }
+    at
 }

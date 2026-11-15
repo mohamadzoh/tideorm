@@ -222,22 +222,24 @@ impl<M: Model> QueryBuilder<M> {
         };
         // The model's own columns are written with its table, as every
         // HAVING aggregate always has been.
-        let mut sql = BoundSql::sql(aggregate.render(&|column| {
-            db_sql::format_column(db_type, &self.model_identifier(column.trim(), true))
-        }));
+        let mut sql = BoundSql::sql(
+            aggregate.render(&|column| self.strict_column_sql(db_type, column, true)),
+        );
         match (value, aggregate.extreme_column()) {
             (None, _) if operator == "=" => sql.push(" IS NULL"),
             (None, _) => sql.push(" IS NOT NULL"),
-            (Some(value), Some(column)) => {
+            // `MIN`/`MAX` have no column affinity on SQLite, so a decimal
+            // bound as text there would compare as text with the number.
+            (Some(value), column) => {
+                let value = match column {
+                    Some(column) => {
+                        crate::internal::column_value(value, self.column_type(column).as_ref())
+                    }
+                    None => value.clone(),
+                };
                 sql.push(format!(" {operator} "))
-                    .push(crate::internal::column_value(
-                        value,
-                        self.column_type(column).as_ref(),
-                    ))
+                    .push(backend_number(&value, db_type))
             }
-            (Some(value), None) => sql
-                .push(format!(" {operator} "))
-                .push(backend_number(value, db_type)),
         };
         sql
     }

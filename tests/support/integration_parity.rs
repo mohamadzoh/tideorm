@@ -2932,7 +2932,10 @@ pub struct UnsignedCounter {
 /// Every integer width round-trips at its extremes on every backend, through
 /// the columns migrations create for it; a `u64` past `i64::MAX` is stored
 /// only by MySQL's unsigned column and refused, with nothing written, where
-/// the column is signed.
+/// the column is signed. A batch update that would leave a value the field
+/// cannot hold fails and leaves the row as it was: TideORM checks the field's
+/// range on SQLite and PostgreSQL, whose columns can be wider than the field,
+/// and the MySQL family's columns, the field's own width, refuse it.
 #[tokio::test]
 async fn integers_of_every_width_round_trip() {
     if !setup().await {
@@ -2942,7 +2945,7 @@ async fn integers_of_every_width_round_trip() {
     use tideorm::migration::ColumnType;
     fresh_table("unsigned_counters", |t| {
         t.id();
-        t.column("tiny", ColumnType::SmallInteger).not_null();
+        t.column("tiny", ColumnType::TinyInteger).not_null();
         t.column("byte", ColumnType::TinyUnsigned).not_null();
         t.column("short", ColumnType::SmallUnsigned).not_null();
         t.column("word", ColumnType::Unsigned).not_null();
@@ -2996,6 +2999,43 @@ async fn integers_of_every_width_round_trip() {
         assert!(past_signed.is_err(), "{past_signed:?}");
         assert_eq!(stored, 0, "nothing may be written");
     }
+
+    let id = saved.id;
+    let read = move || async move {
+        let row = UnsignedCounter::find(id)
+            .await
+            .expect("find failed")
+            .expect("the row was stored");
+        (row.tiny, row.byte, row.short, row.word, row.hits)
+    };
+    let update = || UnsignedCounter::query().where_eq("id", id).update_all();
+    for (name, refused) in [
+        ("set past i8", update().set("tiny", 128)),
+        ("set past u8", update().set("byte", 256)),
+        ("set below u16", update().set("short", -1)),
+        (
+            "set past u32",
+            update().set("word", i64::from(u32::MAX) + 1),
+        ),
+        ("set below u64", update().set("hits", -1)),
+        ("decrement below i8", update().decrement("tiny", 1)),
+        ("increment past u8", update().increment("byte", 1)),
+        ("increment past u16", update().increment("short", 1)),
+        ("increment past u32", update().increment("word", 1)),
+        ("multiply past u8", update().multiply("byte", 1.5)),
+        ("multiply past u64", update().multiply("hits", 2.5)),
+        ("divide past u16", update().divide("short", 0.5)),
+    ] {
+        assert!(refused.execute().await.is_err(), "{name} was written");
+        assert_eq!(
+            read().await,
+            (i8::MIN, u8::MAX, u16::MAX, u32::MAX, largest_signed),
+            "{name} changed the row"
+        );
+    }
+    let decremented = update().decrement("byte", 5).execute().await;
+    assert_eq!(decremented.expect("decrement failed"), 1);
+    assert_eq!(read().await.1, u8::MAX - 5);
 }
 
 #[tideorm::model(table = "linked_articles")]
@@ -7032,4 +7072,87 @@ async fn json_mutations_write_the_same_document_everywhere() {
             Some(serde_json::json!([5, "tail"]))
         );
     }
+}
+
+#[tideorm::model(table = "spaced items")]
+pub struct SpacedItem {
+    #[tideorm(primary_key)]
+    pub id: i64,
+    pub grp: String,
+    pub qty: i64,
+}
+
+#[tideorm::model(table = "dotted_items")]
+pub struct DottedItem {
+    #[tideorm(primary_key)]
+    pub id: i64,
+    #[tideorm(column = "a.b")]
+    pub dotted: i64,
+}
+
+/// A table name holding a space and a column name holding a `.` are the
+/// model's own names, written whole on every backend: in a HAVING over a
+/// group, a cursor page, and a filter, an order and a pluck.
+#[tokio::test]
+async fn names_with_a_space_or_a_dot_are_written_whole() {
+    if !backend::connect().await {
+        return;
+    }
+
+    fresh_table("spaced items", |t| {
+        t.big_integer("id").primary_key();
+        t.string("grp").not_null();
+        t.big_integer("qty").not_null();
+    })
+    .await;
+    let items = [(1, "a", 10), (2, "a", 15), (3, "b", 30), (4, "b", 5)];
+    SpacedItem::insert_all(
+        items
+            .map(|(id, grp, qty)| SpacedItem {
+                id,
+                grp: grp.to_string(),
+                qty,
+            })
+            .to_vec(),
+    )
+    .await
+    .expect("failed to insert the items");
+    let groups = SpacedItem::query()
+        .select(vec!["grp"])
+        .group_by("grp")
+        .having(Aggregate::max("qty").gt(20))
+        .get_json()
+        .await
+        .expect("the grouped read failed");
+    assert_eq!(groups, [serde_json::json!({"grp": "b"})]);
+    let first = SpacedItem::query()
+        .cursor_paginate(3, None)
+        .await
+        .expect("the first page failed");
+    let rest = SpacedItem::query()
+        .cursor_paginate(3, first.next_cursor.as_deref())
+        .await
+        .expect("the second page failed");
+    let ids = |items: &[SpacedItem]| items.iter().map(|item| item.id).collect::<Vec<_>>();
+    assert_eq!(
+        (ids(&first.items), ids(&rest.items)),
+        (vec![1, 2, 3], vec![4])
+    );
+
+    fresh_table("dotted_items", |t| {
+        t.big_integer("id").primary_key();
+        t.big_integer("a.b").not_null();
+    })
+    .await;
+    let rows = [(1, 10), (2, 30), (3, 20)];
+    DottedItem::insert_all(rows.map(|(id, dotted)| DottedItem { id, dotted }).to_vec())
+        .await
+        .expect("failed to insert the dotted rows");
+    let plucked = DottedItem::query()
+        .where_gt("a.b", 15)
+        .order_desc("a.b")
+        .pluck(DottedItem::DOTTED)
+        .await
+        .expect("the pluck failed");
+    assert_eq!(plucked, [30, 20]);
 }

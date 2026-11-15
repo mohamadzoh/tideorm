@@ -14,32 +14,15 @@ impl<M: Model> QueryBuilder<M> {
     /// some other table, and anything that is not a column reference at all,
     /// round-trips unchanged because the qualifier and the remainder are
     /// rejoined exactly as they were split.
-    ///
-    /// On a query with joins, an unqualified model column is qualified with the
-    /// model's table: a joined table can have a column of the same name, which
-    /// the database would otherwise reject as ambiguous.
-    pub(in crate::query) fn canonical_model_identifier<'a>(
-        &self,
-        identifier: &'a str,
-    ) -> std::borrow::Cow<'a, str> {
-        self.model_identifier(identifier, !self.clauses.joins.is_empty())
-    }
-
-    /// [`canonical_model_identifier`](Self::canonical_model_identifier), with
-    /// an unqualified model column qualified whenever `qualify_own` is set.
     pub(in crate::query) fn model_identifier<'a>(
         &self,
         identifier: &'a str,
-        qualify_own: bool,
     ) -> std::borrow::Cow<'a, str> {
         match M::canonical_column_parts(identifier) {
             (Some(table), column) if table == M::table_name() => {
                 std::borrow::Cow::Owned(format!("{}.{}", self.own_table_ref(), column))
             }
             (Some(table), column) => std::borrow::Cow::Owned(format!("{}.{}", table, column)),
-            (None, column) if qualify_own && M::column_names().contains(&column) => {
-                std::borrow::Cow::Owned(format!("{}.{}", self.own_table_ref(), column))
-            }
             (None, column) => std::borrow::Cow::Borrowed(column),
         }
     }
@@ -60,37 +43,90 @@ impl<M: Model> QueryBuilder<M> {
         !self.clauses.joins.is_empty() && M::column_names().contains(&column)
     }
 
+    /// One of the model's own columns, bare or qualified with its table,
+    /// written from the model's names part by part, with the model's table
+    /// when it is written qualified or `qualify_own` is set; `None` for
+    /// anything else. The names may hold a `.` or a space, which splitting
+    /// `table.column` text again would get wrong.
+    pub(in crate::query) fn own_column_sql(
+        &self,
+        db_type: DatabaseType,
+        reference: &str,
+        qualify_own: bool,
+    ) -> Option<String> {
+        let (qualified, column) = M::own_column_reference(reference)?;
+        let table = self.own_table_ref();
+        let mut sql = String::new();
+        db_sql::push_quoted_qualified(
+            &mut sql,
+            db_type,
+            (qualified || qualify_own).then_some(&*table),
+            column,
+        );
+        Some(sql)
+    }
+
     /// Render a column reference a condition, a join or an ordering names:
     /// canonicalized and quoted part by part. Validation leaves nothing else
     /// in these slots, so anything else is written as it is.
     pub(crate) fn format_column_for_db(&self, db_type: DatabaseType, column: &str) -> String {
+        self.column_sql_for_db(db_type, column, !self.clauses.joins.is_empty())
+    }
+
+    /// [`format_column_for_db`](Self::format_column_for_db), with one of the
+    /// model's columns qualified whenever `qualify_own` is set.
+    pub(in crate::query) fn column_sql_for_db(
+        &self,
+        db_type: DatabaseType,
+        column: &str,
+        qualify_own: bool,
+    ) -> String {
+        if let Some(sql) = self.own_column_sql(db_type, column, qualify_own) {
+            return sql;
+        }
         let trimmed = column.trim();
         if trimmed.contains(char::is_whitespace) {
             return trimmed.to_string();
         }
         db_sql::format_column_or_trusted_expression(
             db_type,
-            self.canonical_model_identifier(trimmed).as_ref(),
+            self.model_identifier(trimmed).as_ref(),
         )
     }
 
-    /// Render a projected column reference; an unqualified one is qualified
-    /// with the model's own table.
+    /// Render a column an aggregate or a window function takes: one of the
+    /// model's own, or else quoted part by part, anything that is not a plain
+    /// identifier reference as one identifier rather than as SQL.
+    pub(in crate::query) fn strict_column_sql(
+        &self,
+        db_type: DatabaseType,
+        column: &str,
+        qualify_own: bool,
+    ) -> String {
+        self.own_column_sql(db_type, column, qualify_own)
+            .unwrap_or_else(|| {
+                db_sql::format_column(db_type, &self.model_identifier(column.trim()))
+            })
+    }
+
+    /// Render a projected column reference; one of the model's own columns,
+    /// or any bare name, is qualified with its table.
     fn format_projection_column(
         &self,
         db_type: DatabaseType,
         table: &str,
         identifier: &str,
     ) -> String {
-        if identifier.contains('.') {
-            return self.format_column_for_db(db_type, identifier);
-        }
-
-        format!(
-            "{}.{}",
-            db_sql::quote_ident(db_type, table),
-            db_sql::quote_ident(db_type, M::column_named(identifier))
-        )
+        let column = match M::own_column_reference(identifier) {
+            Some((_, column)) => column,
+            None if identifier.contains('.') => {
+                return self.format_column_for_db(db_type, identifier);
+            }
+            None => identifier,
+        };
+        let mut sql = String::new();
+        db_sql::push_quoted_qualified(&mut sql, db_type, Some(table), column);
+        sql
     }
 
     fn format_select_column_for_db(
@@ -99,10 +135,19 @@ impl<M: Model> QueryBuilder<M> {
         table: &str,
         column: &str,
     ) -> String {
-        let is_reference =
-            |value: &str| db_sql::format_identifier_reference(db_type, value).is_some();
+        let is_reference = |value: &str| {
+            M::own_column_name(value).is_some()
+                || db_sql::format_identifier_reference(db_type, value).is_some()
+        };
 
         match Self::split_alias(column) {
+            (identifier, None)
+                if identifier
+                    .strip_suffix(".*")
+                    .is_some_and(M::owns_table_reference) =>
+            {
+                format!("{}.*", db_sql::quote_ident(db_type, table))
+            }
             (identifier, None) if is_reference(identifier) => {
                 self.format_projection_column(db_type, table, identifier)
             }
@@ -167,7 +212,8 @@ impl<M: Model> QueryBuilder<M> {
 
         // Window columns are Rust field names or database columns, as in every
         // other slot, so they are rendered the way the query renders those.
-        let canonical = |column: &str| self.canonical_model_identifier(column).into_owned();
+        let qualify_own = !self.clauses.joins.is_empty();
+        let column = |column: &str| self.strict_column_sql(db_type, column, qualify_own);
         for window_function in &self.clauses.window_functions {
             if window_function.frame_type == Some(crate::query::FrameType::Groups)
                 && window_function.frame_start.is_some()
@@ -178,14 +224,7 @@ impl<M: Model> QueryBuilder<M> {
                     window_function.alias, db_type
                 )));
             }
-            outputs.push(
-                Expr::cust(
-                    window_function
-                        .map_columns(&canonical)
-                        .to_sql_for_db(db_type),
-                )
-                .into(),
-            );
+            outputs.push(Expr::cust(window_function.to_sql_with(db_type, &column)).into());
         }
 
         if self.is_distinct() {

@@ -254,28 +254,6 @@ impl WindowFunctionType {
         }
     }
 
-    /// This function with its column argument, if any, passed through `column`.
-    fn map_column(&self, column: &dyn Fn(&str) -> String) -> Self {
-        match self {
-            Self::Lag(col, offset, default) => Self::Lag(column(col), *offset, default.clone()),
-            Self::Lead(col, offset, default) => Self::Lead(column(col), *offset, default.clone()),
-            Self::FirstValue(col) => Self::FirstValue(column(col)),
-            Self::LastValue(col) => Self::LastValue(column(col)),
-            Self::NthValue(col, n) => Self::NthValue(column(col), *n),
-            Self::Sum(col) => Self::Sum(column(col)),
-            Self::Avg(col) => Self::Avg(column(col)),
-            Self::Count(Some(col)) => Self::Count(Some(column(col))),
-            Self::Min(col) => Self::Min(column(col)),
-            Self::Max(col) => Self::Max(column(col)),
-            Self::RowNumber
-            | Self::Rank
-            | Self::DenseRank
-            | Self::Ntile(_)
-            | Self::Count(None)
-            | Self::Custom(_) => self.clone(),
-        }
-    }
-
     /// Render the function call itself — no `OVER (..)` clause, which
     /// [`WindowFunction::to_sql_for_db`] adds around it.
     ///
@@ -284,8 +262,11 @@ impl WindowFunctionType {
     /// identifier rather than passed through as SQL. Numeric arguments are
     /// integers and safe to interpolate.
     pub fn as_sql_for_db(&self, db_type: DatabaseType) -> String {
-        let quote_column = |column: &str| db_sql::format_column(db_type, column);
+        self.call_sql(&|column| db_sql::format_column(db_type, column))
+    }
 
+    /// The function call with each column written by `quote_column`.
+    fn call_sql(&self, quote_column: &dyn Fn(&str) -> String) -> String {
         match self {
             WindowFunctionType::RowNumber => "ROW_NUMBER()".to_string(),
             WindowFunctionType::Rank => "RANK()".to_string(),
@@ -386,24 +367,6 @@ impl WindowFunction {
         }
     }
 
-    /// This window with every column it names passed through `column`: its
-    /// function's argument and its `PARTITION BY` and `ORDER BY` columns.
-    pub(crate) fn map_columns(&self, column: &dyn Fn(&str) -> String) -> Self {
-        Self {
-            function: self.function.map_column(column),
-            partition_by: self.partition_by.iter().map(|c| column(c)).collect(),
-            order_by: self
-                .order_by
-                .iter()
-                .map(|(c, direction)| (column(c), *direction))
-                .collect(),
-            frame_type: self.frame_type,
-            frame_start: self.frame_start.clone(),
-            frame_end: self.frame_end.clone(),
-            alias: self.alias.clone(),
-        }
-    }
-
     /// Append `PARTITION BY` columns: one column, or several as a tuple or an
     /// array. Repeated calls accumulate left to right.
     pub fn partition_by(mut self, columns: impl crate::columns::IntoColumnNames) -> Self {
@@ -447,39 +410,45 @@ impl WindowFunction {
     /// unordered, unframed window renders as a bare `OVER ()`. On MySQL and
     /// MariaDB a `LAG`/`LEAD` default is chosen by a `CASE` around the call.
     pub fn to_sql_for_db(&self, db_type: DatabaseType) -> String {
-        let over = self.over_clause_for_db(db_type);
+        self.to_sql_with(db_type, &|column| db_sql::format_column(db_type, column))
+    }
+
+    /// [`to_sql_for_db`](Self::to_sql_for_db) with each column the window
+    /// names written by `column`, as the query writes its model's columns.
+    pub(crate) fn to_sql_with(
+        &self,
+        db_type: DatabaseType,
+        column: &dyn Fn(&str) -> String,
+    ) -> String {
+        let over = self.over_clause(column);
         let with_default = match &self.function {
-            WindowFunctionType::Lag(column, offset, Some(default)) => {
-                Some(("LAG", column, offset.unwrap_or(1), default))
+            WindowFunctionType::Lag(value_column, offset, Some(default)) => {
+                Some(("LAG", value_column, offset.unwrap_or(1), default))
             }
-            WindowFunctionType::Lead(column, offset, Some(default)) => {
-                Some(("LEAD", column, offset.unwrap_or(1), default))
+            WindowFunctionType::Lead(value_column, offset, Some(default)) => {
+                Some(("LEAD", value_column, offset.unwrap_or(1), default))
             }
             _ => None,
         };
         let call = match with_default {
-            Some((name, column, offset, default)) => db_type.dialect().window_default(
+            Some((name, value_column, offset, default)) => db_type.dialect().window_default(
                 name,
-                &db_sql::format_column(db_type, column),
+                &column(value_column),
                 &offset.to_string(),
                 default,
                 &over,
             ),
-            None => format!("{} OVER ({over})", self.function.as_sql_for_db(db_type)),
+            None => format!("{} OVER ({over})", self.function.call_sql(column)),
         };
         format!("{call} AS {}", db_sql::quote_ident(db_type, &self.alias))
     }
 
     /// What goes inside `OVER (..)`: the partition, the order and the frame.
-    fn over_clause_for_db(&self, db_type: DatabaseType) -> String {
+    fn over_clause(&self, column: &dyn Fn(&str) -> String) -> String {
         let mut clauses = Vec::new();
 
         if !self.partition_by.is_empty() {
-            let cols: Vec<String> = self
-                .partition_by
-                .iter()
-                .map(|c| db_sql::format_column(db_type, c))
-                .collect();
+            let cols: Vec<String> = self.partition_by.iter().map(|c| column(c)).collect();
             clauses.push(format!("PARTITION BY {}", cols.join(", ")));
         }
 
@@ -487,9 +456,7 @@ impl WindowFunction {
             let orders: Vec<String> = self
                 .order_by
                 .iter()
-                .map(|(col, dir)| {
-                    format!("{} {}", db_sql::format_column(db_type, col), dir.as_str())
-                })
+                .map(|(col, dir)| format!("{} {}", column(col), dir.as_str()))
                 .collect();
             clauses.push(format!("ORDER BY {}", orders.join(", ")));
         }

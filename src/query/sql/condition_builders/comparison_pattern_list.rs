@@ -27,10 +27,8 @@ impl<M: Model> QueryBuilder<M> {
         db_type: DatabaseType,
         column: &str,
     ) -> String {
-        self.format_column_for_db(
-            db_type,
-            &self.model_identifier(column, db_type == DatabaseType::SQLite),
-        )
+        let qualify_own = !self.clauses.joins.is_empty() || db_type == DatabaseType::SQLite;
+        self.column_sql_for_db(db_type, column, qualify_own)
     }
 
     /// The JSON column `column_sql` holding the document `value`, or not when
@@ -129,18 +127,30 @@ impl<M: Model> QueryBuilder<M> {
         if is_json_type(column_type) {
             let negated = matches!(operator, ListOperator::NotIn);
             let column_sql = self.condition_column_sql(db_type, column);
-            let mut documents = values.iter().map(|value| {
-                let document = crate::internal::value_document(value);
-                Self::build_json_equals_expression(db_type, &column_sql, &document, negated)
-            });
-            if let Some(first) = documents.next() {
-                return documents.fold(first, |all, document| {
-                    if negated {
-                        all.and(document)
-                    } else {
-                        all.or(document)
-                    }
-                });
+            let mut documents: Vec<SimpleExpr> = values
+                .iter()
+                .map(|value| {
+                    let document = crate::internal::value_document(value);
+                    Self::build_json_equals_expression(db_type, &column_sql, &document, negated)
+                })
+                .collect();
+            // Joined pairwise, so the tree is as deep as the log of its
+            // length: one joined per value would overflow the stack as a
+            // list of a few hundred renders.
+            while documents.len() > 1 {
+                let mut pairs = documents.into_iter();
+                let mut joined = Vec::with_capacity(pairs.len().div_ceil(2));
+                while let Some(left) = pairs.next() {
+                    joined.push(match pairs.next() {
+                        Some(right) if negated => left.and(right),
+                        Some(right) => left.or(right),
+                        None => left,
+                    });
+                }
+                documents = joined;
+            }
+            if let Some(all) = documents.pop() {
+                return all;
             }
         }
 

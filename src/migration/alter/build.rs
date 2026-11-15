@@ -269,7 +269,8 @@ impl AlterTableBuilder {
                 // holds text, which would otherwise take the table's; any
                 // other type refuses one.
                 let character = if holds_text(&type_sql) { character } else { "" };
-                let rest = restate_attributes(rest, change.nullable, change.default.as_ref());
+                let rest =
+                    restate_attributes(rest, change.nullable, change.default.as_ref(), &type_sql);
                 let mut sql = format!("ALTER TABLE {table} MODIFY COLUMN {column} {type_sql}");
                 for attribute in [character, rest.as_str()] {
                     if !attribute.is_empty() {

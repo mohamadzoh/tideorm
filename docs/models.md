@@ -130,7 +130,7 @@ Enable the `encrypted-fields` Cargo feature before using `encrypted = "..."`.
 
 ```toml
 [dependencies]
-tideorm = { version = "0.17.6", features = ["postgres", "encrypted-fields"] }
+tideorm = { version = "0.17.7", features = ["postgres", "encrypted-fields"] }
 ```
 
 Use `encrypted = "..."` on the model when specific persisted columns should be stored encrypted in the database but keep their own plaintext type in your Rust model.
@@ -162,7 +162,7 @@ Encrypted field behavior:
 - Typed unions reject known incompatible output types, such as a boolean and an integer at the same position, because all rows share one decoder.
 - `UNION` rejects encrypted projections because deduplication compares ciphertext. `UNION ALL` supports explicit columns (or the default model projection) when each output position has the same encryption table and column in every operand. Incompatible scopes and unknown shapes such as raw SQL or wildcards are rejected when an encrypted projection is involved; read those queries separately.
 - Configure the encryption key once during startup with `TideConfig::init().encryption_key("...")` or `TokenConfig::set_encryption_key("...")`.
-- An encrypted field can have any type that implements `Serialize` and `Deserialize` (`String`, `Option<String>`, numbers, your own structs). Its column stores the encrypted JSON of the value as text, so declare it `TEXT` whatever the field's type; `None` is stored as `NULL`. A row decrypts as it is read, so a model never holds ciphertext. A batch `set()` of an encrypted field takes a value of the field's type (or `None` for an `Option` field) and refuses anything else.
+- An encrypted field can have any type that implements `Serialize` and `Deserialize` (`String`, `Option<String>`, numbers, your own structs). Its column stores the encrypted JSON of the value as text, so declare it `TEXT` whatever the field's type; `None` is stored as `NULL`, and so is any value whose JSON is `null` (an `Option<serde_json::Value>` holding the JSON `null` reads back as `None`). A row decrypts as it is read, so a model never holds ciphertext. A batch `set()` of an encrypted field takes any filter value (`serde_json::to_value(&card)?` for a struct, `None` for an `Option` field) and refuses one the field's type cannot read.
 - `pluck`, `value`, `get_json` and `get_as` decrypt encrypted columns from the query model or joined models. Named projections in `get_json` and `get_as` retain decryption through aliases and scalar subqueries.
 - A primary key cannot be encrypted: every write stores a new ciphertext, which no lookup by the key could match, so `#[tideorm(encrypted = "..")]` on one is a compile error.
 - For the same reason an `#[index]` or `#[unique_index]` over an encrypted field, or `searchable = ".."` naming one, is a compile error (a unique index would never see two equal values), and a full-text search over an encrypted column fails with an error.

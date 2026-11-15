@@ -21,6 +21,7 @@ const MIGRATION_LOCK_NAME: &str = "tideorm_migrations";
 #[cfg(feature = "mysql")]
 const MIGRATION_LOCK_TIMEOUT_SECONDS: i64 = 300;
 
+/// Which lock: also the index of its slot in a transaction's record.
 #[derive(Clone, Copy)]
 enum LockKind {
     Migration,
@@ -263,7 +264,7 @@ pub(in crate::migration) fn with_migration_lock<'a, T: 'a>(
     db: &'a Database,
     work: impl std::future::Future<Output = Result<T>> + 'a,
 ) -> impl std::future::Future<Output = Result<T>> + 'a {
-    Box::pin(with_ledger_lock(db, LockKind::Migration, work))
+    Box::pin(retained_lock(db, LockKind::Migration, work))
 }
 
 /// Seeds use their own lock namespace, so a migration may run seeds without
@@ -273,24 +274,26 @@ pub(crate) fn with_seed_lock<'a, T: 'a>(
     db: &'a Database,
     work: impl std::future::Future<Output = Result<T>> + 'a,
 ) -> impl std::future::Future<Output = Result<T>> + 'a {
-    Box::pin(seed_locked(db, work))
+    Box::pin(retained_lock(db, LockKind::Seed, work))
 }
 
-async fn seed_locked<T>(
+/// Run `work` holding the `kind` lock. Inside a transaction, what `work`
+/// records in its ledger is visible to other runners only once that
+/// transaction commits, so the lock is kept in the transaction's record,
+/// shared with all its savepoints, rather than released with `work`.
+async fn retained_lock<T>(
     db: &Database,
+    kind: LockKind,
     work: impl std::future::Future<Output = Result<T>>,
 ) -> Result<T> {
-    // A seed's savepoint can finish before its ledger entry is visible to
-    // other runners. Keep the guard in the enclosing transaction's record,
-    // shared with all its savepoints, rather than releasing it with `work`.
     let record = db.__get_connection()?.record().cloned();
     if let Some(record) = record {
-        let retained = record.lock().seed_lock();
+        let retained = record.lock().ledger_lock(kind as usize);
         let mut held = retained.lock().await;
         if held.is_none() {
-            *held = Some(Box::new(LedgerLock::acquire(db, LockKind::Seed).await?));
+            *held = Some(Box::new(LedgerLock::acquire(db, kind).await?));
         }
-        if db.execution_backend() == DatabaseType::SQLite {
+        if matches!(kind, LockKind::Seed) && db.execution_backend() == DatabaseType::SQLite {
             use crate::internal::ConnectionTrait;
             Ledger::seeds().ensure(db).await?;
             // A read snapshot may predate a seed committed before this lock was
@@ -304,14 +307,6 @@ async fn seed_locked<T>(
         }
         return work.await;
     }
-    with_ledger_lock(db, LockKind::Seed, work).await
-}
-
-async fn with_ledger_lock<T>(
-    db: &Database,
-    kind: LockKind,
-    work: impl std::future::Future<Output = Result<T>>,
-) -> Result<T> {
     let lock = LedgerLock::acquire(db, kind).await?;
     let outcome = work.await;
     let released = lock.release().await;

@@ -249,19 +249,9 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
 
-    /// Render a column reference used inside an aggregate or HAVING expression.
-    ///
-    /// The reference is canonicalised from a Rust field name to its database
-    /// column, qualified with the model's table on a query with joins, and
-    /// quoted segment by segment (`"orders"."total"`, never the bogus
-    /// `"orders.total"`). Rendering stays strict: anything that is not a plain
-    /// identifier reference is quoted as one identifier rather than passed
-    /// through as raw SQL.
+    /// Render the column an aggregate takes, qualified on a query with joins.
     fn format_aggregate_column(&self, db_type: DatabaseType, column: &str) -> String {
-        db_sql::format_column(
-            db_type,
-            self.canonical_model_identifier(column.trim()).as_ref(),
-        )
+        self.strict_column_sql(db_type, column, !self.clauses.joins.is_empty())
     }
 
     /// The name a derived table over this query exposes `column` under, or

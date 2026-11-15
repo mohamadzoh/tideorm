@@ -35,6 +35,38 @@ pub use upsert::__upsert;
 #[doc(hidden)]
 pub struct __ColumnType<T: crate::orm::sql_builder::ValueType>(std::marker::PhantomData<T>);
 
+/// A model field's type, which [`__FieldDocumentRead`] reads from the value
+/// its column stores; the derive names one per column field.
+#[doc(hidden)]
+pub struct __FieldDocument<T>(pub std::marker::PhantomData<T>);
+
+/// The value a column stores, as its field serializes it: an enum's
+/// `string_value` as the variant's serde name.
+///
+/// Autoref specialization, as in `callbacks.rs`: a field type that reads a
+/// stored value and serializes takes the impl on `&T`, as every column field
+/// of a model that compiles does. The fallback on `&&T` reads nothing; it only
+/// keeps a field of another type to the one error the derive reports for it.
+/// Call it on `&__FieldDocument<T>`.
+#[doc(hidden)]
+pub trait __FieldDocumentRead {
+    fn read(self, value: crate::DbValue) -> Option<serde_json::Value>;
+}
+
+impl<T: crate::orm::sql_builder::ValueType + serde::Serialize> __FieldDocumentRead
+    for &__FieldDocument<T>
+{
+    fn read(self, value: crate::DbValue) -> Option<serde_json::Value> {
+        serde_json::to_value(T::try_from(value).ok()?).ok()
+    }
+}
+
+impl<T> __FieldDocumentRead for &&__FieldDocument<T> {
+    fn read(self, _: crate::DbValue) -> Option<serde_json::Value> {
+        None
+    }
+}
+
 #[doc(hidden)]
 #[cfg(feature = "encrypted-fields")]
 pub const fn __assert_encrypted_fields_feature_enabled() {}

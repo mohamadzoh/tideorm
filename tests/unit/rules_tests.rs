@@ -132,6 +132,10 @@ fn column_rules_read_the_column_kind() {
         Some("Account has 2 JSON columns, over the limit of 1 (max_json_columns in tideorm.toml)")
     );
     assert_eq!(
+        text(__check_json_columns("Account", &kinds[..1], 0)).as_deref(),
+        Some("Account has 1 JSON column, over the limit of 0 (max_json_columns in tideorm.toml)")
+    );
+    assert_eq!(
         text(__check_float_column("Item", "price", ColumnKind::Other)),
         None
     );
@@ -187,6 +191,13 @@ fn messages_are_cut_at_a_character() {
     let mut long = Message::new();
     long.push(&"→".repeat(400));
     assert_eq!(long.as_str(), "→".repeat(341));
+    // The rule's name is never the part cut off.
+    long.rule("max_json_columns");
+    let suffix = " (max_json_columns in tideorm.toml)";
+    assert_eq!(
+        long.as_str(),
+        "→".repeat((1024 - suffix.len()) / 3) + suffix
+    );
 }
 
 #[test]

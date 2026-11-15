@@ -30,31 +30,32 @@ pub(crate) fn broken_rules(ctx: &BuildContext) -> Vec<syn::Error> {
     let counts = [
         (
             "max_columns",
-            "columns",
+            ("column", "columns"),
             ctx.db_fields.len(),
             limits.max_columns,
         ),
         (
             "max_relations",
-            "relations",
+            ("relation", "relations"),
             ctx.relation_fields.len(),
             limits.max_relations,
         ),
         (
             "max_nullable_columns",
-            "nullable columns",
+            ("nullable column", "nullable columns"),
             nullable,
             limits.max_nullable_columns,
         ),
         (
             "max_indexes",
-            "indexes",
+            ("index", "indexes"),
             ctx.indexes.len(),
             limits.max_indexes,
         ),
     ];
-    for (rule, what, count, max) in counts {
+    for (rule, (one, many), count, max) in counts {
         if let Some(max) = max.filter(|max| count > *max as usize) {
+            let what = if count == 1 { one } else { many };
             fail(
                 model,
                 rule,

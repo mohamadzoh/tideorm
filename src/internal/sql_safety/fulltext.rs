@@ -278,13 +278,14 @@ pub(crate) fn fts5_prefix_query(input: &str) -> String {
         .join(" ")
 }
 
-/// The words of `input` within `distance` words of each other.
+/// The words of `input` within `distance` words of each other. FTS5's `NEAR`
+/// counts the words between them, so neighbours are `NEAR(.., 0)`.
 pub(crate) fn fts5_near_query(input: &str, distance: u32) -> String {
     let words: Vec<String> = search_words(input).into_iter().map(double_quoted).collect();
     match words.as_slice() {
         [] => String::new(),
         [word] => word.clone(),
-        _ => format!("NEAR({}, {distance})", words.join(" ")),
+        _ => format!("NEAR({}, {})", words.join(" "), distance.saturating_sub(1)),
     }
 }
 

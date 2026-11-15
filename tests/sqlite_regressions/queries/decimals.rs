@@ -36,3 +36,32 @@ async fn decimals_read_text_and_integers_exactly() {
     let exact = MoneyRow::find_with(1, &db).await.unwrap().unwrap().amount;
     assert_eq!(exact.unwrap().to_string(), "12345678901234567890.123456789");
 }
+
+/// `MIN`/`MAX` of a decimal column compare with a decimal as numbers: SQLite
+/// gives the aggregate no affinity, so a decimal bound as text was always
+/// greater.
+#[tokio::test]
+async fn having_an_extreme_decimal_compares_numbers() {
+    let db = memory_database(
+        "CREATE TABLE resume_decimals(id INTEGER PRIMARY KEY, amount DECIMAL(10, 2), marker INTEGER);
+         INSERT INTO resume_decimals VALUES (1, 1.5, 1), (2, 3.25, 2), (3, 2, 2)",
+    )
+    .await;
+    let markers = |condition: HavingCondition| {
+        let db = db.clone();
+        async move {
+            MoneyRow::query_with(&db)
+                .select_raw("marker")
+                .group_by("marker")
+                .having(condition)
+                .get_json()
+                .await
+                .unwrap()
+                .len()
+        }
+    };
+    let bound = Decimal::new(25, 1);
+    assert_eq!(markers(Aggregate::max("amount").gt(bound).into()).await, 1);
+    assert_eq!(markers(Aggregate::min("amount").lt(bound).into()).await, 2);
+    assert_eq!(markers(Aggregate::max("amount").gt("2.5").into()).await, 1);
+}

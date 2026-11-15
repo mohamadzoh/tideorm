@@ -182,7 +182,22 @@ where
 /// The copies are compared column by column, as a managed flush compares an
 /// entity with its snapshot: their JSON leaves out a field the model's own
 /// serde derive skips, so an edit to one would never be written.
-pub(crate) async fn sync_related_entity<T>(
+///
+/// The future is boxed: a model whose relations lead back
+/// to itself (a `has_many` of its own type, `has_many_through` both ways)
+/// would otherwise hold its own relation sync's future inside that future,
+/// which rustc refuses to type (E0391).
+pub(crate) fn sync_related_entity<'a, T>(
+    entity: &'a mut T,
+    entity_manager: &'a Arc<EntityManager>,
+) -> futures_util::future::BoxFuture<'a, Result<Option<String>>>
+where
+    T: ManagedModel,
+{
+    Box::pin(sync_related_entity_inner(entity, entity_manager))
+}
+
+async fn sync_related_entity_inner<T>(
     entity: &mut T,
     entity_manager: &Arc<EntityManager>,
 ) -> Result<Option<String>>

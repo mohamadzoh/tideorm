@@ -29,7 +29,12 @@ pub const fn __check_json_columns(
         .push(model)
         .push(" has ")
         .number(count)
-        .push(" JSON columns, over the limit of ")
+        .push(if count == 1 {
+            " JSON column"
+        } else {
+            " JSON columns"
+        })
+        .push(", over the limit of ")
         .number(max);
     Some(*message.rule("max_json_columns"))
 }

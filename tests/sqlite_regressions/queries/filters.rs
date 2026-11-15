@@ -473,16 +473,17 @@ async fn json_subqueries_do_not_capture_outer_column_names() {
     }
 }
 
+#[tideorm::model(table = "json_numbers")]
+struct JsonNumber {
+    #[tideorm(primary_key)]
+    id: i64,
+    doc: Option<serde_json::Value>,
+}
+
 /// SQLite runs the normalized-digit comparison a JSON number takes, so `10.0`
 /// finds a stored `10` and `100000` a stored `1e5`, and neither an array.
 #[tokio::test]
 async fn sqlite_json_numbers_compare_by_value() {
-    #[tideorm::model(table = "json_numbers")]
-    struct JsonNumber {
-        #[tideorm(primary_key)]
-        id: i64,
-        doc: Option<serde_json::Value>,
-    }
     let db = memory_database(
         // `TEXT`: a column declared `JSON` has numeric affinity and would
         // store `'10'` as an integer.
@@ -505,4 +506,33 @@ async fn sqlite_json_numbers_compare_by_value() {
     };
     assert_eq!(ids(serde_json::json!(10.0)).await, [1]);
     assert_eq!(ids(serde_json::json!(100000)).await, [2]);
+}
+
+/// A long `IN` list on a JSON column, one document comparison per value,
+/// renders without overflowing the stack.
+#[tokio::test]
+async fn a_long_json_in_list_renders() {
+    let db = memory_database(
+        "CREATE TABLE json_numbers(id INTEGER PRIMARY KEY, doc TEXT);
+         INSERT INTO json_numbers VALUES (1, '{\"n\":7}'), (2, '{\"n\":5000}')",
+    )
+    .await;
+    let documents: Vec<serde_json::Value> = (0..1000).map(|n| json!({ "n": n })).collect();
+    let query = || JsonNumber::query_with(&db);
+    assert_eq!(
+        query()
+            .where_in("doc", documents.clone())
+            .count()
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        query()
+            .where_not_in("doc", documents)
+            .count()
+            .await
+            .unwrap(),
+        1
+    );
 }

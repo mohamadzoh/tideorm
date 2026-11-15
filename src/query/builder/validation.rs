@@ -98,7 +98,7 @@ impl<M: Model> QueryBuilder<M> {
             };
 
             if projection.contains(&Self::normalized_column_reference(qualifier, name))
-                || projection.contains(name)
+                || (qualifier.is_empty() && projection.contains(name))
             {
                 continue;
             }
@@ -138,7 +138,7 @@ impl<M: Model> QueryBuilder<M> {
         // verbatim, and `1=1 OR name` turns `where_eq(.., x)` into a filter that
         // matches every row.
         if !condition.column.is_empty() {
-            if db_sql::validate_identifier_reference("WHERE column", &condition.column).is_err() {
+            if !Self::is_column_reference(&condition.column) {
                 return Err(format!(
                     "unsafe WHERE column '{}': expected a column or table.column reference; use where_raw() for trusted SQL expressions and never pass user input to it",
                     condition.column
@@ -153,7 +153,7 @@ impl<M: Model> QueryBuilder<M> {
 
         // The other column of a column comparison is rendered the same way.
         if let ConditionValue::Column(other) = &condition.value {
-            if db_sql::validate_identifier_reference("WHERE column", other).is_err() {
+            if !Self::is_column_reference(other) {
                 return Err(format!(
                     "unsafe WHERE comparison column '{}': expected a column or table.column reference",
                     other

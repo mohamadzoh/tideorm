@@ -171,11 +171,11 @@ impl Database {
                 None
             }
             ColumnType::Char(_) | ColumnType::String(_) | ColumnType::Text => {
-                Self::try_get_json::<String>(row, index)
+                Self::try_get_json_owned::<String>(row, index)
             }
             ColumnType::Uuid => Self::try_get_json::<uuid::Uuid>(row, index),
             ColumnType::Json | ColumnType::JsonBinary => {
-                Self::try_get_json::<serde_json::Value>(row, index)
+                Self::try_get_json_owned::<serde_json::Value>(row, index)
             }
             ColumnType::Date => Self::try_get_json::<chrono::NaiveDate>(row, index),
             ColumnType::Time => {
@@ -229,6 +229,17 @@ impl Database {
         row.try_get_by_index::<Option<T>>(index)
             .ok()
             .and_then(Self::option_to_json)
+    }
+
+    /// A cell whose decoded value is already JSON text or a document, moved
+    /// in rather than copied through serde.
+    fn try_get_json_owned<T>(row: &QueryResult, index: usize) -> Option<serde_json::Value>
+    where
+        T: TryGetable + Into<serde_json::Value>,
+    {
+        row.try_get_by_index::<Option<T>>(index)
+            .ok()
+            .map(|value| value.map_or(serde_json::Value::Null, Into::into))
     }
 
     /// Convert a decoded column into JSON.

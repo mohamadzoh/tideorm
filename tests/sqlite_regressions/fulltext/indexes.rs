@@ -1,4 +1,5 @@
-//! FTS5 index installation, trigger-name conflicts, rank aliases and attached schemas.
+//! FTS5 index installation, trigger-name conflicts, rank aliases, attached
+//! schemas and proximity search.
 
 use super::install;
 use crate::fixtures::{global_memory_database, memory_database};
@@ -211,4 +212,28 @@ async fn searches_use_the_models_index_when_schema_names_collide() {
     })
     .await
     .unwrap();
+}
+
+/// `Proximity(n)` finds words at most `n` positions apart, as PostgreSQL's
+/// `<n>` and MySQL's `@n` do: FTS5's `NEAR` counts the words between them.
+#[tokio::test]
+async fn proximity_counts_positions_as_the_other_backends_do() {
+    let db = global_memory_database(
+        "CREATE TABLE audit_articles(id INTEGER PRIMARY KEY,body TEXT,_fts_rank REAL); \
+         INSERT INTO audit_articles VALUES(1,'the quick brown fox',0),(2,'quick fox',0)",
+    )
+    .await;
+    index(&db).await.unwrap();
+    for (distance, expected) in [(1, vec![2]), (2, vec![1, 2])] {
+        let mut found: Vec<i64> = Article::search(["body"], "quick fox")
+            .mode(SearchMode::Proximity(distance))
+            .get()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|article| article.id)
+            .collect();
+        found.sort_unstable();
+        assert_eq!(found, expected, "Proximity({distance})");
+    }
 }

@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
 use parking_lot::RwLock;
 use regex::Regex;
 
@@ -31,15 +34,39 @@ pub type ColumnTypeOf = fn(&str) -> Option<crate::orm::ColumnType>;
 
 inventory::collect!(CompiledModelRegistration);
 
+/// The compiled models of `table` in `schema`, in registration order. The
+/// registrations are fixed at link time, so they are grouped by table once.
+fn registered<'a>(
+    schema: Option<&'a str>,
+    table: &str,
+) -> impl Iterator<Item = &'static CompiledModelRegistration> + 'a {
+    static BY_TABLE: OnceLock<HashMap<&str, Vec<&CompiledModelRegistration>>> = OnceLock::new();
+    BY_TABLE
+        .get_or_init(|| {
+            let mut by_table = HashMap::<_, Vec<_>>::new();
+            for model in inventory::iter::<CompiledModelRegistration> {
+                by_table
+                    .entry((model.table_name)())
+                    .or_default()
+                    .push(model);
+            }
+            by_table
+        })
+        .get(table)
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .copied()
+        .filter(move |model| (model.schema_name)() == schema)
+}
+
 /// The column type a compiled model declares for `column` of `table`, including
 /// its schema when qualified: `None` when no model matches that identity.
 pub(crate) fn registered_column_type(table: &str, column: &str) -> Option<crate::orm::ColumnType> {
     let (schema, table) = table
         .rsplit_once('.')
         .map_or((None, table), |(schema, table)| (Some(schema), table));
-    inventory::iter::<CompiledModelRegistration>
-        .into_iter()
-        .find(|model| (model.table_name)() == table && (model.schema_name)() == schema)
+    registered(schema, table)
+        .next()
         .and_then(|model| (model.column_type)(column))
 }
 
@@ -48,9 +75,8 @@ pub(crate) fn registered_column_names(
     schema: Option<&str>,
     table: &str,
 ) -> &'static [&'static str] {
-    inventory::iter::<CompiledModelRegistration>
-        .into_iter()
-        .find(|model| (model.table_name)() == table && (model.schema_name)() == schema)
+    registered(schema, table)
+        .next()
         .map_or(&[], |model| (model.column_names)())
 }
 
@@ -60,10 +86,7 @@ pub(crate) fn registered_encrypted_column(
     table: &str,
     column: &str,
 ) -> Option<crate::model::EncryptedColumn> {
-    inventory::iter::<CompiledModelRegistration>
-        .into_iter()
-        .filter(|model| (model.table_name)() == table && (model.schema_name)() == schema)
-        .find_map(|model| (model.encrypted_column)(column))
+    registered(schema, table).find_map(|model| (model.encrypted_column)(column))
 }
 
 pub(super) fn register_compiled_models_matching(pattern: &str) -> usize {

@@ -133,9 +133,10 @@ fn sqlite_f32_round(expression: BoundSql) -> BoundSql {
 }
 
 impl<M: Model> BatchUpdateBuilder<M> {
-    /// SQLite has one integer storage width; enforce the model's narrower type
-    /// too. `kind` is the column's type.
-    pub(super) fn sqlite_integer_bounds(column: &str, kind: Option<&ColumnType>) -> (i64, i64) {
+    /// The field's integer range within a signed 64-bit one: SQLite has one
+    /// integer storage width, and PostgreSQL's columns are wider than some
+    /// fields. `kind` is the column's type.
+    pub(super) fn integer_bounds(column: &str, kind: Option<&ColumnType>) -> (i64, i64) {
         if let Some(bounds) = M::__sqlite_integer_bounds(column) {
             return bounds;
         }
@@ -162,7 +163,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
         kind: Option<&ColumnType>,
         expression: BoundSql,
     ) -> BoundSql {
-        let (min, max) = Self::sqlite_integer_bounds(column, kind);
+        let (min, max) = Self::integer_bounds(column, kind);
         let mut checked = BoundSql::sql("CASE WHEN typeof(");
         checked
             .push(expression.clone())
@@ -214,8 +215,9 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// no decimal arithmetic, as a fraction of two integers. SQLite would
     /// otherwise store the REAL product, after which the model cannot read
     /// the row. A decimal column takes the factor as a decimal too, where the
-    /// backend has one, and floating-point columns take an `f64`. `kind` is
-    /// the column's type.
+    /// backend has one, and floating-point columns take an `f64`. On SQLite
+    /// and PostgreSQL an integer result must stay within the field's range.
+    /// `kind` is the column's type.
     pub(super) fn scaled(
         column: &str,
         kind: Option<&ColumnType>,
@@ -242,7 +244,12 @@ impl<M: Model> BatchUpdateBuilder<M> {
             (DatabaseType::Postgres | DatabaseType::MySQL | DatabaseType::MariaDB, Some(exact))
                 if integral || decimal =>
             {
-                return Ok(applied(col, operator, Value::Decimal(Some(exact))));
+                let scaled = applied(col, operator, Value::Decimal(Some(exact)));
+                return Ok(if db_type == DatabaseType::Postgres {
+                    Self::postgres_integer_checked(column, kind, scaled)
+                } else {
+                    scaled
+                });
             }
             _ => {}
         }
@@ -265,7 +272,8 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// `col` plus or minus `by`, as `operator` says. On SQLite the result has
     /// to stay readable by the model: within its float range, as
     /// [`sqlite_float_arithmetic`](Self::sqlite_float_arithmetic) keeps it,
-    /// or an integer within its integer range. `kind` is the column's type.
+    /// or an integer within its integer range, which PostgreSQL checks too.
+    /// `kind` is the column's type.
     pub(super) fn stepped(
         column: &str,
         kind: Option<&ColumnType>,
@@ -275,17 +283,52 @@ impl<M: Model> BatchUpdateBuilder<M> {
         by: i64,
     ) -> BoundSql {
         let operand = Value::BigInt(Some(by));
-        let sqlite = db_type == DatabaseType::SQLite;
-        if sqlite
+        if db_type == DatabaseType::SQLite
             && let Some(expression) =
                 Self::sqlite_float_arithmetic(kind, col, operator, operand.clone())
         {
             return expression;
         }
         let expression = applied(col, operator, operand);
-        if !(sqlite && kind.is_some_and(crate::internal::is_integer)) {
+        match db_type {
+            DatabaseType::SQLite if kind.is_some_and(crate::internal::is_integer) => {
+                Self::sqlite_integer_checked(column, kind, expression)
+            }
+            DatabaseType::Postgres => Self::postgres_integer_checked(column, kind, expression),
+            _ => expression,
+        }
+    }
+
+    /// On PostgreSQL, which stores `i8`/`u8` in a SMALLINT, `u16` in an
+    /// INTEGER and `u32`/`u64` in a BIGINT, `expression` kept within the
+    /// field's range, as the assignment rounds it, so the model can still read
+    /// the row: anything else fails the whole statement, by casting text that
+    /// names the column and the value to BIGINT. NULL stays NULL.
+    fn postgres_integer_checked(
+        column: &str,
+        kind: Option<&ColumnType>,
+        expression: BoundSql,
+    ) -> BoundSql {
+        use ColumnType::{BigUnsigned, SmallUnsigned, TinyInteger, TinyUnsigned, Unsigned};
+        if !matches!(
+            kind,
+            Some(TinyInteger | TinyUnsigned | SmallUnsigned | Unsigned | BigUnsigned)
+        ) {
             return expression;
         }
-        Self::sqlite_integer_checked(column, kind, expression)
+        let (min, max) = Self::integer_bounds(column, kind);
+        let mut checked = BoundSql::sql("CASE WHEN ROUND(CAST((");
+        checked
+            .push(expression.clone())
+            .push(format!(") AS NUMERIC)) BETWEEN {min} AND {max} THEN "))
+            .push(expression.clone())
+            .push(" ELSE CAST(")
+            .push(Value::from(format!(
+                "{column} is outside the model's integer range: "
+            )))
+            .push(" || CAST((")
+            .push(expression)
+            .push(") AS TEXT) AS BIGINT) END");
+        checked
     }
 }

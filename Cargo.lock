@@ -1877,7 +1877,7 @@ dependencies = [
 
 [[package]]
 name = "tideorm"
-version = "0.17.6"
+version = "0.17.7"
 dependencies = [
  "argon2",
  "async-io",
@@ -1953,9 +1953,9 @@ dependencies = [
 
 [[package]]
 name = "tideorm-driver-mysql"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "457a6d45a669ddb978908526700fe4075f67a601fab09ebe35b96c03c1c2989a"
+checksum = "b2caed1c43c0bcf89d449c3f2f9a8cef37187c094bc0019b8545b6447701dcc4"
 dependencies = [
  "bitflags",
  "byteorder",
@@ -2035,9 +2035,9 @@ dependencies = [
 
 [[package]]
 name = "tideorm-engine"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a5df583d22a194d0f1227c86db90ce95e09af1e0df19dd410a2fc27b7609e9d"
+checksum = "f9dd5f819b4bbafbf339a3acf0817bb1c0e1c95032de8983c78a07d2543be9e7"
 dependencies = [
  "chrono",
  "futures-util",
@@ -2054,7 +2054,7 @@ dependencies = [
 
 [[package]]
 name = "tideorm-macros"
-version = "0.17.6"
+version = "0.17.7"
 dependencies = [
  "darling",
  "proc-macro2",

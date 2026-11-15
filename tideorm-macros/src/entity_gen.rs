@@ -254,6 +254,26 @@ fn generate_model_meta_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
             }
         )
     });
+    let documents = ctx
+        .db_fields
+        .iter()
+        .filter(|field| !ctx.is_encrypted(field))
+        .map(|field| {
+            let column = field.column_name();
+            let ty = &field.ty;
+            quote! {
+                #column => (&::tideorm::model::__FieldDocument::<#ty>(::std::marker::PhantomData)).read(value),
+            }
+        });
+    let column_document_impl = quote! {
+        fn __column_document(column: &str, value: ::tideorm::DbValue) -> Option<::tideorm::serde_json::Value> {
+            use ::tideorm::model::__FieldDocumentRead as _;
+            match column {
+                #(#documents)*
+                _ => None,
+            }
+        }
+    };
     let encrypted_fields_impl = (!encrypted.is_empty()).then(|| {
         let names: Vec<_> = encrypted.iter().map(|field| field.name()).collect();
         let columns = encrypted.iter().map(|field| field.column_name());
@@ -353,6 +373,7 @@ fn generate_model_meta_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
             #morph_owner_key_impl
             #translatable_fields_impl
             #translation_payload_impl
+            #column_document_impl
             #encrypted_fields_impl
             #allowed_languages_impl
             #fallback_language_impl

@@ -1,7 +1,7 @@
 //! Scenarios for MySQL and MariaDB only, which both of their targets run:
 //! `change_column`, how raw SQL rows decode, the session-scoped migration
-//! lock, seeding on a one-connection pool, and how a pool tells the two
-//! servers apart.
+//! lock, the applied times the migration ledger reads back, seeding on a
+//! one-connection pool, and how a pool tells the two servers apart.
 //!
 //! The including target supplies `mod backend` with `DATABASE_TYPE`,
 //! `database_url()` and `async fn connect() -> bool`.
@@ -27,7 +27,8 @@ async fn change_column_keeps_the_column_attributes() {
         "CREATE TABLE `changed_columns` (
             `id` INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
             `age` INT NOT NULL DEFAULT 5 COMMENT 'years',
-            `note` VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL
+            `note` VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL,
+            `stamped` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         ) ENGINE=InnoDB",
     )
     .await
@@ -37,7 +38,9 @@ async fn change_column_keeps_the_column_attributes() {
         .alter_table("changed_columns", |t| {
             t.change_column("id", tideorm::migration::ColumnType::BigInteger)
                 .change_column("age", tideorm::migration::ColumnType::BigInteger)
-                .change_column("note", tideorm::migration::ColumnType::Text);
+                .change_column("note", tideorm::migration::ColumnType::Text)
+                // MySQL refused the kept `CURRENT_TIMESTAMP` on a `DATETIME(6)`.
+                .change_column("stamped", tideorm::migration::ColumnType::DateTime);
         })
         .await
         .expect("change_column failed");
@@ -59,6 +62,7 @@ async fn change_column_keeps_the_column_attributes() {
             .clone()
     };
     let (id, age, note) = (column("id"), column("age"), column("note"));
+    let stamped = column("stamped");
 
     assert_eq!(id["data_type"], "bigint");
     assert_eq!(id["nullable"], "NO");
@@ -82,6 +86,21 @@ async fn change_column_keeps_the_column_attributes() {
         "`ColumnType::Text` is LONGTEXT here"
     );
     assert_eq!(note["nullable"], "YES");
+    assert_eq!(stamped["data_type"], "datetime");
+    assert!(
+        stamped["default_value"]
+            .as_str()
+            .is_some_and(|default| default.eq_ignore_ascii_case("current_timestamp(6)")),
+        "{stamped}"
+    );
+    assert!(
+        stamped["extra"]
+            .as_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .contains("on update current_timestamp(6)"),
+        "{stamped}"
+    );
 }
 
 #[tokio::test]
@@ -212,6 +231,28 @@ async fn raw_time_values_keep_their_sign_and_hours() {
         .expect("failed to drop test_time_spans");
 }
 
+/// A migration that changes nothing.
+struct Quick;
+
+#[async_trait]
+impl Migration for Quick {
+    fn version(&self) -> &str {
+        "20260926_002"
+    }
+
+    fn name(&self) -> &str {
+        "quick"
+    }
+
+    async fn up(&self, _schema: &mut Schema) -> tideorm::Result<()> {
+        Ok(())
+    }
+
+    async fn down(&self, _schema: &mut Schema) -> tideorm::Result<()> {
+        Ok(())
+    }
+}
+
 /// A migrator cancelled while it holds the migration lock frees the lock. The
 /// named lock belongs to a session, whose pooled connection used to go back to
 /// the pool still holding it, so every later migrator waited out its timeout.
@@ -272,26 +313,6 @@ async fn a_cancelled_migration_run_frees_the_migration_lock() {
     }
 
     // A run that completes takes the lock and gives it back.
-    struct Quick;
-
-    #[async_trait]
-    impl Migration for Quick {
-        fn version(&self) -> &str {
-            "20260926_002"
-        }
-
-        fn name(&self) -> &str {
-            "quick"
-        }
-
-        async fn up(&self, _schema: &mut Schema) -> tideorm::Result<()> {
-            Ok(())
-        }
-
-        async fn down(&self, _schema: &mut Schema) -> tideorm::Result<()> {
-            Ok(())
-        }
-    }
     let result = Migrator::new()
         .migrations_table(ledger)
         .add(Quick)
@@ -302,6 +323,34 @@ async fn a_cancelled_migration_run_frees_the_migration_lock() {
     assert!(lock_is_free().await, "a finished run releases the lock");
 
     Database::execute(&format!("DROP TABLE IF EXISTS `{ledger}`"))
+        .await
+        .expect("failed to drop the ledger");
+}
+
+/// `status()` and `applied()` read the time the ledger stamps, a `TIMESTAMP`,
+/// which used to fail to read, so both failed on every ledger.
+#[tokio::test]
+async fn the_ledger_reads_back_when_a_migration_was_applied() {
+    if !backend::connect().await {
+        return;
+    }
+    let ledger = "stamped_ledger_migrations";
+    Database::execute(&format!("DROP TABLE IF EXISTS `{ledger}`"))
+        .await
+        .expect("failed to drop the ledger");
+    let migrator = Migrator::new().migrations_table(ledger).add(Quick);
+    let result = migrator.run().await.expect("the migration should run");
+    assert_eq!(result.applied.len(), 1);
+
+    let status = migrator.status().await.expect("status failed");
+    assert!(
+        status[0].applied && status[0].applied_at.is_some(),
+        "{status:?}"
+    );
+    let applied = migrator.applied().await.expect("applied failed");
+    assert_eq!(applied.len(), 1, "{applied:?}");
+
+    Database::execute(&format!("DROP TABLE `{ledger}`"))
         .await
         .expect("failed to drop the ledger");
 }

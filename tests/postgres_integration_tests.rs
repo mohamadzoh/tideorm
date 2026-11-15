@@ -1,8 +1,9 @@
 //! PostgreSQL integration tests: the scenarios every backend runs, in
 //! `support/integration_parity.rs`; those of the server backends, in
 //! `support/review_backend.rs`; and below, raw JSON decoding of PostgreSQL's
-//! own types, native array columns, a `NULLS NOT DISTINCT` upsert and the
-//! closing of statements a full statement cache evicts.
+//! own types, native array columns, a `NULLS NOT DISTINCT` upsert, the
+//! closing of statements a full statement cache evicts, and a batch
+//! `coalesce` on `json` and `jsonb` columns.
 //!
 //! Opt-in: set `RUN_POSTGRES_TESTS`, `TEST_DATABASE_URL` or
 //! `POSTGRESQL_DATABASE_URL`; `SKIP_POSTGRES_TESTS` turns them off again. Once
@@ -325,4 +326,61 @@ async fn an_evicted_statement_is_closed_with_the_next_one_run() {
         .expect("prepared statements are listed");
     assert_eq!(prepared[0]["n"], 1, "only the cached statement is prepared");
     db.close().await.expect("the pool closes");
+}
+
+#[tideorm::model(table = "test_coalesced_documents")]
+struct CoalescedDocument {
+    #[tideorm(primary_key)]
+    id: i64,
+    doc: Option<serde_json::Value>,
+    docb: Option<serde_json::Value>,
+}
+
+/// A batch `coalesce` fills a `json` column as it does a `jsonb` one, though
+/// the default is bound as `jsonb`, which COALESCE cannot unify with `json`.
+#[tokio::test]
+async fn a_batch_coalesce_fills_json_and_jsonb_columns() {
+    if !backend::connect().await {
+        return;
+    }
+    Database::execute("DROP TABLE IF EXISTS test_coalesced_documents")
+        .await
+        .expect("failed to drop test_coalesced_documents");
+    Database::execute(
+        "CREATE TABLE test_coalesced_documents (
+            id BIGINT PRIMARY KEY,
+            doc JSON,
+            docb JSONB
+        )",
+    )
+    .await
+    .expect("failed to create test_coalesced_documents");
+    CoalescedDocument {
+        id: 1,
+        doc: None,
+        docb: None,
+    }
+    .save()
+    .await
+    .expect("failed to save a document");
+
+    let updated = CoalescedDocument::query()
+        .where_eq("id", 1)
+        .update_all()
+        .coalesce("doc", serde_json::json!({"a": 1}))
+        .coalesce("docb", serde_json::json!({"b": 2}))
+        .execute()
+        .await
+        .expect("coalesce failed");
+    assert_eq!(updated, 1);
+    let document = CoalescedDocument::find(1)
+        .await
+        .expect("find failed")
+        .expect("the document was stored");
+    assert_eq!(document.doc, Some(serde_json::json!({"a": 1})));
+    assert_eq!(document.docb, Some(serde_json::json!({"b": 2})));
+
+    Database::execute("DROP TABLE test_coalesced_documents")
+        .await
+        .expect("failed to drop test_coalesced_documents");
 }

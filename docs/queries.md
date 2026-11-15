@@ -631,7 +631,7 @@ A model related to itself works the same way: `Category::query().where_has::<Cat
 
 ### Columns, Values, Your Own Types and Pages
 
-`pluck` reads one column of every row, `value` the column of the first row, and `get_as` each row as a type of your own whose fields are the columns or their aliases — the shape of a join or a grouped `select_raw()` that no model has. On a `union()` the column is read off the union's rows, and an encrypted column comes back decrypted, as `get()` returns it:
+`pluck` reads one column of every row, `value` the column of the first row, and `get_as` each row as a type of your own whose fields are the columns or their aliases — the shape of a join or a grouped `select_raw()` that no model has. On a `union()` the column is read off the union's rows, and an encrypted column comes back decrypted, as `get()` returns it. A model's enum column reads as its variants, as `min`/`max` read it too, not as the `string_value`s it stores:
 
 ```rust
 let emails: Vec<String> = User::query().where_eq("active", true).pluck("email").await?;
@@ -844,7 +844,7 @@ TideORM provides full-text search capabilities across PostgreSQL (tsvector/tsque
 Enable the feature explicitly when you need the full-text search API:
 
 ```toml
-tideorm = { version = "0.17.6", features = ["postgres", "fulltext"] }
+tideorm = { version = "0.17.7", features = ["postgres", "fulltext"] }
 ```
 
 ### Search Basics
@@ -1224,7 +1224,7 @@ let totals: Vec<Totals> = Database::raw_as(
 
 Name the columns in raw SQL rather than `SELECT *` when the table can change under a running application. Statements are prepared and cached per connection (see `statement_cache_capacity` under [Driver Options](getting-started.md#driver-options)), and after a column is added PostgreSQL rejects a cached `SELECT *` (`cached plan must not change result type`) while SQLite can report the old column list, until the connection is replaced. The query builder is not affected: it always names the model's columns.
 
-Every raw statement invalidates cached reads of its database once it has run, reads included, and so does one that fails: its text cannot show which tables it writes, as a `SELECT` can write through a function, a view or a trigger, and a statement before a failing one may already have committed. Independent databases keep their cached results. Separate pools using the same SQLite file or the same PostgreSQL endpoint and database share invalidation; MySQL databases on one endpoint share it because triggers and foreign keys can cross schemas. SQLite handles that use `ATTACH`, and connections whose database cannot be identified, retain conservative global invalidation. Entries inserted manually with `QueryCache::set` or `set_tagged` have no database identity and are invalidated by any database write.
+Every raw statement invalidates cached reads of its database once it has run, reads included, and so does one that fails: its text cannot show which tables it writes, as a `SELECT` can write through a function, a view or a trigger, and a statement before a failing one may already have committed. Independent databases keep their cached results. Separate pools using the same SQLite file or the same PostgreSQL endpoint and database share invalidation (the host and port as the URL writes them: `localhost` and `127.0.0.1` are two endpoints); MySQL databases on one endpoint share it because triggers and foreign keys can cross schemas. SQLite handles that use `ATTACH`, and connections whose database cannot be identified, retain conservative global invalidation. Entries inserted manually with `QueryCache::set` or `set_tagged` have no database identity and are invalidated by any database write.
 
 The cache lives in one process. To keep several processes' caches in step, give the cache a hook: it is called with a `CacheInvalidation` (`Database(name)`, `Table(name)` or `All`, serializable with serde) after each invalidation. A write's comes once as it runs and again when its transaction commits. Publish each event on a channel of your own, such as Redis or NATS, and hand what the other processes publish to `apply_invalidation`, which drops the same entries without calling the hook again. A database's name is built from the connection's host, port and database, so connect every process the same way. The hook runs on the writing task, so hand the event off rather than wait on the network:
 

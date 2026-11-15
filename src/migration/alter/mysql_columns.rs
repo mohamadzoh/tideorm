@@ -3,6 +3,7 @@
 
 use crate::config::DatabaseType;
 use crate::internal::sql_safety::quote_ident;
+use crate::migration::ddl::{current_time_for, is_current_timestamp};
 
 /// A MySQL column's declaration, as `SHOW CREATE TABLE` writes it.
 #[derive(Debug, Default, PartialEq)]
@@ -162,12 +163,13 @@ pub(super) fn mysql_column_attributes(create_table: &str, column: &str) -> Optio
 
 /// `rest`, the attributes a MySQL column declares after its type, with its
 /// nullability `nullable` and its default `default` (`Some(None)` drops it)
-/// where they are given, written first as `SHOW CREATE TABLE` writes them.
-/// A `NOT NULL` column defaults to no NULL.
+/// where they are given, written first as `SHOW CREATE TABLE` writes them,
+/// for a column of type `type_sql`. A `NOT NULL` column defaults to no NULL.
 pub(super) fn restate_attributes(
     rest: &str,
     nullable: Option<bool>,
     default: Option<&Option<String>>,
+    type_sql: &str,
 ) -> String {
     let words = definition_words(rest);
     let is = |index: usize, keyword: &str| {
@@ -177,6 +179,17 @@ pub(super) fn restate_attributes(
     };
     let mut stored_nullable = None;
     let mut stored_default = None;
+    let mut on_update = None;
+    // The last word of the value starting at word `first`: a function's
+    // arguments follow its name, as in CURRENT_TIMESTAMP(6).
+    let value_last = |first: usize| match (words.get(first), words.get(first + 1)) {
+        (Some(&(_, value_end)), Some(&(next_start, _)))
+            if next_start == value_end && rest[next_start..].starts_with('(') =>
+        {
+            first + 1
+        }
+        _ => first,
+    };
     let mut kept = vec![true; words.len()];
     let mut index = 0;
     while index < words.len() {
@@ -189,16 +202,13 @@ pub(super) fn restate_attributes(
             kept[index] = false;
             index += 1;
         } else if is(index, "DEFAULT") && index + 1 < words.len() {
-            let mut last = index + 1;
-            // A function's arguments follow its name: CURRENT_TIMESTAMP(6).
-            if let (Some(&(_, value_end)), Some(&(next_start, _))) =
-                (words.get(last), words.get(last + 1))
-                && next_start == value_end
-                && rest[next_start..].starts_with('(')
-            {
-                last += 1;
-            }
+            let last = value_last(index + 1);
             stored_default = Some(rest[words[index + 1].0..words[last].1].to_string());
+            kept[index..=last].fill(false);
+            index = last + 1;
+        } else if is(index, "ON") && is(index + 1, "UPDATE") && index + 2 < words.len() {
+            let last = value_last(index + 2);
+            on_update = Some(rest[words[index + 2].0..words[last].1].to_string());
             kept[index..=last].fill(false);
             index = last + 1;
         } else {
@@ -212,6 +222,12 @@ pub(super) fn restate_attributes(
         None => stored_default,
     }
     .filter(|default| nullable != Some(false) || !default.eq_ignore_ascii_case("NULL"));
+    // MySQL refuses the current time less or more precise than the column.
+    let now = current_time_for(type_sql);
+    let timed = |value: String| match &now {
+        Some(now) if is_current_timestamp(&value) => now.clone(),
+        _ => value,
+    };
 
     let mut attributes: Vec<String> = Vec::new();
     match nullable {
@@ -220,7 +236,10 @@ pub(super) fn restate_attributes(
         None => {}
     }
     if let Some(default) = default {
-        attributes.push(format!("DEFAULT {default}"));
+        attributes.push(format!("DEFAULT {}", timed(default)));
+    }
+    if let Some(on_update) = on_update {
+        attributes.push(format!("ON UPDATE {}", timed(on_update)));
     }
     // The other words as written, with the text between two that stood
     // together.
