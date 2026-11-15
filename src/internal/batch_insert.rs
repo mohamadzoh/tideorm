@@ -18,6 +18,12 @@ use crate::error::{Error, ErrorContext, Result};
 /// MariaDB), so this stays well under it, SQL and protocol overhead included.
 const MYSQL_MAX_STATEMENT_BYTES: usize = 1 << 20;
 
+/// The most rows Vitess returns from one statement by default
+/// (`queryserver-config-max-result-size`; a longer result is an error), so
+/// the most a batch inserts with one statement there, which it reads back
+/// with one `SELECT`.
+const VITESS_MAX_RESULT_ROWS: usize = 10_000;
+
 /// How a batch is written.
 enum Strategy {
     /// Multi-row `INSERT .. RETURNING`, the returned rows put in input order.
@@ -56,9 +62,10 @@ struct ClientKey {
 /// statements, each read back with a `SELECT`, and any other model is
 /// inserted a row at a time. A batch needing more bind parameters than one
 /// statement takes is split, and so is a MySQL or MariaDB batch of large
-/// rows. Every batch of several rows runs in a transaction, a
-/// savepoint inside the caller's, so it stays all-or-nothing on every backend,
-/// down to a statement whose returned rows do not match the batch.
+/// rows and a Vitess batch of more rows than it returns at once. Every batch
+/// of several rows runs in a transaction, a savepoint inside the caller's, so
+/// it stays all-or-nothing on every backend, down to a statement whose
+/// returned rows do not match the batch.
 pub(super) async fn insert_many<M>(
     connection: &crate::database::ConnectionRef,
     models: Vec<M>,
@@ -111,12 +118,20 @@ where
             // statements. Using the caller's connection would put baselines
             // outside the batch's rollback record, or in its parent's record.
             let batch_connection = scope.connection();
+            // Read once the transaction holds a connection, which a lazy
+            // pool may not have had before.
+            let rows = match batch_connection.server() {
+                Some(crate::config::DatabaseServer::Vitess) => {
+                    rows_per_statement.min(VITESS_MAX_RESULT_ROWS)
+                }
+                _ => rows_per_statement,
+            };
             let inserted = insert_by_strategy::<M>(
                 &batch_connection,
                 &strategy,
                 active_models,
                 Chunks {
-                    rows: rows_per_statement,
+                    rows,
                     limit_bytes: matches!(backend, DatabaseType::MySQL | DatabaseType::MariaDB),
                 },
                 &error_context,

@@ -57,7 +57,7 @@ fn auto_increment_keys_keep_the_width_the_plain_column_would_get() {
     for (column_type, serial) in [
         (ty::<i64>(), "BIGSERIAL"),
         (ty::<u64>(), "BIGSERIAL"),
-        (ty::<i32>(), "SERIAL"),
+        (ty::<i32>(), "SERIAL4"),
         (ty::<u32>(), "BIGSERIAL"),
         (ty::<i16>(), "SMALLSERIAL"),
         (ty::<i8>(), "SMALLSERIAL"),

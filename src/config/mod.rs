@@ -14,7 +14,7 @@ mod settings;
 mod state;
 
 pub use builder::TideConfig;
-pub use database::DatabaseType;
+pub use database::{DatabaseServer, DatabaseType};
 pub use settings::{Config, PoolConfig};
 
 #[cfg(feature = "attachments")]

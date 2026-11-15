@@ -106,7 +106,7 @@
 - `src/sync/schema.rs` for schema-sync type mapping behavior.
 - `tideorm-macros/src/parse.rs` and `tideorm-macros/src/parse/` for attribute parsing and proc-macro validation/index logic.
 - `tests/support/` for integration-test environment patterns.
-- `docs/getting-started.md` for documented local test workflows.
+- `docs/testing.md` for documented local test workflows.
 
 ## What To Avoid
 

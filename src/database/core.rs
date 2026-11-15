@@ -261,6 +261,14 @@ impl Database {
         Ok(self.own_handle()?.backend())
     }
 
+    /// The server this handle's statements run on (CockroachDB and
+    /// YugabyteDB speak PostgreSQL's dialect, TiDB and Vitess MySQL's), as
+    /// it said when the connection opened; `None` for a disconnected handle
+    /// or a lazy pool that has not opened a connection yet.
+    pub fn server(&self) -> Option<crate::config::DatabaseServer> {
+        self.__get_connection().ok()?.server()
+    }
+
     /// The backend of the connection this handle's statements run on: the
     /// enclosing transaction's when there is one, since a handle used inside a
     /// transaction executes on it.

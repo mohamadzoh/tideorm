@@ -5,6 +5,57 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.8] - 2026-11-15
+
+### Added
+
+- CockroachDB, YugabyteDB (YSQL), TiDB and Vitess (`vtgate`) run TideORM through the `postgres`
+  and `mysql` features with no change to models or queries, and CI runs the PostgreSQL and MySQL
+  suites against each; [Compatible Servers](docs/compatible-servers.md) lists what each lacks.
+  A connection learns which server answered as it opens, and `Database::server()` returns it as
+  a `DatabaseServer` (the engine's `DbServer` and `ConnectionTrait::get_database_server`, in
+  `tideorm-engine` 0.1.6; the drivers' `PgConnection::server()` and `MySqlConnection::server()`,
+  in `tideorm-driver-postgres` 0.1.4 and `tideorm-driver-mysql` 0.1.6). The features `mariadb`,
+  `tidb` and `vitess` (for `mysql`) and `cockroachdb` and `yugabytedb` (for `postgres`) name the
+  server in a manifest and build the same code as their protocol's. What that takes:
+  - CockroachDB: each connection sets `serial_normalization = sql_sequence`,
+    `autocommit_before_ddl = off` and `create_table_with_schema_locked = off`
+    (`tideorm-driver-postgres` 0.1.4); migrations and
+    seeds lock with `pg_advisory_xact_lock`; `SchemaWriter` exports through `SHOW CREATE`,
+    writing a view's tables without the database's name and keeping a comment on `public`; a
+    decimal in a `where_in` list is cast to `NUMERIC` (CockroachDB read it as the integer
+    column's type, rounding `5.4` to `5`; `tideorm-sql-builder` 0.1.3); a raw statement's
+    `paginate()` keeps its `ORDER BY`, since each page's bounds now follow the query on
+    PostgreSQL too, as on the other backends, instead of reading it as a derived table, whose
+    order CockroachDB dropped (`tideorm-engine` 0.1.6).
+  - YugabyteDB: `SchemaWriter` reads a table's `CHANGE` replica identity, and its sequence lookup
+    no longer fails under YugabyteDB's batched nested-loop joins.
+  - TiDB: a self-referencing relation's `load_tree()` aliases its recursive CTE, and the schema
+    export reads `lower_case_table_names`, which TiDB returns as text, as a number.
+  - Vitess: unsigned integers past their signed range are bound as signed values (Vitess read
+    a `u8` 255 as -1), its syntax errors are classified as such, sessions leave out
+    `PIPES_AS_CONCAT` (a Vitess reporting a plain MySQL version is recognized when it refuses
+    the mode; these three in `tideorm-driver-mysql` 0.1.6), the migration lock reads `GET_LOCK`
+    by position, `insert_all` writes at most 10,000 rows per statement (a
+    tablet's result limit), and `SchemaWriter` leaves out `ALTER DATABASE COLLATE`.
+
+### Changed
+
+- On PostgreSQL, migrations write 32-bit integer columns as `INT4` and `SERIAL4` instead of
+  `INTEGER` and `SERIAL` (the same types there; CockroachDB reads a bare `INT` as 64-bit).
+- On PostgreSQL, `where_json_path_exists` with a plain path renders `jsonb_path_exists(..)`
+  instead of `@?`, which CockroachDB lacks; the result is unchanged (`tideorm-sql-builder` 0.1.3).
+
+### Fixed
+
+- The session holding the PostgreSQL migration and seed lock turns off
+  `idle_session_timeout`, `idle_in_transaction_session_timeout` and `transaction_timeout` for
+  itself: a server default ending the idle session freed the lock while migrations still ran.
+- `SchemaWriter` on PostgreSQL restates a partition's generated column only when its expression
+  differs from the parent's (PostgreSQL 16+): an inherited one written as `WITH OPTIONS GENERATED`
+  failed to restore on PostgreSQL 15 and earlier. A rule in its default state gets no
+  `ALTER TABLE .. ENABLE RULE`.
+
 ## [0.17.7] - 2026-11-15
 
 ### Fixed

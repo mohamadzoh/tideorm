@@ -1,6 +1,6 @@
 [package]
 name = "tideorm"
-version = "0.17.7"
+version = "0.17.8"
 edition = "2024"
 authors = ["Mohamad Al Zohbie <alzoubi528@gmail.com>"]
 description = "A developer-friendly ORM for Rust with clean, expressive syntax"
@@ -60,6 +60,13 @@ mysql = ["tideorm-engine/mysql"]
 # engine's `sqlite` feature writes an insert or update as one statement instead of
 # the write plus a `SELECT` of the row.
 sqlite = ["tideorm-engine/sqlite", "dep:async-io"]
+# Servers speaking the PostgreSQL or MySQL protocol, named for a manifest's reader: each
+# builds its protocol's driver, and the connection tells TideORM which server it reached.
+mariadb = ["mysql"]
+cockroachdb = ["postgres"]
+yugabytedb = ["postgres"]
+tidb = ["mysql"]
+vitess = ["mysql"]
 runtime-tokio = ["tideorm-engine/runtime-tokio", "dep:tokio"]
 runtime-async-std = ["tideorm-engine/runtime-async-std", "dep:async-std"]
 # These module flags intentionally gate TideORM's public API surface via #[cfg(feature = ...)]
@@ -75,7 +82,7 @@ encrypted-fields = []
 # The execution engine, from its own repository (rust-ocean/tideorm-engine).
 # `src/orm.rs` re-exports it, with the ORM derive macros from `tideorm-macros`,
 # and macro-generated models reach both through that module's paths.
-tideorm-engine = { version = "0.1.5", default-features = false }
+tideorm-engine = { version = "0.1.6", default-features = false }
 
 # Async runtime
 async-trait = "0.1.92"
@@ -99,7 +106,7 @@ rust_decimal = { version = "1.43.0", features = ["serde"] }
 thiserror = "2.0.21"
 
 # Derive macros (our own crate)
-tideorm-macros = { version = "=0.17.7", path = "tideorm-macros" }
+tideorm-macros = { version = "=0.17.8", path = "tideorm-macros" }
 
 # Utils
 parking_lot = "0.12.5"

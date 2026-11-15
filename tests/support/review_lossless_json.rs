@@ -10,7 +10,10 @@ struct MultirangeRow {
 
 #[tokio::test]
 async fn postgres_multiranges_reach_raw_and_model_json() {
-    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+    if backend::DATABASE_TYPE != DatabaseType::Postgres
+        || !backend::connect().await
+        || super::super::parity::skip_on(&[DatabaseServer::CockroachDb], "multirange")
+    {
         return;
     }
     let db = tideorm::require_db().unwrap();

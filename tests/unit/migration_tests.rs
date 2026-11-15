@@ -15,7 +15,7 @@ fn test_column_types_render_what_the_drivers_bind_and_decode() {
     // schema export and DB_SYNC: a "nicer" rendering here silently breaks reads
     // on a backend nobody runs in CI. MariaDB renders as MySQL does.
     for (column_type, postgres, mysql, sqlite) in [
-        (ColumnType::Integer, "INTEGER", "INT", "INTEGER"),
+        (ColumnType::Integer, "INT4", "INT", "INTEGER"),
         (ColumnType::BigInteger, "BIGINT", "BIGINT", "INTEGER"),
         (ColumnType::Double, "DOUBLE PRECISION", "DOUBLE", "REAL"),
         (ColumnType::Boolean, "BOOLEAN", "TINYINT(1)", "INTEGER"),
@@ -38,7 +38,7 @@ fn test_column_types_render_what_the_drivers_bind_and_decode() {
         (ColumnType::JsonBinary, "JSONB", "JSON", "TEXT"),
         (
             ColumnType::Array(Arc::new(ColumnType::Integer)),
-            "INTEGER[]",
+            "INT4[]",
             "JSON",
             "TEXT",
         ),
@@ -255,7 +255,7 @@ fn ledger_table_ddl_keeps_its_shape() {
     // fixed: a monotonic id, the unique key, the details, the timestamp.
     assert_eq!(
         Ledger::migrations("_migrations").create_table_sql(DatabaseType::Postgres),
-        "CREATE TABLE IF NOT EXISTS \"_migrations\" (\"id\" SERIAL PRIMARY KEY, \
+        "CREATE TABLE IF NOT EXISTS \"_migrations\" (\"id\" SERIAL4 PRIMARY KEY, \
          \"version\" VARCHAR(255) NOT NULL UNIQUE, \"name\" VARCHAR(255) NOT NULL, \
          \"applied_at\" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
     );
@@ -326,7 +326,7 @@ fn test_table_builder_renders_each_backends_create_table() {
 #[test]
 fn test_postgres_column_methods_render_their_types() {
     let mut builder = TableBuilder::new("events", DatabaseType::Postgres);
-    // A 4-byte key: `increments` is SERIAL where `id()` is BIGSERIAL.
+    // A 4-byte key: `increments` is SERIAL4 where `id()` is BIGSERIAL.
     builder.increments("id");
     builder.string_with("code", 12).not_null();
     builder.date("event_date");
@@ -343,7 +343,7 @@ fn test_postgres_column_methods_render_their_types() {
     assert_eq!(
         builder.build_create(false),
         r#"CREATE TABLE "events" (
-    "id" SERIAL,
+    "id" SERIAL4,
     "code" VARCHAR(12) NOT NULL,
     "event_date" DATE,
     "start_time" TIME,
@@ -352,7 +352,7 @@ fn test_postgres_column_methods_render_their_types() {
     "expires_at" TIMESTAMPTZ NOT NULL,
     "last_activity" TIMESTAMPTZ,
     "price" DECIMAL(10, 2) CHECK (price >= 0),
-    "quantity" INTEGER CHECK (quantity >= 0),
+    "quantity" INT4 CHECK (quantity >= 0),
     "deleted_at" TIMESTAMPTZ,
     "created_at" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -414,7 +414,7 @@ fn test_alter_add_column_renders_every_setting() {
     assert_eq!(
         statements,
         vec![
-            "ALTER TABLE \"users\" ADD COLUMN \"age\" INTEGER NOT NULL DEFAULT 0 UNIQUE",
+            "ALTER TABLE \"users\" ADD COLUMN \"age\" INT4 NOT NULL DEFAULT 0 UNIQUE",
             "ALTER TABLE \"users\" ADD COLUMN \"seen_at\" TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP",
         ]
     );

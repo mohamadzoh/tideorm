@@ -5,6 +5,9 @@ use std::fmt::Write as _;
 use super::*;
 use crate::config::DatabaseType;
 
+/// How the file sets the database's default collation for what follows.
+const ALTER_DATABASE_COLLATE: &str = "ALTER DATABASE COLLATE ";
+
 fn literal(value: &str) -> String {
     format!("'{}'", value.replace('\\', "\\\\").replace('\'', "''"))
 }
@@ -24,7 +27,7 @@ pub(super) async fn introspect(conn: &OrmConnection) -> Result<Catalog> {
     let database_rows = query(
         conn,
         DatabaseType::MySQL,
-        "SELECT DATABASE() AS name, @@lower_case_table_names AS fold_names, default_collation_name AS database_collation
+        "SELECT DATABASE() AS name, CAST(@@lower_case_table_names AS SIGNED) AS fold_names, default_collation_name AS database_collation
          FROM information_schema.schemata
          WHERE schema_name=DATABASE()",
         Vec::new(),
@@ -38,7 +41,7 @@ pub(super) async fn introspect(conn: &OrmConnection) -> Result<Catalog> {
     )?;
     let fold_names = get::<i64>(&database_rows[0], "fold_names")? != 0;
     let database_collation = format!(
-        "ALTER DATABASE COLLATE {}",
+        "{ALTER_DATABASE_COLLATE}{}",
         quote_ident(
             DatabaseType::MySQL,
             &get::<String>(&database_rows[0], "database_collation")?
@@ -231,7 +234,7 @@ pub(super) async fn introspect(conn: &OrmConnection) -> Result<Catalog> {
         .verbatim
         .iter()
         .chain(&catalog.constraints)
-        .any(|sql| sql.starts_with("ALTER DATABASE COLLATE "))
+        .any(|sql| sql.starts_with(ALTER_DATABASE_COLLATE))
     {
         catalog.constraints.push(database_collation);
     }
@@ -242,6 +245,16 @@ pub(super) async fn introspect(conn: &OrmConnection) -> Result<Catalog> {
         "SET SESSION collation_connection = @tideorm_saved_collation".into(),
         "SET SESSION time_zone = @tideorm_saved_time_zone".into(),
     ]);
+    if conn.get_database_server() == Some(DatabaseServer::Vitess) {
+        // Vitess manages the keyspace's collation and refuses `ALTER DATABASE`.
+        for statements in [
+            &mut catalog.prelude,
+            &mut catalog.verbatim,
+            &mut catalog.constraints,
+        ] {
+            statements.retain(|sql| !sql.starts_with(ALTER_DATABASE_COLLATE));
+        }
+    }
     Ok(catalog)
 }
 
@@ -279,7 +292,7 @@ async fn stored_object(
     // charset inherit the database's default at CREATE time, not the session's
     // connection collation. Restore that context for each stored program.
     output.push(format!(
-        "ALTER DATABASE COLLATE {}",
+        "{ALTER_DATABASE_COLLATE}{}",
         quote_ident(
             DatabaseType::MySQL,
             &get::<String>(&row, "Database Collation")?

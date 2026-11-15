@@ -1,10 +1,6 @@
 # Relations
 
-## Model Relations
-
-Relations are declared as struct fields. You can load them on demand from an individual model, or batch-load them eagerly from a query to avoid N+1 lookups.
-
-### Defining Relations
+Relations connect a model to the rows of other models. You declare each one as a struct field, then load it on demand from one model or eagerly for a whole query, which avoids one query per row (the N+1 problem).
 
 ```rust
 use tideorm::prelude::*;
@@ -15,12 +11,10 @@ pub struct User {
     pub id: i64,
     pub name: String,
     pub email: String,
-    
-    // One-to-one: User has one Profile
+
     #[tideorm(has_one = "Profile", foreign_key = "user_id")]
     pub profile: HasOne<Profile>,
-    
-    // One-to-many: User has many Posts
+
     #[tideorm(has_many = "Post", foreign_key = "user_id")]
     pub posts: HasMany<Post>,
 }
@@ -31,8 +25,7 @@ pub struct Profile {
     pub id: i64,
     pub user_id: i64,
     pub bio: String,
-    
-    // Inverse: Profile belongs to User
+
     #[tideorm(belongs_to = "User", foreign_key = "user_id")]
     pub user: BelongsTo<User>,
 }
@@ -44,121 +37,76 @@ pub struct Post {
     pub user_id: i64,
     pub title: String,
     pub content: String,
-    
-    // Inverse: Post belongs to User
+
     #[tideorm(belongs_to = "User", foreign_key = "user_id")]
     pub author: BelongsTo<User>,
-    
-    // One-to-many: Post has many Comments
+
     #[tideorm(has_many = "Comment", foreign_key = "post_id")]
     pub comments: HasMany<Comment>,
 }
-```
 
-### Relation Types
-
-| Type | Attribute | Description |
-|------|-----------|-------------|
-| `HasOne<T>` | `has_one` | One-to-one relationship (e.g., User has one Profile) |
-| `HasMany<T>` | `has_many` | One-to-many relationship (e.g., User has many Posts) |
-| `BelongsTo<T>` | `belongs_to` | Inverse relationship (e.g., Post belongs to User) |
-| `HasManyThrough<T, P>` | `has_many_through` | Many-to-many via pivot table |
-| `MorphOne<T>` | - | Polymorphic one-to-one |
-| `MorphMany<T>` | - | Polymorphic one-to-many |
-
-### Relation Attributes
-
-| Attribute | Description | Required |
-|-----------|-------------|----------|
-| `foreign_key` | Foreign key column on related table | Yes |
-| `local_key` | Local key (defaults to primary key) | No |
-| `owner_key` | Owner key for BelongsTo | No |
-| `pivot` | Pivot table name for HasManyThrough (defaults to the pivot model's table) | No |
-| `related_key` | Related key on pivot table | For through relations |
-
-### Loading Relations
-
-Relation helper fields such as `HasOne<T>`, `HasMany<T>`, and `BelongsTo<T>` are runtime helpers, not persisted columns. TideORM's generated serde implementation serializes cached relation payloads when they are loaded and rebuilds the wrappers with runtime context during deserialization, so JSON round trips can preserve loaded relations without treating the wrappers as stored schema fields.
-
-Runtime relation helpers operate on a single local or foreign key value per query. For composite-key models, define `local_key` explicitly when needed and use custom queries when the relation requires matching multiple columns.
-
-An owner whose key is NULL (a nullable `local_key` that is unset) has no related rows: `load()` returns none, `count()` zero, and `attach`, `detach` and `sync` refuse it, rather than matching every row whose foreign key is NULL. A model may hold several relations to one model, such as an `author` and an `editor` that are both `BelongsTo<User>`; each loads by its own keys, eagerly too. `query_with(db).with(..)` reads the relations from `db` as well.
-
-For `has_many_through`, TideORM requires `foreign_key` and `related_key`; missing either is a compile-time error that names the conventional key (`foreign_key = "user_id"`). Keys are never assumed, since a model with two relations to one model would silently join both on the same key. `pivot` may be left out: it is the pivot model's table.
-
-The field's wrapper type decides the relation kind. The `has_one`/`has_many`/`belongs_to`/`has_many_through` attribute may be omitted, but when present it must name the same kind as the wrapper, and `HasOne`, `HasMany` and `BelongsTo` fields must declare `foreign_key`; either mistake is a compile-time error.
-
-```rust
-// Load a HasOne relation
-let user = User::find(1).await?.unwrap();
-let profile: Option<Profile> = user.profile.load().await?;
-
-// Load a HasMany relation
-let posts: Vec<Post> = user.posts.load().await?;
-
-// Load a BelongsTo relation
-let post = Post::find(1).await?.unwrap();
-let author: Option<User> = post.author.load().await?;
-
-// Check if relation exists
-let has_profile = user.profile.exists().await?;  // bool
-let has_posts = user.posts.exists().await?;      // bool
-
-// Count related records
-let post_count = user.posts.count().await?;      // u64
-```
-
-### Eager Loading (N+1 Prevention)
-
-When you already know which relations you need, promote the query builder into an eager-loading query with `with()` or `with_many()`. TideORM batches each requested relation path with set-based loader queries, so you avoid issuing one relation query per parent row.
-
-```rust
-// Preserve existing query filters, ordering, pagination, and database handle.
-let users = User::query()
-    .where_eq("active", true)
-    .with("profile")
-    .with("posts")
-    .get()
-    .await?;
-
-for user in users {
-    let profile = user.profile.get_cached();
-    let posts = user.posts.get_cached().unwrap_or_default();
-    println!("{} has {} cached posts", user.name, posts.len());
+async fn show(id: i64) -> tideorm::Result<()> {
+    let user = User::find_or_fail(id).await?;
+    let posts: Vec<Post> = user.posts.load().await?;
+    println!("{} wrote {} posts", user.name, posts.len());
+    Ok(())
 }
 ```
 
-Eager queries return the models themselves, each requested relation's rows in its wrapper: `get_cached()` reads them, and `is_loaded()` tells a relation the query loaded, even to no rows, from one it did not.
+Relation fields are not columns. The derive wires each wrapper from the model's own key fields when a row loads, when a model deserializes, and when you build one with `Default`.
 
-Filter, order and page the query before `with()`; after it, `query(|q| ..)` reaches every query method:
+## Relation Types
+
+The field's wrapper type decides the kind of relation:
+
+| Wrapper | Attribute | Relation | Required keys |
+|---|---|---|---|
+| `HasOne<T>` | `has_one` | One-to-one (a user has one profile) | `foreign_key` |
+| `HasMany<T>` | `has_many` | One-to-many (a user has many posts) | `foreign_key` |
+| `BelongsTo<T>` | `belongs_to` | The inverse side (a post belongs to a user) | `foreign_key` |
+| `HasManyThrough<T, P>` | `has_many_through` | Many-to-many through the pivot model `P` | `foreign_key`, `related_key` |
+| `MorphOne<T>` | none | Polymorphic one-to-one | `morph_name` |
+| `MorphMany<T>` | none | Polymorphic one-to-many | `morph_name` |
+| `MorphTo<T>` | none | The inverse of a polymorphic relation | `morph_name` |
+| `SelfRef<T>` | none | The parent row in the same table | none |
+| `SelfRefMany<T>` | none | The child rows in the same table | none |
+
+The `has_one`/`has_many`/`belongs_to`/`has_many_through` attribute may be left out; when present it must name the same kind as the wrapper. A mismatch or a missing required key is a compile-time error, and the message suggests the conventional key (`foreign_key = "user_id"`). Keys are never assumed, since a model with two relations to one model would silently join both on the same key.
+
+## Relation Attributes
+
+| Attribute | Meaning | Default |
+|---|---|---|
+| `foreign_key` | The column holding the key: on the related table for `HasOne`/`HasMany`/`HasManyThrough`'s pivot, on this model for `BelongsTo` and `SelfRef` | Required, except `SelfRef`/`SelfRefMany`: `parent_id` |
+| `local_key` | The column on this model the foreign key matches | The primary key, whatever its column is called |
+| `owner_key` | The column on the owner a `BelongsTo` foreign key matches | `id` |
+| `related_key` | The pivot column holding the related model's key (`HasManyThrough`) | Required |
+| `pivot` | The pivot table (`HasManyThrough`) | The pivot model's table |
+| `morph_name` | The prefix of the `<name>_type` and `<name>_id` columns (polymorphic relations) | Required |
+
+The derive emits a constant per relation, named after the field in upper case (`User::POSTS == "posts"`). Use it wherever a relation name is a string, such as `with(User::POSTS)`.
+
+## Loading a Relation
+
+Each wrapper queries the related rows when you ask:
 
 ```rust
-let users = User::query()
-    .with("posts")
-    .query(|q| q.where_gt("age", 18).where_null("banned_at").order_desc("id"))
-    .get()
-    .await?;
+let user = User::find_or_fail(1).await?;
+
+let profile: Option<Profile> = user.profile.load().await?;
+let posts: Vec<Post> = user.posts.load().await?;
+
+let post = Post::find_or_fail(1).await?;
+let author: Option<User> = post.author.load().await?;
+
+let has_profile: bool = user.profile.exists().await?;
+let has_posts: bool = user.posts.exists().await?;
+let post_count: u64 = user.posts.count().await?;
 ```
 
-#### Hidden Attributes in Eager-Loaded Payloads
-
-`to_json()` serializes a cached relation inline, and each payload is filtered by **the target model's** `hidden` list, at any nesting depth. A `User` that declares `hidden = "password_hash"` keeps it out of `post.to_json(None)` even though the hidden list belongs to `User` and the call was made on `Post`:
+`load()` returns rows in no particular order. To order, filter or page them, use `load_with`, whose closure gets the relation's query already filtered and adds to it:
 
 ```rust
-#[tideorm::model(table = "users", hidden = "password_hash")]
-pub struct User { /* ... */ }
-
-let post = Post::query().with("author").first().await?.unwrap();
-// {"id": 1, "title": "…", "author": {"id": 7, "email": "…"}}  — no password_hash
-let body = post.to_json(None);
-```
-
-The owning model's `hidden` list is *not* applied to a relation payload, so a column that one model hides and another does not keeps its value inside the payload that does not hide it. Two payload kinds still fall back to the owning model's list because their type is not known statically: attachment blobs, and `MorphTo` relations.
-
-### Loading with Constraints
-
-```rust
-// Load posts with custom conditions
 let recent_posts = user.posts.load_with(|query| {
     query
         .where_eq("published", true)
@@ -167,23 +115,92 @@ let recent_posts = user.posts.load_with(|query| {
         .limit(10)
 }).await?;
 
-// Load profile with constraints
-let profile = user.profile.load_with(|query| {
-    query.where_not_null("avatar")
-}).await?;
+let profile = user.profile.load_with(|query| query.where_not_null("avatar")).await?;
 ```
 
-### Entity Manager Workflows
+| Wrapper | `load` | `load_with` | `exists` | `count` |
+|---|---|---|---|---|
+| `HasOne`, `BelongsTo`, `MorphOne`, `SelfRef` | `Option<T>` | `Option<T>` | yes | no |
+| `HasMany`, `HasManyThrough`, `MorphMany`, `SelfRefMany` | `Vec<T>` | `Vec<T>` | yes | `u64` |
 
-If you enable the `entity-manager` feature, TideORM adds an explicit persistence context plus entity-manager-aware relation loading and aggregate synchronization.
+A few rules hold for every wrapper:
 
-Use `entity_manager.find::<Model>(...)` to load the root model, `entity_manager.load(&mut relation)` to load `HasOne<T>`, `HasMany<T>`, `BelongsTo<T>`, or `HasManyThrough<T, P>` relations inside the same context, and `entity_manager.save(&model)` or `entity_manager.flush()` to persist loaded aggregate-side changes.
+- An owner whose key is NULL (an unset nullable `local_key`) has no related rows: `load()` returns none, `count()` zero, and `attach`, `detach` and `sync` refuse it, rather than matching every row whose foreign key is NULL.
+- A model may hold several relations to one model, such as an `author` and an `editor` that are both `BelongsTo<User>`. Each loads by its own keys, eagerly too.
+- A relation matches one key column. For a composite-key model, set `local_key` where needed, and write your own query when the relation must match several columns.
+- A model read through `User::query_with(&db)` or `User::find_with(id, &db)` keeps that database, and its relations query there.
 
-If the root model itself came from the entity manager, plain relation read helpers such as `load()`, `load_with(...)`, `count()`, and `exists()` stay on that same database handle even when no global database is configured. Use `entity_manager.load(&mut relation)` when the relation should also become tracked for aggregate synchronization.
+### `load()` and `get_cached()`
 
-See [Entity Manager](entity-manager.md) for the full workflow and primary-key support details.
+A wrapper also holds a cache: the rows an eager load, an entity manager load or deserialization put there.
 
-### Many-to-Many Relations
+- `load()` queries whenever a connection is reachable, even with rows cached, so a deserialized payload cannot pass itself off as database state. It serves the cache only when there is nothing to query through. It does not store what it reads.
+- `get_cached()` never queries. It returns `Option<&T>` for a single-row wrapper and `Option<&[T]>` for a list.
+- `is_loaded()` tells a relation that was loaded and has no rows from one that was never loaded.
+- `as_mut()` edits the cached rows in place. `load()` does not see such edits; save the rows themselves to persist them.
+- `clear()` drops the cached rows and marks the relation loaded and empty.
+
+Under an entity manager the manager's cache wins instead; see [Entity Manager](entity-manager.md).
+
+## Eager Loading
+
+When you know which relations you need, call `with()` (or `with_many()`) on a query. TideORM loads each requested relation for all rows with set-based queries, not one per row:
+
+```rust
+let users = User::query()
+    .where_eq("active", true)
+    .with(User::PROFILE)
+    .with(User::POSTS)
+    .get()
+    .await?;
+
+for user in &users {
+    let profile = user.profile.get_cached();
+    let posts = user.posts.get_cached().unwrap_or_default();
+    println!("{} has {} posts", user.name, posts.len());
+}
+```
+
+Name a nested relation with a dot: `with("posts.comments")` loads every user's posts and every post's comments. Calls accumulate, and shared prefixes load once. A relation name is checked when the query runs; a typo is an "Unknown relation" error.
+
+`with()` keeps the query's filters, ordering, pagination, cache settings and database handle. Filter the query before `with()`, or reach any query method after it through `query(|q| ..)`. That closure shapes the root query only; constrain a relation with `load_with` instead:
+
+```rust
+let users = User::query()
+    .with(User::POSTS)
+    .query(|q| q.where_gt("age", 18).where_null("banned_at").order_desc("id"))
+    .get()
+    .await?;
+```
+
+The eager builder runs with `get()`, `first()`, `first_or_fail()`, `find(id)`, `find_or_fail(id)`, `paginate(page, per_page)` and `count()`. Each returns the models themselves, each requested relation's rows in its wrapper. `User::query_with(&db).with(..)` reads the relations from `db` as well.
+
+Eager loading works for `HasOne`, `HasMany`, `BelongsTo`, `HasManyThrough`, `MorphOne` and `MorphMany`. `MorphTo`, `SelfRef` and `SelfRefMany` have no eager path, and `with()` on one is an error that points you at the lazy `load()`.
+
+Keys match by value, as the database matches them: an `i64` key finds the rows of an `i32` foreign key or of a text `*_id` column holding it. Where the column's collation matches keys that differ in case or accents (SQLite `NOCASE`, MySQL's default collations), each row goes to the parent whose key it holds byte for byte.
+
+### Hidden Attributes in Eager-Loaded Payloads
+
+`to_json()` writes a cached relation inline, and filters each payload by the **target model's** `hidden` list, at any depth. A `User` that declares `hidden = "password_hash"` keeps it out of `post.to_json(None)`, though the call was made on `Post`:
+
+```rust
+#[tideorm::model(table = "users", hidden = "password_hash")]
+pub struct User { /* ... */ }
+
+let post = Post::query().with(Post::AUTHOR).first().await?.unwrap();
+// {"id": 1, "title": "…", "author": {"id": 7, "email": "…"}}: no password_hash
+let body = post.to_json(None);
+```
+
+The owning model's `hidden` list is not applied to a relation payload, so a column one model hides and another does not keeps its value in the payload that does not hide it. Two payloads fall back to the owning model's list, because their type is not known statically: attachment blobs and `MorphTo` relations.
+
+### Relations and Serde
+
+TideORM's generated serde writes a relation's cached rows when they are loaded, and leaves the wrappers out of the stored columns. Deserializing a model rebuilds its wrappers from its own key fields and keeps the cached payload, so a JSON round trip keeps loaded relations. A wrapper deserialized on its own, outside a model, carries only its cache, not the keys it would query by. `MorphTo` keeps no cache: it serializes nothing and ignores a payload.
+
+## Many-to-Many
+
+`HasManyThrough<T, P>` reaches `T` through rows of the pivot model `P`:
 
 ```rust
 #[tideorm::model(table = "users")]
@@ -191,8 +208,7 @@ pub struct User {
     #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub name: String,
-    
-    // Many-to-many: User has many Roles through user_roles pivot table
+
     #[tideorm(has_many_through = "Role", pivot = "user_roles", foreign_key = "user_id", related_key = "role_id")]
     pub roles: HasManyThrough<Role, UserRole>,
 }
@@ -212,48 +228,57 @@ pub struct UserRole {
     pub role_id: i64,
 }
 
-// Usage
-let user = User::find(1).await?.unwrap();
+async fn manage_roles(user: &User, role_id: i64) -> tideorm::Result<()> {
+    let roles: Vec<Role> = user.roles.load().await?;
 
-// Load all roles
-let roles = user.roles.load().await?;
+    user.roles.attach(role_id).await?;
+    user.roles.attach_many([4_i64, 5]).await?;   // all or none, in one transaction
+    let removed: u64 = user.roles.detach(role_id).await?;
+    let removed: u64 = user.roles.detach_many([4_i64, 5]).await?;
+    let removed: u64 = user.roles.detach_all().await?;
 
-// Attach a role
-user.roles.attach(role_id).await?;
-
-// Detach a role
-user.roles.detach(role_id).await?;
-
-// Detach every role, returning how many links were removed
-let removed = user.roles.detach_all().await?;
-
-// Sync roles (replace all with new set)
-user.roles.sync(vec![
-    serde_json::json!(1),
-    serde_json::json!(2),
-    serde_json::json!(3),
-]).await?;
+    // Replace the whole set
+    user.roles.sync([1_i64, 2, 3]).await?;
+    Ok(())
+}
 ```
 
-When the pivot model has soft delete, a trashed pivot row no longer links its pair: `load()`, `load_with()`, eager loading and `count()` leave it out, `attach()` restores it, and `sync()` deletes it with the live rows.
+`foreign_key` names the pivot column holding this model's key and `related_key` the one holding the related key. Both may name the pivot model's fields or their renamed columns, and a pivot key need not share the owner's integer type. `pivot` names the pivot model's own table: the relation reads, deletes and loads pivot rows through that model, so a relation naming another table is refused. Leave it out and it is the pivot model's table.
 
-`attach()` of a pair already linked succeeds without a second row, even when two calls race. When another unique key of the pivot keeps the pair out, such as one on `role_id` alone, `attach()` and `sync()` return an error rather than report a link they did not make.
+Reading:
 
-The `pivot` attribute names the pivot model's own table: the relation reads, deletes and loads its pivot rows through that model, so a relation naming another table is refused. `load()`, `count()` and eager loading return each related row once, however many pivot rows link it. `load_with()` joins the pivot table instead, so its closure can order by or read a pivot column, and returns a row per pivot row that links it. The pivot keys may name the fields of renamed columns, and a pivot key need not share the owner's integer type.
+- `load()`, `count()` and eager loading return each related row once, however many pivot rows link it.
+- `load_with()` joins the pivot table, so its closure can order by or read a pivot column, and it returns a row per pivot row that links it.
 
-### Polymorphic Relations
+Writing:
+
+- `attach()` writes only the two key columns. A pivot table with other `NOT NULL` columns and no defaults needs a direct `UserRole::create` instead.
+- `attach()` of a pair already linked succeeds without a second row, even when two calls race. When another unique key of the pivot keeps the pair out, such as one on `role_id` alone, `attach()` and `sync()` return an error rather than report a link they did not make.
+- `sync()` deletes every pivot row of the owner and inserts the wanted ids afresh, in one transaction (a savepoint inside yours), so extra columns on a pivot row are lost. Duplicate ids are collapsed and every id is checked before anything runs. An empty list detaches everything.
+- When the pivot model has soft deletes, a trashed pivot row no longer links its pair: reads leave it out, `attach()` restores it, and `sync()` deletes it with the live rows.
+
+| Backend | How `attach()` inserts a missing pair |
+|---|---|
+| PostgreSQL, SQLite | One `INSERT .. SELECT .. WHERE NOT EXISTS .. ON CONFLICT DO NOTHING` |
+| MySQL, MariaDB | A read, then a plain `INSERT` (InnoDB's locks for an `INSERT .. SELECT` let two concurrent attaches deadlock); a duplicate counts as not written |
+
+On every backend, a pair that was not written is read back, which catches a conflict on another unique key of the pivot.
+
+## Polymorphic Relations
+
+A polymorphic relation links rows through a `(type, id)` column pair instead of a foreign key to one table. Here an image belongs to a post or a video:
 
 ```rust
-use tideorm::prelude::*;
-
-// Images can belong to Posts or Videos (polymorphic)
 #[tideorm::model(table = "images")]
 pub struct Image {
     #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub path: String,
-    pub imageable_type: String,  // "posts" or "videos"
+    pub imageable_type: String, // "posts" or "videos"
     pub imageable_id: i64,
+
+    #[tideorm(morph_name = "imageable")]
+    pub imageable: MorphTo<Post>,
 }
 
 #[tideorm::model(table = "posts")]
@@ -261,613 +286,157 @@ pub struct Post {
     #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub title: String,
-    
-    // Polymorphic: Post has many Images
+
     #[tideorm(morph_name = "imageable")]
     pub images: MorphMany<Image>,
 }
-
-// MorphOne/MorphMany fields are wired automatically when morph_name is provided.
-// On the child side, use #[tideorm(morph_name = "imageable")] on MorphTo<T> too.
 ```
 
-An owner that keys its children by another column names it with `local_key`, as `#[tideorm(morph_name = "imageable", local_key = "uuid")]`; `MorphTo::load_as::<Owner>()` then looks the owner up by that column, and by the primary key otherwise.
+`morph_name = "imageable"` names the `imageable_type` and `imageable_id` columns, which the child model must declare; the derive fails if either is missing. The type column holds the owner's **table name** (`"posts"`), not the struct name. An owner that keys its children by another column names it with `local_key`, as `#[tideorm(morph_name = "imageable", local_key = "uuid")]`.
 
-Eager loading (`with("images")`, and every other relation) matches keys by value, as the database does, so an `i64` key finds the rows of an `i32` foreign key or a text `*_id` column holding it.
-
----
-
-
----
-
-## File Attachments
-
-TideORM provides a file attachment system for managing file relationships. Attachments are stored in a JSONB column with metadata.
-
-Enable the feature first:
-
-```toml
-[dependencies]
-tideorm = { version = "0.17.7", features = ["postgres", "attachments"] }
-```
-
-### Model Setup
+`MorphOne` and `MorphMany` load like `HasOne` and `HasMany`, eagerly too (`with("images")`). `MorphTo<T>` loads the owner:
 
 ```rust
-#[tideorm::model(
-    table = "products",
-    has_one_files = "thumbnail",
-    has_many_files = "images,documents"
-)]
-pub struct Product {
-    #[tideorm(primary_key, auto_increment)]
+let image = Image::find_or_fail(1).await?;
+
+// The default target, T: an error when the row names another table
+let post: Option<Post> = image.imageable.load().await?;
+
+// Owners of several types
+if image.imageable.is_type::<Video>() {
+    let video: Option<Video> = image.imageable.load_as::<Video>().await?;
+}
+let table: Option<&str> = image.imageable.type_value();
+```
+
+`load_as::<U>()` returns `Ok(None)` when the type column names another table, so you can try each type it may hold. It finds the owner by the `local_key` its `MorphOne`/`MorphMany` declares, else by its primary key. `MorphTo` always queries and has no eager path.
+
+## Self-Referencing Relations
+
+`SelfRef` and `SelfRefMany` model a hierarchy inside one table, such as an org chart, categories or a comment thread:
+
+```rust
+#[tideorm::model(table = "employees")]
+pub struct Employee {
+    #[tideorm(primary_key)]
     pub id: i64,
     pub name: String,
-    pub files: Option<JsonValue>,  // JSONB column storing attachments
+    pub manager_id: Option<i64>,
+
+    #[tideorm(foreign_key = "manager_id")]
+    pub manager: SelfRef<Employee>,
+
+    #[tideorm(foreign_key = "manager_id")]
+    pub reports: SelfRefMany<Employee>,
 }
 
-impl HasAttachments for Product {
-    fn has_one_files() -> Vec<&'static str> {
-        vec!["thumbnail"]
-    }
+async fn org_chart(id: i64) -> tideorm::Result<()> {
+    let employee = Employee::find_or_fail(id).await?;
 
-    fn has_many_files() -> Vec<&'static str> {
-        vec!["images", "documents"]
-    }
+    let manager: Option<Employee> = employee.manager.load().await?;
+    let has_manager = employee.manager.exists().await?;
 
-    fn get_files_data(&self) -> Result<FilesData, AttachmentError> {
-        Ok(self.files.as_ref().map(FilesData::from_json).unwrap_or_default())
-    }
+    let reports: Vec<Employee> = employee.reports.load().await?;
+    let report_count = employee.reports.count().await?;
 
-    fn set_files_data(&mut self, data: FilesData) -> Result<(), AttachmentError> {
-        self.files = Some(data.to_json());
-        Ok(())
-    }
+    // The whole subtree, three levels deep, in one recursive query
+    let tree: Vec<Employee> = employee.reports.load_tree(3).await?;
+    Ok(())
 }
 ```
 
-Every option goes inside the one `#[tideorm::model(..)]` attribute — combining it with a separate `#[tideorm(..)]` on the struct is a compile error. The attribute records the slot names on the model; the `HasAttachments` impl is yours to write, because only you know which column holds the payload. Once it exists, `attach()`, `detach()` and `sync()` are available on `Product` with the `attachments` feature enabled and `tideorm::prelude::*` in scope.
+`foreign_key` defaults to `parent_id`. `local_key` defaults to the primary key, whatever its column is called, and can be set explicitly.
 
-### Relation Types
+`load_tree(max_depth)` fetches the subtree below the row with one recursive CTE query, which avoids one `SELECT` per node on a large hierarchy. It respects the configured `local_key`. Rows come back flat, ordered by depth (direct children first); rebuild the structure from their foreign keys. A node appears once even when the keys form a cycle, at the shallowest depth it was reached. Soft deletes apply at every level, so a trashed node also prunes its descendants. `load_tree(0)` returns nothing without querying, and `load_tree(1)` equals `load()`. It always needs a live connection.
 
-| Type | Description | Use Case |
-|------|-------------|----------|
-| `has_one_files` | Single file attachment | Avatar, thumbnail, profile picture |
-| `has_many_files` | Multiple file attachments | Gallery images, documents, media |
+## Nested Save
 
-### Attaching Files
+The `NestedSave` methods save a parent and its children together, setting each child's foreign key to the parent's key:
 
 ```rust
-use tideorm::prelude::*;
+// The profile's user_id is set to user.id
+let (user, profile) = user.save_with_one(profile, "user_id").await?;
 
-// Attach a single file (hasOne) - replaces any existing
-product.attach("thumbnail", "uploads/thumb.jpg")?;
+// Each post's user_id is set; a new post is inserted, a stored one updated
+let (user, posts) = user.save_with_many(posts, "user_id").await?;
 
-// Attach multiple files (hasMany) - accumulates
-product.attach("images", "uploads/img1.jpg")?;
-product.attach("images", "uploads/img2.jpg")?;
+// Update parent and children, all already stored; no key is set
+let (user, profile) = user.update_with_one(profile).await?;
+let (user, posts) = user.update_with_many(posts).await?;
 
-// Attach multiple at once
-product.attach_many("images", vec![
-    "uploads/img3.jpg",
-    "uploads/img4.jpg",
-])?;
-
-// Attach with metadata
-let attachment = FileAttachment::with_metadata(
-    "uploads/document.pdf",
-    Some("My Document.pdf"),  // Original filename
-    Some(1024 * 1024),        // File size (1MB)
-    Some("application/pdf"),  // MIME type
-);
-product.attach_with_metadata("documents", attachment)?;
-
-// Add custom metadata
-let attachment = FileAttachment::new("uploads/photo.jpg")
-    .add_metadata("width", 1920)
-    .add_metadata("height", 1080)
-    .add_metadata("photographer", "John Doe");
-product.attach_with_metadata("images", attachment)?;
-// Metadata sits beside the attachment's own fields in its JSON. An entry named
-// like one of them (`size`, `key`) is kept only while that field is unset.
-
-// Save to persist changes
-product.update().await?;
+// Delete the children first, then the parent; returns the total row count
+let deleted = user.delete_with_many(posts).await?;
+let deleted = user.delete_with_one(profile).await?;
 ```
 
-### Detaching Files
+For several kinds of children at once, use `NestedSaveBuilder`:
 
 ```rust
-// Remove thumbnail (hasOne)
-product.detach("thumbnail", None)?;
+let (user, saved) = NestedSaveBuilder::new(user)
+    .with_one(profile, "user_id")
+    .with_many(posts, "user_id")
+    .with_many(comments, "author_id")
+    .save()
+    .await?;
 
-// Remove the thumbnail only while it is this file (hasOne)
-product.detach("thumbnail", Some("uploads/old-thumb.jpg"))?;
-
-// Remove specific file (hasMany)
-product.detach("images", Some("uploads/img1.jpg"))?;
-
-// Remove all files from relation (hasMany)
-product.detach("images", None)?;
-
-// Remove multiple specific files
-product.detach_many("images", vec!["img2.jpg", "img3.jpg"])?;
-
-product.update().await?;
+let profile: Option<&Profile> = saved[0].as_one();
+let posts: Option<&[Post]> = saved[1].as_many();
 ```
 
-### Syncing Files (Replace All)
+`save()` returns one `SavedRelation` per `with_one`/`with_many`, in the order you added them, holding the children as stored. `as_one`/`as_many` borrow them (`None` for another shape or model type), `into_one`/`into_many` take them and fail instead, and `is_one`/`is_many` report the shape.
+
+Each nested operation runs in one transaction (a savepoint inside yours), so a child that fails also rolls back the parent's write. Children are written one at a time through each model's own `create`, `update` or `delete`, so their callbacks and validation run as usual. The foreign key may be the Rust field name, the column name or a typed column (`Post::USER_ID`), and the children may come in any list, a `Vec` or an array. `NestedSaveBuilder` is `Send`, so you can hold it across await points or move it into a spawned task before calling `save()`.
+
+## Join Result Consolidation
+
+`JoinResultConsolidator` turns flat tuples, such as rows of a join read as `(Order, LineItem)`, into nested ones:
 
 ```rust
-// Replace all images with new ones
-product.sync("images", vec![
-    "uploads/new1.jpg",
-    "uploads/new2.jpg",
-])?;
+use tideorm::prelude::JoinResultConsolidator;
 
-// Clear all images
-product.sync("images", Vec::<&str>::new())?;
+// [(order1, item1), (order1, item2), (order2, item3)]
+let flat: Vec<(Order, LineItem)> = orders_with_items;
 
-// Sync with metadata
-let attachments = vec![
-    FileAttachment::with_metadata("img1.jpg", Some("Photo 1"), Some(1024), Some("image/jpeg")),
-    FileAttachment::with_metadata("img2.jpg", Some("Photo 2"), Some(2048), Some("image/jpeg")),
-];
-product.sync_with_metadata("images", attachments)?;
+// [(order1, [item1, item2]), (order2, [item3])]
+let nested: Vec<(Order, Vec<LineItem>)> = JoinResultConsolidator::consolidate_two(flat, |o| o.id);
 
-product.update().await?;
+// LEFT JOIN rows, Vec<(Order, Option<LineItem>)>: a parent with no child gets an empty list
+let nested = JoinResultConsolidator::consolidate_two_optional(flat_optional, |o| o.id);
+
+// Three levels: Vec<(Order, Vec<(LineItem, Vec<Product>)>)>
+let nested3 = JoinResultConsolidator::consolidate_three(flat3, |o| o.id, |i| i.id);
+
+// Three levels where only the innermost may be absent: Vec<(Order, LineItem, Option<Product>)>
+let nested3 = JoinResultConsolidator::consolidate_three_optional(flat3_optional, |o| o.id, |i| i.id);
 ```
 
-### Getting Files
+## Linked Partial Select
+
+`select_with_linked` left-joins another table and selects columns from both; `select_also_linked` selects every model column plus the linked ones. Read the rows into a struct of your own with `get_as()`, whose fields are the column names:
 
 ```rust
-// Get single file (hasOne)
-if let Some(thumb) = product.get_file("thumbnail")? {
-    println!("Thumbnail: {}", thumb.key);
-    println!("Filename: {}", thumb.filename);
-    println!("Created: {}", thumb.created_at);
-    if let Some(size) = thumb.size {
-        println!("Size: {} bytes", size);
-    }
+#[derive(serde::Deserialize)]
+struct UserBio {
+    id: i64,
+    name: String,
+    bio: Option<String>,
 }
 
-// Get multiple files (hasMany)
-let images = product.get_files("images")?;
-for img in images {
-    println!("Image: {} ({})", img.filename, img.key);
-}
+// users.id = profiles.user_id
+let rows: Vec<UserBio> = User::query()
+    .select_with_linked(vec!["id", "name"], "profiles", "id", "user_id", vec!["bio"])
+    .get_as()
+    .await?;
 
-// Check if has files
-if product.has_files("images")? {
-    let count = product.count_files("images")?;
-    println!("Product has {} images", count);
-}
-```
-
-### FileAttachment Structure
-
-Each attachment stores:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `key` | `String` | File path/key (e.g., "uploads/2024/01/image.jpg") |
-| `filename` | `String` | Extracted filename |
-| `created_at` | `String` | ISO 8601 timestamp when attached |
-| `original_filename` | `Option<String>` | Original filename if different |
-| `size` | `Option<u64>` | File size in bytes |
-| `mime_type` | `Option<String>` | MIME type |
-| `metadata` | `HashMap` | Custom metadata fields |
-
-### JSON Storage Format
-
-Attachments are stored in JSONB with this structure:
-
-```json
-{
-  "thumbnail": {
-    "key": "uploads/thumb.jpg",
-    "filename": "thumb.jpg",
-    "created_at": "2024-01-15T10:30:00Z"
-  },
-  "images": [
-    {
-      "key": "uploads/img1.jpg",
-      "filename": "img1.jpg",
-      "created_at": "2024-01-15T10:30:00Z",
-      "size": 1048576,
-      "mime_type": "image/jpeg"
-    },
-    {
-      "key": "uploads/img2.jpg",
-      "filename": "img2.jpg",
-      "created_at": "2024-01-15T10:31:00Z"
-    }
-  ]
-}
-```
-
-### File URL Generation
-
-TideORM can automatically generate full URLs for file attachments. This is useful when you store file keys/paths in the database but need to serve them from a CDN or storage service.
-
-#### Global Base URL
-
-Configure a base URL that will be prepended to all file keys:
-
-```rust
-TideConfig::init()
-    .database("postgres://localhost/mydb")
-    .file_base_url("https://cdn.example.com/uploads")
-    .connect()
+// Every user column, plus the profile's bio
+let rows: Vec<serde_json::Value> = User::query()
+    .select_also_linked("profiles", "id", "user_id", vec!["bio"])
+    .get_json()
     .await?;
 ```
 
-Now when you call `to_json()`, file attachments will include a `url` field:
+The arguments are the model's columns, the linked table, the model's join column, the linked table's join column and the linked columns. A linked column that shares a name with a selected one must be aliased: two outputs cannot share a name.
 
-```json
-{
-  "thumbnail": {
-    "key": "products/123/thumb.jpg",
-    "filename": "thumb.jpg",
-    "url": "https://cdn.example.com/uploads/products/123/thumb.jpg"
-  }
-}
-```
+## Relations Under an Entity Manager
 
-#### Custom URL Generator
-
-For more complex URL generation (signed URLs, image transformations, etc.), use a custom generator that receives **both the field name and the full `FileAttachment`**:
-
-```rust
-use tideorm::attachments::FileAttachment;
-
-// Define a custom URL generator function with field name and full metadata access
-fn smart_url_generator(field_name: &str, file: &FileAttachment) -> String {
-    // Route based on field name first
-    match field_name {
-        "thumbnail" => {
-            let quality = if file.size.unwrap_or(0) > 500_000 { "60" } else { "auto" };
-            return format!("https://thumbs.example.com/q_{}/{}", quality, file.key);
-        }
-        "avatar" => {
-            return format!("https://avatars.example.com/w_200,h_200/{}", file.key);
-        }
-        _ => {}
-    }
-    
-    // Fall back to mime_type routing
-    match file.mime_type.as_deref() {
-        Some(m) if m.starts_with("video/") => {
-            format!("https://stream.example.com/{}", file.key)
-        }
-        Some(m) if m.starts_with("image/") => {
-            let quality = if file.size.unwrap_or(0) > 1_000_000 { "80" } else { "auto" };
-            format!("https://images.example.com/q_{}/{}", quality, file.key)
-        }
-        _ => format!("https://cdn.example.com/{}", file.key),
-    }
-}
-
-// Use it globally
-TideConfig::init()
-    .database("postgres://localhost/mydb")
-    .file_url_generator(smart_url_generator)
-    .connect()
-    .await?;
-```
-
-**Parameters available to URL generators:**
-- `field_name` - The attachment field name (e.g., "thumbnail", "avatar", "documents")
-- `file` - The full `FileAttachment` struct with:
-  - `key` - Storage key/path
-  - `filename` - Extracted filename
-  - `created_at` - Creation timestamp
-  - `original_filename` - Original upload name (if available)
-  - `size` - File size in bytes (if available)
-  - `mime_type` - MIME type (if available)
-  - `metadata` - Custom HashMap for additional data
-
-#### Per-Model URL Routing
-
-There is no per-model override: every model renders its attachments with the
-one generator configured on `TideConfig`.
-
-Route per model inside that single generator instead — it receives the field
-name, and `FileAttachment::metadata` carries anything else you stashed at attach
-time:
-
-```rust
-use tideorm::attachments::FileAttachment;
-
-fn product_aware_url_generator(field_name: &str, file: &FileAttachment) -> String {
-    match field_name {
-        "thumbnail" => format!("https://products-cdn.example.com/thumb/{}", file.key),
-        "gallery" => format!("https://products-cdn.example.com/gallery/{}", file.key),
-        _ => format!("https://products-cdn.example.com/assets/{}", file.key),
-    }
-}
-
-TideConfig::init()
-    .database("postgres://localhost/mydb")
-    .file_url_generator(product_aware_url_generator)
-    .connect()
-    .await?;
-```
-
-#### Manual URL Generation
-
-Generate URLs programmatically:
-
-```rust
-use tideorm::prelude::*;
-use tideorm::attachments::FileAttachment;
-
-// Create a FileAttachment for URL generation
-let file = FileAttachment::new("uploads/image.jpg");
-let url = file.url("thumbnail");  // Uses the global generator with the field name
-
-// With metadata for smarter URL generation
-let file = FileAttachment::with_metadata(
-    "uploads/video.mp4",
-    Some("My Video.mp4"),
-    Some(50_000_000),
-    Some("video/mp4"),
-);
-let url = file.url("video");
-
-// Using FileAttachment method directly
-let attachment = product.get_file("thumbnail")?;
-if let Some(thumb) = attachment {
-    let url = thumb.url("thumbnail");
-    
-    // Or with custom generator
-    let url = thumb.url_with_generator("thumbnail", |field_name, file| {
-        format!("https://custom-cdn.com/{}/{}", field_name, file.key)
-    });
-}
-```
-
-#### URL Generator Priority
-
-URL generators are resolved in this order:
-
-1. **Global custom generator** - If set via `TideConfig::file_url_generator()`
-2. **Field or global base URL** - If set via `TideConfig::file_base_url_for()` or `TideConfig::file_base_url()`
-3. **Key as-is** - If no configuration, returns the key unchanged
-
----
-
-## Translations (i18n)
-
-TideORM provides a translation system for multilingual content. Translations are stored in a JSONB column.
-
-Enable the feature first:
-
-```toml
-[dependencies]
-tideorm = { version = "0.17.7", features = ["postgres", "translations"] }
-```
-
-### Model Setup
-
-```rust
-#[tideorm::model(table = "products", translatable = "name,description")]
-pub struct Product {
-    #[tideorm(primary_key, auto_increment)]
-    pub id: i64,
-    
-    // Default/fallback values
-    pub name: String,
-    pub description: String,
-    
-    pub price: f64,
-    
-    // JSONB column for translations
-    pub translations: Option<JsonValue>,
-}
-```
-
-The attribute records which fields are translatable; the `HasTranslations` impl
-that reads and writes the `translations` column is yours to write, as shown in
-[Translation Configuration](#translation-configuration) below. Once it exists,
-`set_translation()` and `get_translated()` are available on `Product` with the
-`translations` feature enabled and `tideorm::prelude::*` in scope. The fallback
-value behind `get_translated()` is what your `get_default_value()` returns.
-
-### Setting Translations
-
-```rust
-use tideorm::prelude::*;
-
-// Set individual translation
-product.set_translation("name", "ar", "اسم المنتج")?;
-product.set_translation("name", "fr", "Nom du produit")?;
-product.set_translation("description", "ar", "وصف المنتج")?;
-
-// Set multiple translations at once: a HashMap or any (language, value) pairs
-product.set_translations("name", [
-    ("en", "Product Name"),
-    ("ar", "اسم المنتج"),
-    ("fr", "Nom du produit"),
-])?;
-
-// Sync translations (replace all for a field)
-product.sync_translations("name", [("en", "New Product Name"), ("de", "Neuer Produktname")])?;
-
-// Save to persist
-product.update().await?;
-```
-
-### Getting Translations
-
-```rust
-// Get specific translation
-if let Some(name) = product.get_translation("name", "ar")? {
-    println!("Arabic name: {}", name);
-}
-
-// Get with fallback chain: requested -> fallback language -> default field value
-let name = product.get_translated("name", "ar")?;
-
-// Get all translations for a field
-let all_names = product.get_all_translations("name")?;
-for (lang, value) in all_names {
-    println!("{}: {}", lang, value);
-}
-
-// Get all translations for a language
-let arabic = product.get_translations_for_language("ar")?;
-// Returns: {"name": "اسم المنتج", "description": "وصف المنتج"}
-```
-
-`Model::load_all_translations()` is no longer available because applying every translation directly onto scalar model fields was misleading and lossy. Use `get_all_translations()` for field-level access, `get_translations_for_language()` for one language at a time, or `to_json_with_all_translations()` when you need a full JSON payload.
-
-### Checking Translations
-
-```rust
-// Check if specific translation exists
-if product.has_translation("name", "ar")? {
-    println!("Arabic name available");
-}
-
-// Check if field has any translations
-if product.has_any_translation("name")? {
-    println!("Name has translations");
-}
-
-// Get available languages for a field
-let languages = product.available_languages("name")?;
-println!("Name available in: {:?}", languages);
-```
-
-### Removing Translations
-
-```rust
-// Remove specific translation
-product.remove_translation("name", "fr")?;
-
-// Remove all translations for a field
-product.remove_field_translations("name")?;
-
-// Clear all translations
-product.clear_translations()?;
-
-product.update().await?;
-```
-
-### JSON Output with Translations
-
-```rust
-// Get JSON with translated fields (removes raw translations column)
-let json = product.to_translated_json_in("ar");
-// Result: {"id": 1, "name": "اسم المنتج", "description": "وصف المنتج", "price": 99.99}
-// A field with no Arabic translation takes the fallback language's, and then
-// the model's own value.
-
-// In the fallback language
-let json = product.to_translated_json(None);
-
-// `to_json` with its translatable fields in one language, hidden attributes
-// applied as for any `to_json`; `try_to_json_in` reports a failure instead
-let json = product.to_json_in("ar");
-
-// Get JSON including all translations (for admin interfaces)
-let json = product.to_json_with_all_translations();
-
-// A model whose serde derive renames fields (`rename_all = "camelCase"`) says
-// where each field lands, so the translation replaces it there:
-// fn serialized_key(field: &'static str) -> &'static str {
-//     <Self as ModelMeta>::serialized_name(field)
-// }
-// Result includes raw translations field
-```
-
-### Translation Configuration
-
-The impl the translation methods need:
-
-```rust
-impl HasTranslations for Product {
-    fn translatable_fields() -> Vec<&'static str> {
-        vec!["name", "description"]
-    }
-    
-    fn allowed_languages() -> Vec<String> {
-        vec!["en".to_string(), "ar".to_string(), "fr".to_string(), "de".to_string()]
-    }
-    
-    fn fallback_language() -> String {
-        "en".to_string()
-    }
-    
-    fn get_translations_data(&self) -> Result<TranslationsData, TranslationError> {
-        match &self.translations {
-            Some(json) => Ok(TranslationsData::from_json(json)),
-            None => Ok(TranslationsData::new()),
-        }
-    }
-    
-    fn set_translations_data(&mut self, data: TranslationsData) -> Result<(), TranslationError> {
-        self.translations = Some(data.to_json());
-        Ok(())
-    }
-    
-    fn get_default_value(&self, field: &str) -> Result<serde_json::Value, TranslationError> {
-        match field {
-            "name" => Ok(serde_json::json!(self.name)),
-            "description" => Ok(serde_json::json!(self.description)),
-            _ => Err(TranslationError::InvalidField(format!("Unknown field: {}", field))),
-        }
-    }
-}
-```
-
-### JSON Storage Format
-
-Translations are stored in JSONB with this structure:
-
-```json
-{
-  "name": {
-    "en": "Wireless Headphones",
-    "ar": "سماعات لاسلكية",
-    "fr": "Écouteurs sans fil"
-  },
-  "description": {
-    "en": "High-quality wireless headphones",
-    "ar": "سماعات لاسلكية عالية الجودة",
-    "fr": "Écouteurs sans fil de haute qualité"
-  }
-}
-```
-
-### Combining Attachments and Translations
-
-Models can use both features together, each with its impl from above:
-
-```rust
-#[tideorm::model(
-    table = "products",
-    translatable = "name,description",
-    has_one_files = "thumbnail",
-    has_many_files = "images"
-)]
-pub struct Product {
-    #[tideorm(primary_key, auto_increment)]
-    pub id: i64,
-    pub name: String,
-    pub description: String,
-    pub price: f64,
-    pub translations: Option<JsonValue>,
-    pub files: Option<JsonValue>,
-}
-
-// Use both features
-product.set_translation("name", "ar", "اسم المنتج")?;
-product.attach("thumbnail", "uploads/thumb.jpg")?;
-product.attach_many("images", vec!["img1.jpg", "img2.jpg"])?;
-product.update().await?;
-```
-
----
-
+With the `entity-manager` feature, `entity_manager.load(&mut relation)` loads a `HasOne`, `HasMany`, `BelongsTo` or `HasManyThrough` relation inside the manager's identity map, and `entity_manager.save(&model)` writes the loaded relations back. Every relation of a model the manager loaded, polymorphic and self-referencing ones included, queries through the manager's database, even with no global database. See [Entity Manager](entity-manager.md).

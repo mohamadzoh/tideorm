@@ -35,9 +35,9 @@
 //! An index name owned by another table is an error; sync cannot enforce the
 //! declared index by silently reusing that name.
 //!
-//! A model's `#[tideorm(schema = "...")]` qualifies every statement sync issues
-//! on PostgreSQL, so the schema has to exist before sync runs. MySQL and SQLite
-//! ignore it: their "schema" is the connected database.
+//! A model's `#[tideorm(schema = "...")]` qualifies every statement sync issues:
+//! on PostgreSQL it names a schema, on MySQL and MariaDB a database, and either
+//! has to exist before sync runs. SQLite ignores it.
 //!
 //! ### Force Sync (`force_sync(true)`)
 //!

@@ -7,7 +7,7 @@
 pub use crate::callbacks::Callbacks;
 #[cfg(feature = "attachments")]
 pub use crate::config::FileUrlGenerator;
-pub use crate::config::{Config, DatabaseType, PoolConfig, TideConfig};
+pub use crate::config::{Config, DatabaseServer, DatabaseType, PoolConfig, TideConfig};
 pub use crate::database::{AccessMode, IsolationLevel, SqliteTransactionMode, TransactionOptions};
 pub use crate::database::{Database, DatabaseBuilder, Transaction};
 pub use crate::database::{db, has_global_db, require_db};

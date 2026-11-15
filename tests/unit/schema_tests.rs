@@ -121,8 +121,8 @@ fn test_schema_generator_postgres_preserves_serial_width() {
     let sql = generator.generate();
 
     assert!(
-        sql.contains("\"id\" SERIAL"),
-        "An INTEGER key must stay 4 bytes. Got: {}",
+        sql.contains("\"id\" SERIAL4"),
+        "An INTEGER key must stay 4 bytes, on CockroachDB too. Got: {}",
         sql
     );
     assert!(
@@ -259,7 +259,7 @@ fn test_rust_types_map_to_the_column_each_backend_reads_back() {
     assert_renders(&[
         (column::<i8>(), "SMALLINT", "TINYINT", "INTEGER"),
         (column::<i16>(), "SMALLINT", "SMALLINT", "INTEGER"),
-        (column::<i32>(), "INTEGER", "INT", "INTEGER"),
+        (column::<i32>(), "INT4", "INT", "INTEGER"),
         (column::<i64>(), "BIGINT", "BIGINT", "INTEGER"),
         (column::<f32>(), "REAL", "FLOAT", "REAL"),
         (column::<f64>(), "DOUBLE PRECISION", "DOUBLE", "REAL"),
@@ -284,7 +284,7 @@ fn test_rust_types_map_to_the_column_each_backend_reads_back() {
         // unsigned column types, so nothing widens there, and SQLite has one
         // integer storage class for them all.
         (column::<u8>(), "SMALLINT", "TINYINT UNSIGNED", "INTEGER"),
-        (column::<u16>(), "INTEGER", "SMALLINT UNSIGNED", "INTEGER"),
+        (column::<u16>(), "INT4", "SMALLINT UNSIGNED", "INTEGER"),
         (column::<u32>(), "BIGINT", "INT UNSIGNED", "INTEGER"),
         (column::<u64>(), "BIGINT", "BIGINT UNSIGNED", "INTEGER"),
         // TEXT would be the lossless target on SQLite, but a REAL column
@@ -324,7 +324,7 @@ fn test_rust_types_map_to_the_column_each_backend_reads_back() {
 #[test]
 fn test_array_types_map_to_postgres_arrays_and_json_elsewhere() {
     assert_renders(&[
-        (column::<Vec<i32>>(), "INTEGER[]", "JSON", "TEXT"),
+        (column::<Vec<i32>>(), "INT4[]", "JSON", "TEXT"),
         (column::<Vec<i64>>(), "BIGINT[]", "JSON", "TEXT"),
         (column::<Vec<f64>>(), "DOUBLE PRECISION[]", "JSON", "TEXT"),
         (column::<Vec<bool>>(), "BOOLEAN[]", "JSON", "TEXT"),

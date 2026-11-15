@@ -198,7 +198,7 @@ pub async fn setup() -> bool {
 }
 
 /// Drop and recreate a table for one scenario, outside the shared `TABLES`.
-async fn fresh_table<F>(name: &str, build: F)
+pub async fn fresh_table<F>(name: &str, build: F)
 where
     F: FnOnce(&mut tideorm::migration::TableBuilder),
 {
@@ -819,6 +819,67 @@ async fn where_has_filters_by_the_related_models_own_query() {
     );
 }
 
+/// Whether the connected server is `server`: CockroachDB and YugabyteDB run
+/// the PostgreSQL suites, TiDB and Vitess the MySQL ones.
+pub fn on(server: DatabaseServer) -> bool {
+    tideorm::require_db().ok().and_then(|db| db.server()) == Some(server)
+}
+
+/// Whether to stop a scenario because the connected server is one of
+/// `servers`, which lack `what` it needs; prints why.
+pub fn skip_on(servers: &[DatabaseServer], what: &str) -> bool {
+    let Some(server) = servers.iter().copied().find(|server| on(*server)) else {
+        return false;
+    };
+    println!("Skipping on {server}, which has no {what}");
+    true
+}
+
+/// The server a connection names is the one its version string describes.
+#[tokio::test]
+async fn the_connection_names_its_server() {
+    if !setup().await {
+        return;
+    }
+    let db = tideorm::require_db().expect("global database should be installed");
+    let server = db.server().expect("a connected handle names its server");
+    assert_eq!(server.backend(), backend::DATABASE_TYPE);
+    let sql = match backend::DATABASE_TYPE {
+        DatabaseType::SQLite => "SELECT sqlite_version() AS version",
+        _ => "SELECT version() AS version",
+    };
+    let rows = Database::raw_json(sql).await.expect("version query failed");
+    let version = rows[0]["version"].as_str().expect("a version string");
+    let named = |marker: &str| version.contains(marker);
+    let expected = match backend::DATABASE_TYPE {
+        DatabaseType::SQLite => DatabaseServer::Sqlite,
+        DatabaseType::Postgres if named("CockroachDB") => DatabaseServer::CockroachDb,
+        DatabaseType::Postgres if named("-YB-") => DatabaseServer::YugabyteDb,
+        DatabaseType::Postgres => DatabaseServer::Postgres,
+        _ if named("TiDB") => DatabaseServer::TiDb,
+        _ if named("Vitess") => DatabaseServer::Vitess,
+        _ if named("MariaDB") => DatabaseServer::MariaDb,
+        _ => DatabaseServer::MySql,
+    };
+    assert_eq!(server, expected, "{version}");
+
+    // A transaction and a pinned session answer as the pool does.
+    let inside = db
+        .transaction(async |_| Ok::<_, tideorm::Error>(db.server()))
+        .await
+        .unwrap();
+    assert_eq!(inside, Some(server));
+    if backend::DATABASE_TYPE != DatabaseType::SQLite {
+        let session = db.pin_session().await.expect("pin a session");
+        assert_eq!(session.server(), Some(server));
+        let inside = session
+            .transaction(async |_| Ok::<_, tideorm::Error>(session.server()))
+            .await
+            .unwrap();
+        assert_eq!(inside, Some(server));
+    }
+}
+
 #[tokio::test]
 async fn connection_reports_backend_and_runs_raw_sql() {
     if !setup().await {
@@ -1163,9 +1224,17 @@ async fn transactions_begin_with_their_options() {
         return;
     }
     let sqlite = backend::DATABASE_TYPE == DatabaseType::SQLite;
+    // TiDB refuses SERIALIZABLE, and READ ONLY unless its no-op functions are on.
+    let tidb = on(DatabaseServer::TiDb);
+    let read_only = !sqlite && !tidb;
     let options = if sqlite {
         TransactionOptions {
             sqlite_transaction_mode: Some(SqliteTransactionMode::Immediate),
+            ..TransactionOptions::default()
+        }
+    } else if tidb {
+        TransactionOptions {
+            isolation_level: Some(IsolationLevel::RepeatableRead),
             ..TransactionOptions::default()
         }
     } else {
@@ -1178,13 +1247,14 @@ async fn transactions_begin_with_their_options() {
     let db = tideorm::require_db().expect("global database should be installed");
 
     // MySQL reports the open transaction's level and mode only through
-    // performance_schema, which MariaDB leaves off.
+    // performance_schema, which MariaDB leaves off and TiDB lacks: there the
+    // test checks only that the options are taken.
     let probe = match backend::DATABASE_TYPE {
         DatabaseType::Postgres => Some(
             "SELECT current_setting('transaction_isolation') AS isolation, \
              current_setting('transaction_read_only') AS access",
         ),
-        DatabaseType::MySQL => Some(
+        DatabaseType::MySQL if !tidb => Some(
             "SELECT ISOLATION_LEVEL AS isolation, ACCESS_MODE AS access \
              FROM performance_schema.events_transactions_current \
              WHERE THREAD_ID = PS_CURRENT_THREAD_ID()",
@@ -1216,7 +1286,7 @@ async fn transactions_begin_with_their_options() {
             Ok(())
         })
         .await;
-    assert_eq!(write.is_ok(), sqlite, "a write in it: {write:?}");
+    assert_eq!(write.is_ok(), !read_only, "a write in it: {write:?}");
 
     let inner = db.clone();
     db.transaction(async move |_| {
@@ -1244,7 +1314,7 @@ async fn transactions_begin_with_their_options() {
         .count()
         .await
         .unwrap();
-    assert_eq!(saved, if sqlite { 3 } else { 2 });
+    assert_eq!(saved, if read_only { 2 } else { 3 });
 }
 
 #[tokio::test]
@@ -2238,11 +2308,15 @@ async fn constraint_failures_keep_their_kind() {
         orphan.failure_kind(),
         tideorm::error::DbFailureKind::ForeignKeyViolation
     );
-    let zero = insert("2, 1, 0").await.expect_err("qty 0 passed its CHECK");
-    assert_eq!(
-        zero.failure_kind(),
-        tideorm::error::DbFailureKind::CheckViolation
-    );
+    // TiDB parses a CHECK but enforces none unless `tidb_enable_check_constraint`
+    // is set globally (off by default)
+    if !skip_on(&[DatabaseServer::TiDb], "CHECK enforcement by default") {
+        let zero = insert("2, 1, 0").await.expect_err("qty 0 passed its CHECK");
+        assert_eq!(
+            zero.failure_kind(),
+            tideorm::error::DbFailureKind::CheckViolation
+        );
+    }
     Database::execute("DROP TABLE constraint_children")
         .await
         .expect("drop failed");
@@ -2904,6 +2978,8 @@ async fn unsigned_values_past_i64_max_match_nothing() {
 
     let users = TestUser::query().where_eq("id", huge).get().await;
     assert!(users.expect("where_eq failed").is_empty());
+    // CockroachDB reads a list's values as the column's type, unless the
+    // decimal standing for the value is cast.
     let users = TestUser::query().where_in("id", vec![1, huge]).get().await;
     assert_eq!(users.expect("where_in failed").len(), 1);
     let below = TestUser::query().where_lt("id", huge).count().await;
@@ -3715,9 +3791,11 @@ async fn insert_all_of_models_keyed_by_the_client_keeps_their_order() {
     }
     assert_eq!(CodedItem::count().await.expect("count failed"), 20_000);
 
-    // Nil keys are generated, one distinct key per row.
+    // Nil keys are generated, one distinct key per row. More rows than
+    // Vitess returns from one statement by default (10,000), which the MySQL
+    // family's read-back of a batch must stay under.
     fresh_uuid_keyed_codes().await;
-    let codes = (0..300)
+    let codes = (0..10_050)
         .map(|i| UuidKeyedCode {
             id: Uuid::nil(),
             code: format!("c{i}"),
@@ -4038,6 +4116,14 @@ async fn write_schema_exports_a_table_that_can_be_recreated_from_the_file() {
     })
     .await;
     let file = exported_schema("rows").await;
+    if matches!(
+        backend::DATABASE_TYPE,
+        DatabaseType::MySQL | DatabaseType::MariaDB
+    ) {
+        // Vitess refuses `ALTER DATABASE`, which the file would fail at.
+        let vitess = on(DatabaseServer::Vitess);
+        assert_eq!(file.contains("ALTER DATABASE COLLATE "), !vitess, "{file}");
+    }
 
     let quoted = match backend::DATABASE_TYPE {
         DatabaseType::MySQL | DatabaseType::MariaDB => "`exported_rows`",
@@ -4069,9 +4155,15 @@ async fn write_schema_exports_a_table_that_can_be_recreated_from_the_file() {
             .any(|statement| statement.starts_with("CREATE TABLE")),
         "no CREATE TABLE for exported_rows in:\n{file}"
     );
+    // MySQL and CockroachDB declare it inside CREATE TABLE.
+    let cockroach = on(DatabaseServer::CockroachDb);
     assert!(
         statements.iter().any(|statement| {
-            statement.starts_with("CREATE UNIQUE INDEX") || statement.contains("UNIQUE KEY `")
+            statement.starts_with("CREATE UNIQUE INDEX")
+                || statement.contains("UNIQUE KEY `")
+                || (cockroach
+                    && statement.starts_with("CREATE TABLE")
+                    && statement.contains("UNIQUE INDEX "))
         }),
         "no unique index for exported_rows in:\n{file}"
     );
@@ -4100,6 +4192,22 @@ async fn write_schema_exports_a_table_that_can_be_recreated_from_the_file() {
             .is_err(),
         "the recreated unique index should reject a duplicate"
     );
+
+    // The restored sequence belongs to its column again, so it goes with the table.
+    Schema::new(backend::DATABASE_TYPE)
+        .drop_table("exported_rows")
+        .await
+        .expect("drop failed");
+    if backend::DATABASE_TYPE == DatabaseType::Postgres {
+        let left = tideorm::require_db()
+            .unwrap()
+            .query_raw_json(
+                "SELECT relname FROM pg_catalog.pg_class WHERE relname = 'exported_rows_id_seq'",
+            )
+            .await
+            .unwrap();
+        assert!(left.is_empty(), "the sequence outlived its table: {left:?}");
+    }
 }
 
 #[tideorm::model(table = "tagged_rows")]
@@ -4120,18 +4228,24 @@ async fn array_append_and_remove_keep_the_rest_of_a_json_array() {
     if !setup().await || backend::DATABASE_TYPE == DatabaseType::Postgres {
         return;
     }
+    let remove = !skip_on(
+        &[DatabaseServer::TiDb],
+        "JSON_TABLE, which array_remove reads",
+    );
 
     fresh_tagged_rows().await;
     for tags in [json!(["a", 1, true, null, "b", "a", "1"]), json!(["keep"])] {
         TaggedRow { id: 0, tags }.save().await.expect("save failed");
     }
 
-    TaggedRow::update_all()
-        .where_gt("id", 0)
-        .array_remove("tags", "a")
-        .execute()
-        .await
-        .expect("array_remove failed");
+    if remove {
+        TaggedRow::update_all()
+            .where_gt("id", 0)
+            .array_remove("tags", "a")
+            .execute()
+            .await
+            .expect("array_remove failed");
+    }
     TaggedRow::update_all()
         .where_gt("id", 0)
         .array_append("tags", json!({"x": 1}))
@@ -4147,13 +4261,12 @@ async fn array_append_and_remove_keep_the_rest_of_a_json_array() {
         .into_iter()
         .map(|row| row.tags)
         .collect();
-    assert_eq!(
-        tags,
-        [
-            json!([1, true, null, "b", "1", {"x": 1}]),
-            json!(["keep", {"x": 1}])
-        ]
-    );
+    let first = if remove {
+        json!([1, true, null, "b", "1", {"x": 1}])
+    } else {
+        json!(["a", 1, true, null, "b", "a", "1", {"x": 1}])
+    };
+    assert_eq!(tags, [first, json!(["keep", {"x": 1}])]);
 }
 
 /// `array_remove` compares elements as JSON values: an object with its keys
@@ -4165,7 +4278,13 @@ async fn array_append_and_remove_keep_the_rest_of_a_json_array() {
 async fn array_remove_compares_elements_as_json_values() {
     use serde_json::json;
 
-    if !setup().await || backend::DATABASE_TYPE == DatabaseType::Postgres {
+    if !setup().await
+        || backend::DATABASE_TYPE == DatabaseType::Postgres
+        || skip_on(
+            &[DatabaseServer::TiDb],
+            "JSON_TABLE, which array_remove reads",
+        )
+    {
         return;
     }
 
@@ -4680,9 +4799,10 @@ pub struct CasedItem {
 
 /// An eager load gives each parent the rows the database matches to its key,
 /// as a lazy load does, under the column's collation: SQLite's NOCASE and
-/// MySQL's and MariaDB's default collations match "ABC" with "abc". The rows
-/// were regrouped by exact text, so "ABC" got none. PostgreSQL compares
-/// case-sensitively, and both loads agree there too.
+/// MySQL's and MariaDB's default collations match "ABC" with "abc", as does
+/// the one the TiDB key column declares. The rows were regrouped by exact
+/// text, so "ABC" got none. PostgreSQL compares case-sensitively, and both
+/// loads agree there too.
 #[tokio::test]
 async fn eager_loads_match_keys_under_the_columns_collation() {
     if !setup().await {
@@ -4710,6 +4830,15 @@ async fn eager_loads_match_keys_under_the_columns_collation() {
             t.string("owner_code").not_null();
         })
         .await;
+        // TiDB's default collation, utf8mb4_bin, compares exactly.
+        if on(DatabaseServer::TiDb) {
+            Database::execute(
+                "ALTER TABLE cased_items MODIFY owner_code VARCHAR(255) NOT NULL \
+                 COLLATE utf8mb4_general_ci",
+            )
+            .await
+            .expect("collation change failed");
+        }
     }
     for code in &parents {
         CasedOwner {
@@ -5626,6 +5755,7 @@ async fn write_schema_keeps_string_defaults_and_full_text_indexes() {
     if !setup().await {
         return;
     }
+    let full_text = !skip_on(&[DatabaseServer::TiDb], "FULLTEXT index");
     fresh_table("exported_docs", |t| {
         t.id();
         t.string("status").default("draft");
@@ -5647,7 +5777,9 @@ async fn write_schema_keeps_string_defaults_and_full_text_indexes() {
             .await
             .expect("drop failed");
     }
-    Database::execute(index).await.expect("index failed");
+    if full_text {
+        Database::execute(index).await.expect("index failed");
+    }
     let file = exported_schema("docs").await;
     if backend::DATABASE_TYPE == DatabaseType::SQLite {
         Database::execute("DROP TABLE exported_docs_fts")
@@ -5655,8 +5787,12 @@ async fn write_schema_keeps_string_defaults_and_full_text_indexes() {
             .expect("drop failed");
     }
 
+    // CockroachDB's own `SHOW CREATE` writes the export, with defaults and
+    // indexes inside CREATE TABLE and identifiers quoted only when needed.
+    let cockroach = on(DatabaseServer::CockroachDb);
     let quoted = match backend::DATABASE_TYPE {
         DatabaseType::MySQL | DatabaseType::MariaDB => "`exported_docs`",
+        _ if cockroach => "public.exported_docs (",
         _ => "\"exported_docs\"",
     };
     let create = export_statements(&file)
@@ -5669,7 +5805,7 @@ async fn write_schema_keeps_string_defaults_and_full_text_indexes() {
             .find(|line| line.contains(name))
             .unwrap_or_else(|| panic!("no {name} column in:\n{create}"))
     };
-    if backend::DATABASE_TYPE == DatabaseType::Postgres {
+    if backend::DATABASE_TYPE == DatabaseType::Postgres && !cockroach {
         // Defaults are intentionally deferred until after CREATE TABLE so
         // inherited tables can resolve conflicting parent defaults.
         Database::execute("ALTER TABLE exported_docs ALTER COLUMN status DROP DEFAULT, ALTER COLUMN note DROP DEFAULT")
@@ -5696,21 +5832,62 @@ async fn write_schema_keeps_string_defaults_and_full_text_indexes() {
         assert!(column("note").contains("''"), "{create}");
     }
     match backend::DATABASE_TYPE {
-        DatabaseType::Postgres => assert!(
-            file.contains("CREATE INDEX exported_docs_fts ON public.exported_docs USING gin"),
-            "{file}"
-        ),
-        DatabaseType::MySQL | DatabaseType::MariaDB => {
-            // SHOW CREATE TABLE places the full-text key inside CREATE TABLE.
-            // Verify the restored index and defaults by using them.
+        DatabaseType::Postgres if !cockroach => {
+            // YugabyteDB builds a GIN index as its own `ybgin` access method.
+            let method = if on(DatabaseServer::YugabyteDb) {
+                "ybgin"
+            } else {
+                "gin"
+            };
+            assert!(
+                file.contains(&format!(
+                    "CREATE INDEX exported_docs_fts ON public.exported_docs USING {method}"
+                )),
+                "{file}"
+            )
+        }
+        DatabaseType::SQLite => {
+            assert!(
+                file.contains("CREATE VIRTUAL TABLE exported_docs_fts USING fts5"),
+                "{file}"
+            );
+            assert!(!file.contains("exported_docs_fts_data"), "{file}");
+        }
+        _ => {
+            // CockroachDB and MySQL place the full-text index inside CREATE
+            // TABLE. Verify the restored index and defaults by using them.
+            let restore = if cockroach {
+                assert!(
+                    create.contains("INVERTED INDEX exported_docs_fts"),
+                    "{create}"
+                );
+                // The table's sequence comes first.
+                export_statements(&file)
+                    .into_iter()
+                    .filter(|statement| statement.contains("public.exported_docs"))
+                    .collect()
+            } else {
+                vec![create]
+            };
             Database::execute("DROP TABLE exported_docs").await.unwrap();
-            Database::execute(create).await.unwrap();
+            for statement in restore {
+                Database::execute(statement).await.unwrap();
+            }
             Database::execute("INSERT INTO exported_docs(body) VALUES('restoredsearchtoken')")
                 .await
                 .unwrap();
-            let rows = Database::raw_json(
-                "SELECT status,note FROM exported_docs WHERE MATCH(body) AGAINST('restoredsearchtoken')"
-            ).await.unwrap();
+            let search = if cockroach {
+                "to_tsvector('english', body) @@ to_tsquery('english', 'restoredsearchtoken')"
+            } else if full_text {
+                "MATCH(body) AGAINST('restoredsearchtoken')"
+            } else {
+                "body = 'restoredsearchtoken'"
+            };
+            let rows = Database::raw_json(&format!(
+                "SELECT status,note FROM exported_docs WHERE {search}"
+            ))
+            .await
+            .unwrap();
             assert_eq!(
                 rows.len(),
                 1,
@@ -5719,13 +5896,119 @@ async fn write_schema_keeps_string_defaults_and_full_text_indexes() {
             assert_eq!(rows[0]["status"], "draft");
             assert_eq!(rows[0]["note"], "");
         }
-        _ => {
-            assert!(
-                file.contains("CREATE VIRTUAL TABLE exported_docs_fts USING fts5"),
-                "{file}"
-            );
-            assert!(!file.contains("exported_docs_fts_data"), "{file}");
-        }
+    }
+}
+
+/// CockroachDB's export restores into a database of another name: its
+/// `SHOW CREATE` names a view's tables `database.schema.table`, and writes a
+/// comment on `public` beside a `CREATE SCHEMA public` that every database
+/// already has; the file keeps neither. A schema of its own, an enum, a
+/// routine and a trigger come back too, each before what uses it.
+#[tokio::test]
+async fn write_schema_of_cockroachdb_restores_into_another_database() {
+    if !backend::connect().await || !on(DatabaseServer::CockroachDb) {
+        return;
+    }
+    // Dependents first: the routine reads the table, which owns the trigger.
+    // The schema goes whole: CockroachDB refuses even `DROP .. IF EXISTS` of
+    // a name in a schema that does not exist.
+    let cleanup = [
+        "DROP SCHEMA IF EXISTS crdb_export_extra CASCADE",
+        "DROP VIEW IF EXISTS crdb_export_visible",
+        "DROP TABLE IF EXISTS crdb_export_items",
+        "DROP FUNCTION IF EXISTS crdb_export_stamp",
+    ];
+    for statement in cleanup.into_iter().chain([
+        "CREATE TABLE crdb_export_items (id INT8 PRIMARY KEY, name STRING NOT NULL)",
+        "CREATE VIEW crdb_export_visible AS SELECT id, name FROM crdb_export_items",
+        "COMMENT ON SCHEMA public IS 'exported schema'",
+        "CREATE SCHEMA crdb_export_extra",
+        "CREATE TYPE crdb_export_extra.crdb_export_mood AS ENUM ('calm', 'busy')",
+        "CREATE TABLE crdb_export_extra.crdb_export_moods (id INT8 PRIMARY KEY, mood crdb_export_extra.crdb_export_mood NOT NULL)",
+        "CREATE FUNCTION crdb_export_extra.crdb_export_count() RETURNS INT8 LANGUAGE SQL AS $$ SELECT count(*) FROM crdb_export_items $$",
+        "CREATE FUNCTION crdb_export_stamp() RETURNS TRIGGER LANGUAGE PLpgSQL AS $$ BEGIN NEW.name := upper(NEW.name); RETURN NEW; END $$",
+        "CREATE TRIGGER crdb_export_upper BEFORE INSERT ON crdb_export_items FOR EACH ROW EXECUTE FUNCTION crdb_export_stamp()",
+    ]) {
+        Database::execute(statement).await.expect(statement);
+    }
+    let file = exported_schema("cockroach_rename").await;
+    Database::execute("COMMENT ON SCHEMA public IS NULL")
+        .await
+        .expect("comment cleared");
+    let database = Database::raw_json("SELECT current_database() AS name")
+        .await
+        .expect("database name read");
+    let database = database[0]["name"].as_str().expect("a database name");
+
+    let statements: Vec<&str> = export_statements(&file)
+        .into_iter()
+        .filter(|statement| {
+            statement.contains("crdb_export_") || statement.starts_with("COMMENT ON SCHEMA public")
+        })
+        .collect();
+    let view = statements
+        .iter()
+        .find(|statement| statement.starts_with("CREATE VIEW"))
+        .unwrap_or_else(|| panic!("no view in:\n{file}"));
+    assert!(view.contains("crdb_export_items"), "{view}");
+    assert!(!view.contains(&format!("{database}.")), "{view}");
+    assert!(
+        statements.contains(&"COMMENT ON SCHEMA public IS 'exported schema'"),
+        "{file}"
+    );
+    assert!(!file.contains("CREATE SCHEMA public"), "{file}");
+
+    let restored = format!("tideorm_restored_{}", uuid::Uuid::new_v4().simple());
+    Database::execute(&format!("CREATE DATABASE {restored}"))
+        .await
+        .expect("create database failed");
+    let mut url = url::Url::parse(backend::database_url()).expect("database URL");
+    url.set_path(&restored);
+    let target = Database::builder()
+        .url(url.as_str())
+        .max_connections(1)
+        .build()
+        .await
+        .expect("connect to the restored database");
+    for statement in &statements {
+        target
+            .exec_raw(statement)
+            .await
+            .unwrap_or_else(|error| panic!("{error}\n{statement}"));
+    }
+    let checks = async {
+        // The trigger upper-cases the name, the routine counts the row, and
+        // the enum takes only its own labels.
+        target
+            .exec_raw("INSERT INTO crdb_export_items VALUES (1, 'restored')")
+            .await?;
+        target
+            .exec_raw("INSERT INTO crdb_export_extra.crdb_export_moods VALUES (1, 'busy')")
+            .await?;
+        let refused = target
+            .exec_raw("INSERT INTO crdb_export_extra.crdb_export_moods VALUES (2, 'angry')")
+            .await
+            .is_err();
+        let rows = target
+            .query_raw_json(
+                "SELECT name, crdb_export_extra.crdb_export_count() AS counted FROM crdb_export_visible",
+            )
+            .await?;
+        Ok::<_, tideorm::Error>((rows, refused))
+    }
+    .await;
+    target.close().await.expect("close failed");
+    Database::execute(&format!("DROP DATABASE {restored} CASCADE"))
+        .await
+        .expect("drop database failed");
+    let (rows, refused) = checks.expect("the restored objects work");
+    assert_eq!(
+        rows,
+        [serde_json::json!({"name": "RESTORED", "counted": 1})]
+    );
+    assert!(refused, "the restored enum took a label it does not have");
+    for statement in cleanup {
+        Database::execute(statement).await.expect(statement);
     }
 }
 
@@ -6655,15 +6938,19 @@ async fn write_schema_keeps_constraints_and_generated_columns() {
         "INSERT INTO exported_children (parent_id, price, quantity) VALUES (999999, 1, 1)".into(),
     )
     .await;
-    refuses(format!(
-        "INSERT INTO exported_children (parent_id, price, quantity) VALUES ({parent}, 1, -1)"
-    ))
-    .await;
-    refuses(format!(
-        "INSERT INTO exported_children (parent_id, price, quantity, status) \
-         VALUES ({parent}, 1, 1, 'bogus')"
-    ))
-    .await;
+    // TiDB drops a CHECK as it creates the table unless
+    // `tidb_enable_check_constraint` is set globally (off by default)
+    if !skip_on(&[DatabaseServer::TiDb], "CHECK constraint by default") {
+        refuses(format!(
+            "INSERT INTO exported_children (parent_id, price, quantity) VALUES ({parent}, 1, -1)"
+        ))
+        .await;
+        refuses(format!(
+            "INSERT INTO exported_children (parent_id, price, quantity, status) \
+             VALUES ({parent}, 1, 1, 'bogus')"
+        ))
+        .await;
+    }
 
     Database::execute(&format!(
         "INSERT INTO exported_children (parent_id, price, quantity) VALUES ({parent}, 2.50, 4)"
@@ -6930,14 +7217,16 @@ async fn json_existence_agrees_across_backends() {
         ["array"]
     );
 
-    // Steps no other backend can express: an error rather than no rows.
+    // Steps no other backend can express: an error rather than no rows. Such a
+    // path is PostgreSQL's `@?`, which CockroachDB lacks.
     let wildcard = query()
         .where_json_path_exists("metadata", "$.a[*]")
         .get()
         .await;
+    let cockroach = on(DatabaseServer::CockroachDb);
     assert_eq!(
         wildcard.is_err(),
-        backend::DATABASE_TYPE != DatabaseType::Postgres,
+        backend::DATABASE_TYPE != DatabaseType::Postgres || cockroach,
         "{wildcard:?}"
     );
 }
@@ -7155,4 +7444,69 @@ async fn names_with_a_space_or_a_dot_are_written_whole() {
         .await
         .expect("the pluck failed");
     assert_eq!(plucked, [30, 20]);
+}
+
+/// A failed migration takes back the DDL it ran where DDL is transactional:
+/// PostgreSQL, SQLite and CockroachDB, whose connections keep DDL inside the
+/// transaction and let it alter a table it created there. The MySQL family
+/// and YugabyteDB commit each DDL statement as it runs.
+#[tokio::test]
+async fn a_failed_migration_takes_its_ddl_back() {
+    use tideorm::migration::{ColumnType, Migrator};
+
+    struct Fails;
+
+    #[async_trait]
+    impl Migration for Fails {
+        fn version(&self) -> &str {
+            "20261115_002"
+        }
+
+        fn name(&self) -> &str {
+            "fails_after_its_ddl"
+        }
+
+        async fn up(&self, schema: &mut Schema) -> tideorm::Result<()> {
+            schema
+                .create_table("ddl_taken_back", |t| {
+                    t.id();
+                })
+                .await?;
+            schema
+                .alter_table("ddl_taken_back", |t| {
+                    t.add_column("extra", ColumnType::Integer);
+                })
+                .await?;
+            Err(Error::query("the migration fails after its DDL"))
+        }
+
+        async fn down(&self, _schema: &mut Schema) -> tideorm::Result<()> {
+            Ok(())
+        }
+    }
+
+    if !setup().await
+        || matches!(
+            backend::DATABASE_TYPE,
+            DatabaseType::MySQL | DatabaseType::MariaDB
+        )
+        || skip_on(&[DatabaseServer::YugabyteDb], "transactional DDL")
+    {
+        return;
+    }
+    let ledger = "ddl_taken_back_migrations";
+    fresh_tables(&["ddl_taken_back", ledger], &[]).await;
+    let failure = Migrator::new()
+        .migrations_table(ledger)
+        .add(Fails)
+        .run()
+        .await
+        .expect_err("the migration fails");
+    assert!(failure.result.applied.is_empty(), "{failure:?}");
+    let schema = Schema::new(backend::DATABASE_TYPE);
+    assert!(
+        !schema.has_table("ddl_taken_back").await.unwrap(),
+        "the failed migration's table survived it"
+    );
+    fresh_tables(&[ledger], &[]).await;
 }

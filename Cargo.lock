@@ -1877,7 +1877,7 @@ dependencies = [
 
 [[package]]
 name = "tideorm"
-version = "0.17.7"
+version = "0.17.8"
 dependencies = [
  "argon2",
  "async-io",
@@ -1906,9 +1906,9 @@ dependencies = [
 
 [[package]]
 name = "tideorm-driver"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f13312b91f20c5667fa0e531ccb0d282ce62c578331841cf7e0ff31855be6b8"
+checksum = "9cd9d3a6e34a4215e7c5471ef30000b9c6415d21d5a0e67f03ebb556e0d44660"
 dependencies = [
  "tideorm-driver-core",
  "tideorm-driver-mysql",
@@ -1953,9 +1953,9 @@ dependencies = [
 
 [[package]]
 name = "tideorm-driver-mysql"
-version = "0.1.5"
+version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2caed1c43c0bcf89d449c3f2f9a8cef37187c094bc0019b8545b6447701dcc4"
+checksum = "c4e74a4029da4716c1706cd0155f945c5d52624e0d9c96cb4631ce76cd80cf20"
 dependencies = [
  "bitflags",
  "byteorder",
@@ -1976,9 +1976,9 @@ dependencies = [
 
 [[package]]
 name = "tideorm-driver-postgres"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1310286c264144f885fd583cb4936833c166e462a33ff3d62483e64a52cd9df7"
+checksum = "51dd3d354062b510d66dd5d4ad49cf893589c576d0efc92cf89ed3f87a055084"
 dependencies = [
  "atoi",
  "base64",
@@ -2035,9 +2035,9 @@ dependencies = [
 
 [[package]]
 name = "tideorm-engine"
-version = "0.1.5"
+version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9dd5f819b4bbafbf339a3acf0817bb1c0e1c95032de8983c78a07d2543be9e7"
+checksum = "5b7818a97eecb23fef50ce488287558fac65adf0bf5a5eda6221ea63c88443b5"
 dependencies = [
  "chrono",
  "futures-util",
@@ -2054,7 +2054,7 @@ dependencies = [
 
 [[package]]
 name = "tideorm-macros"
-version = "0.17.7"
+version = "0.17.8"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -2066,9 +2066,9 @@ dependencies = [
 
 [[package]]
 name = "tideorm-sql-builder"
-version = "0.1.2"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b199c66a78aad96cb6053b8116f01401493cd900eabc1aaecd2c5051dd761a76"
+checksum = "303d531a54d9f38dcd6f229b8e01200486796ec2163976d1b9ff19ea2fe69fae"
 dependencies = [
  "chrono",
  "rust_decimal",

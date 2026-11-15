@@ -14,6 +14,10 @@ use std::time::Duration;
 use tideorm::prelude::*;
 use tideorm::schema::SchemaWriter;
 
+/// A probe that takes the PostgreSQL migration lock (`MIGRATION_LOCK_KEY` in
+/// `ledger_lock.rs`) if it is free, and gives it back with its transaction.
+const TRY_MIGRATION_LOCK: &str = "SELECT pg_try_advisory_xact_lock(23724455613125197) AS free";
+
 /// Requires CREATE DATABASE, as does the MySQL complete-export regression.
 /// Restore every statement on one connection so session setup and cross-schema
 /// dependencies are tested together, without other fixtures in either database.
@@ -21,9 +25,13 @@ use tideorm::schema::SchemaWriter;
 async fn review_postgres_complete_export_restores_cross_schema_dependencies() {
     use futures_util::FutureExt;
 
-    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+    if !postgres_export_review().await {
         return;
     }
+    let collation_and_cluster = !super::parity::skip_on(
+        &[DatabaseServer::YugabyteDb],
+        "nondeterministic collation or CLUSTER",
+    );
     let admin = tideorm::require_db().unwrap();
     let source_name = format!("review_source_{}", uuid::Uuid::new_v4().simple());
     let destination_name = format!("review_destination_{}", uuid::Uuid::new_v4().simple());
@@ -75,7 +83,10 @@ async fn review_postgres_complete_export_restores_cross_schema_dependencies() {
             "CREATE INDEX part_id ON app.part_children(id)",
             "ALTER INDEX app.child_leaf_id_idx RENAME TO special_cluster",
             "ALTER TABLE app.child_leaf CLUSTER ON special_cluster",
-        ] {
+        ]
+        .into_iter()
+        .filter(|sql| collation_and_cluster || !(sql.contains("eq_ab") || sql.contains("CLUSTER")))
+        {
             source.exec_raw(sql).await.unwrap();
         }
         Database::set_global(source.clone()).unwrap();
@@ -92,16 +103,18 @@ async fn review_postgres_complete_export_restores_cross_schema_dependencies() {
         }
         // Unique equality, disabled internal triggers and clustering metadata
         // must survive replay, including self references and partition clones.
-        destination
-            .exec_raw("INSERT INTO app.names VALUES ('a')")
-            .await
-            .unwrap();
-        assert!(
+        if collation_and_cluster {
             destination
-                .exec_raw("INSERT INTO app.names VALUES ('b')")
+                .exec_raw("INSERT INTO app.names VALUES ('a')")
                 .await
-                .is_err()
-        );
+                .unwrap();
+            assert!(
+                destination
+                    .exec_raw("INSERT INTO app.names VALUES ('b')")
+                    .await
+                    .is_err()
+            );
+        }
         destination
             .exec_raw("INSERT INTO app.child VALUES (1,999)")
             .await
@@ -114,11 +127,13 @@ async fn review_postgres_complete_export_restores_cross_schema_dependencies() {
             .exec_raw("INSERT INTO app.child_leaf VALUES (1,999)")
             .await
             .unwrap();
-        destination.exec_raw("CLUSTER app.items").await.unwrap();
-        destination
-            .exec_raw("CLUSTER app.child_leaf")
-            .await
-            .unwrap();
+        if collation_and_cluster {
+            destination.exec_raw("CLUSTER app.items").await.unwrap();
+            destination
+                .exec_raw("CLUSTER app.child_leaf")
+                .await
+                .unwrap();
+        }
         destination
             .exec_raw("INSERT INTO app.items(name) VALUES ('Alice')")
             .await
@@ -266,8 +281,39 @@ async fn review_a_failure_on_the_raw_handle_is_seen_at_commit() {
     }
 }
 
+/// Two migrators on one ledger take turns on the migration lock: one applies
+/// the migration and the other finds it applied, and waiting for the lock
+/// takes no connection from a one-connection pool.
 #[tokio::test]
 async fn review_concurrent_migrators_leave_a_single_connection_pool_available() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tideorm::migration::Migrator;
+
+    static RUNS: AtomicUsize = AtomicUsize::new(0);
+
+    struct Counted;
+
+    #[async_trait]
+    impl Migration for Counted {
+        fn version(&self) -> &str {
+            "20261115_001"
+        }
+
+        fn name(&self) -> &str {
+            "counted"
+        }
+
+        async fn up(&self, _schema: &mut Schema) -> tideorm::Result<()> {
+            RUNS.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            Ok(())
+        }
+
+        async fn down(&self, _schema: &mut Schema) -> tideorm::Result<()> {
+            Ok(())
+        }
+    }
+
     if !backend::connect().await {
         return;
     }
@@ -280,8 +326,16 @@ async fn review_concurrent_migrators_leave_a_single_connection_pool_available() 
         .await
         .unwrap();
     Database::set_global(db.clone()).unwrap();
-    let first = tideorm::migration::Migrator::new().migrations_table("review_lock_ledger");
-    let second = tideorm::migration::Migrator::new().migrations_table("review_lock_ledger");
+    db.exec_raw("DROP TABLE IF EXISTS review_lock_ledger")
+        .await
+        .unwrap();
+    RUNS.store(0, Ordering::SeqCst);
+    let first = Migrator::new()
+        .migrations_table("review_lock_ledger")
+        .add(Counted);
+    let second = Migrator::new()
+        .migrations_table("review_lock_ledger")
+        .add(Counted);
     let (a, b) = tokio::time::timeout(Duration::from_secs(10), async {
         tokio::join!(first.run(), second.run())
     })
@@ -289,15 +343,209 @@ async fn review_concurrent_migrators_leave_a_single_connection_pool_available() 
     .expect("migrators starved their query pool");
     a.unwrap();
     b.unwrap();
+    assert_eq!(RUNS.load(Ordering::SeqCst), 1, "the migration ran twice");
     db.exec_raw("DROP TABLE review_lock_ledger").await.unwrap();
+}
+
+/// A migration that changes nothing.
+pub struct Quick;
+
+#[async_trait]
+impl Migration for Quick {
+    fn version(&self) -> &str {
+        "20260926_002"
+    }
+
+    fn name(&self) -> &str {
+        "quick"
+    }
+
+    async fn up(&self, _schema: &mut Schema) -> tideorm::Result<()> {
+        Ok(())
+    }
+
+    async fn down(&self, _schema: &mut Schema) -> tideorm::Result<()> {
+        Ok(())
+    }
+}
+
+/// The PostgreSQL migration lock lives on an idle session of its own, so a
+/// server idle timeout must not end it while a migration runs: the lock
+/// would be freed under the running migration.
+#[tokio::test]
+async fn the_migration_lock_outlives_a_server_idle_timeout() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tideorm::migration::Migrator;
+
+    static FREE: AtomicBool = AtomicBool::new(true);
+
+    struct Slow;
+
+    #[async_trait]
+    impl Migration for Slow {
+        fn version(&self) -> &str {
+            "20261115_001"
+        }
+
+        fn name(&self) -> &str {
+            "slow"
+        }
+
+        async fn up(&self, _schema: &mut Schema) -> tideorm::Result<()> {
+            // Busy past the timeout, while the lock's session idles.
+            Database::raw_json("SELECT pg_sleep(1.5)").await?;
+            let rows = Database::raw_json(TRY_MIGRATION_LOCK).await?;
+            FREE.store(rows[0]["free"] == true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn down(&self, _schema: &mut Schema) -> tideorm::Result<()> {
+            Ok(())
+        }
+    }
+
+    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+        return;
+    }
+    // CockroachDB holds the lock in a transaction, the others on an idle session.
+    let timeout = if super::parity::on(DatabaseServer::CockroachDb) {
+        "idle_in_transaction_session_timeout"
+    } else {
+        "idle_session_timeout"
+    };
+    let url = backend::database_url();
+    let separator = if url.contains('?') { '&' } else { '?' };
+    let db = Database::connect(&format!("{url}{separator}options=-c%20{timeout}%3D500"))
+        .await
+        .expect("connect with an idle timeout");
+    let ledger = "idle_lock_migrations";
+    db.exec_raw(&format!("DROP TABLE IF EXISTS {ledger}"))
+        .await
+        .unwrap();
+    FREE.store(true, Ordering::SeqCst);
+    let result = Migrator::new()
+        .database(&db)
+        .migrations_table(ledger)
+        .add(Slow)
+        .run()
+        .await
+        .expect("the migration should outlast the timeout");
+    assert_eq!(result.applied.len(), 1);
+    assert!(
+        !FREE.load(Ordering::SeqCst),
+        "the migration lock was freed while the migration ran"
+    );
+    db.exec_raw(&format!("DROP TABLE IF EXISTS {ledger}"))
+        .await
+        .unwrap();
+}
+
+/// A migrator cancelled while it holds the migration lock frees the lock. The
+/// lock belongs to a session, whose pooled connection used to go back to the
+/// pool still holding it, so every later migrator waited out its timeout.
+#[tokio::test]
+async fn a_cancelled_migration_run_frees_the_migration_lock() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Instant;
+    use tideorm::migration::Migrator;
+
+    static STALLED: AtomicBool = AtomicBool::new(false);
+
+    struct Stalls;
+
+    #[async_trait]
+    impl Migration for Stalls {
+        fn version(&self) -> &str {
+            "20260926_001"
+        }
+
+        fn name(&self) -> &str {
+            "stalls"
+        }
+
+        async fn up(&self, _schema: &mut Schema) -> tideorm::Result<()> {
+            STALLED.store(true, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok(())
+        }
+
+        async fn down(&self, _schema: &mut Schema) -> tideorm::Result<()> {
+            Ok(())
+        }
+    }
+
+    if !backend::connect().await {
+        return;
+    }
+    let ledger = "cancelled_lock_migrations";
+    Database::execute(&format!("DROP TABLE IF EXISTS {ledger}"))
+        .await
+        .expect("failed to drop the ledger");
+    let migrator = Migrator::new().migrations_table(ledger).add(Stalls);
+    STALLED.store(false, Ordering::SeqCst);
+    let stalled = async {
+        while !STALLED.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    // Cancelled only once it runs the migration, not part-way through its setup.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::select! {
+            result = migrator.run() => panic!("the stalled migration finished: {result:?}"),
+            () = stalled => {}
+        }
+    })
+    .await
+    .expect("the stalled migration never started");
+
+    let lock_is_free = || async {
+        let sql = if backend::DATABASE_TYPE == DatabaseType::Postgres {
+            TRY_MIGRATION_LOCK
+        } else {
+            "SELECT IS_FREE_LOCK(CONCAT('tideorm_migrations:', DATABASE())) AS free"
+        };
+        let rows = Database::raw_json(sql).await.expect("lock probe failed");
+        // the first column: Vitess drops a lock function's alias
+        rows[0]
+            .as_object()
+            .and_then(|row| row.values().next())
+            .is_some_and(|free| *free == 1 || *free == true)
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !lock_is_free().await {
+        assert!(
+            Instant::now() < deadline,
+            "the cancelled migrator still holds the migration lock"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // A run that completes takes the lock and gives it back.
+    let result = Migrator::new()
+        .migrations_table(ledger)
+        .add(Quick)
+        .run()
+        .await
+        .expect("a migrator after the cancelled one should run");
+    assert_eq!(result.applied.len(), 1);
+    assert!(lock_is_free().await, "a finished run releases the lock");
+
+    Database::execute(&format!("DROP TABLE IF EXISTS {ledger}"))
+        .await
+        .expect("failed to drop the ledger");
 }
 
 #[tokio::test]
 async fn review_postgres_export_restores_types_identity_and_index_semantics() {
-    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+    if !postgres_export_review().await {
         return;
     }
     let db = tideorm::require_db().unwrap();
+    // The case-insensitive unique index alone needs a nondeterministic collation.
+    let casefold = !super::parity::skip_on(
+        &[DatabaseServer::YugabyteDb],
+        "nondeterministic collation for the case-insensitive index",
+    );
     for sql in [
         "DROP SCHEMA IF EXISTS review_export CASCADE",
         "CREATE SCHEMA review_export",
@@ -308,7 +556,10 @@ async fn review_postgres_export_restores_types_identity_and_index_semantics() {
         "CREATE TABLE review_export.items (id bigint GENERATED ALWAYS AS IDENTITY (START WITH 100 INCREMENT BY 7 CACHE 3) PRIMARY KEY, state review_export.status, detail review_export.detail, states review_export.state[], name text NOT NULL)",
         "CREATE UNIQUE INDEX review_casefold ON review_export.items (name COLLATE review_export.casefold)",
         "CREATE INDEX review_pattern ON review_export.items (name text_pattern_ops DESC NULLS FIRST)",
-    ] {
+    ]
+    .into_iter()
+    .filter(|sql| casefold || !sql.contains("casefold"))
+    {
         db.exec_raw(sql).await.unwrap();
     }
     let sql = exported_schema("review_pg_export").await;
@@ -343,9 +594,11 @@ async fn review_postgres_export_restores_types_identity_and_index_semantics() {
     assert_eq!(rows[0]["id"], 100);
     assert_eq!(rows[1]["id"], 107);
     assert!(
-        db.exec_raw("INSERT INTO review_export.items(state, name) VALUES('new', 'alice')")
-            .await
-            .is_err()
+        !casefold
+            || db
+                .exec_raw("INSERT INTO review_export.items(state, name) VALUES('new', 'alice')")
+                .await
+                .is_err()
     );
     let indexes = db.query_raw_json("SELECT indexdef FROM pg_indexes WHERE schemaname = 'review_export' AND indexname = 'review_pattern'").await.unwrap();
     assert!(
@@ -400,6 +653,17 @@ async fn review_mysql_export_keeps_on_update_timestamp() {
     db.exec_raw("DROP TABLE review_timestamp").await.unwrap();
 }
 
+/// Whether to run a scenario of the PostgreSQL catalog export: CockroachDB
+/// exports through its own `SHOW CREATE` statements instead.
+async fn postgres_export_review() -> bool {
+    backend::DATABASE_TYPE == DatabaseType::Postgres
+        && backend::connect().await
+        && !super::parity::skip_on(
+            &[DatabaseServer::CockroachDb],
+            "PostgreSQL catalog for the schema export to read",
+        )
+}
+
 /// Export the database, drop `schema`, and recreate it from the exported
 /// statements that name it, in one transaction, so the export's session
 /// settings (`check_function_bodies`) apply to every object.
@@ -429,7 +693,9 @@ async fn replay_review_schema(db: &Database, schema: &str) {
 
 #[tokio::test]
 async fn review_postgres_column_collation_survives_export() {
-    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+    if !postgres_export_review().await
+        || super::parity::skip_on(&[DatabaseServer::YugabyteDb], "nondeterministic collation")
+    {
         return;
     }
     let db = tideorm::require_db().unwrap();
@@ -462,7 +728,7 @@ async fn review_postgres_column_collation_survives_export() {
 
 #[tokio::test]
 async fn review_postgres_partitions_survive_export_in_parent_order() {
-    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+    if !postgres_export_review().await {
         return;
     }
     let db = tideorm::require_db().unwrap();
@@ -510,9 +776,13 @@ async fn review_postgres_partitions_survive_export_in_parent_order() {
 
 #[tokio::test]
 async fn review_postgres_deferred_unique_and_referenced_constraints_survive_export() {
-    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+    if !postgres_export_review().await {
         return;
     }
+    let deferrable = !super::parity::skip_on(
+        &[DatabaseServer::YugabyteDb],
+        "deferrable unique constraint",
+    );
     let db = tideorm::require_db().unwrap();
     for sql in [
         "DROP SCHEMA IF EXISTS review_deferred CASCADE",
@@ -520,27 +790,32 @@ async fn review_postgres_deferred_unique_and_referenced_constraints_survive_expo
         "CREATE TABLE review_deferred.z_target(id INTEGER UNIQUE)",
         "CREATE TABLE review_deferred.a_reference(id INTEGER REFERENCES review_deferred.z_target(id))",
         "CREATE TABLE review_deferred.deferred(id INTEGER, CONSTRAINT deferred_unique UNIQUE(id) DEFERRABLE INITIALLY DEFERRED)",
-    ] {
+    ]
+    .into_iter()
+    .filter(|sql| deferrable || !sql.contains("DEFERRABLE"))
+    {
         db.exec_raw(sql).await.unwrap();
     }
     replay_review_schema(&db, "review_deferred").await;
-    db.transaction(async |_| {
-        Database::execute("INSERT INTO review_deferred.deferred VALUES(1), (1)").await?;
-        Database::execute("DELETE FROM review_deferred.deferred").await?;
-        Ok(())
-    })
-    .await
-    .unwrap();
     assert!(
         db.exec_raw("INSERT INTO review_deferred.a_reference VALUES(5)")
             .await
             .is_err()
     );
-    assert!(
-        db.exec_raw("INSERT INTO review_deferred.deferred VALUES(1), (1)")
-            .await
-            .is_err()
-    );
+    if deferrable {
+        db.transaction(async |_| {
+            Database::execute("INSERT INTO review_deferred.deferred VALUES(1), (1)").await?;
+            Database::execute("DELETE FROM review_deferred.deferred").await?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(
+            db.exec_raw("INSERT INTO review_deferred.deferred VALUES(1), (1)")
+                .await
+                .is_err()
+        );
+    }
     db.exec_raw("DROP SCHEMA review_deferred CASCADE")
         .await
         .unwrap();
@@ -555,17 +830,24 @@ async fn review_mysql_export_preserves_quotes_and_backslashes_in_expressions() {
     {
         return;
     }
+    let default_text =
+        !super::parity::skip_on(&[DatabaseServer::TiDb], "expression default calling CONCAT");
+    let default_column = if default_text {
+        r"default_text VARCHAR(100) DEFAULT (concat('it\'s', '\\end')),"
+    } else {
+        ""
+    };
     let db = tideorm::require_db().unwrap();
     db.exec_raw("DROP TABLE IF EXISTS review_expression_escaping")
         .await
         .unwrap();
-    db.exec_raw(
+    db.exec_raw(&format!(
         r"CREATE TABLE review_expression_escaping(
         id INTEGER PRIMARY KEY, txt VARCHAR(100),
         generated_text VARCHAR(100) GENERATED ALWAYS AS (concat(txt, 'it\'s', '\\end')) STORED,
-        default_text VARCHAR(100) DEFAULT (concat('it\'s', '\\end')),
-        CONSTRAINT review_no_cant CHECK(txt <> 'can\'t'))",
-    )
+        {default_column}
+        CONSTRAINT review_no_cant CHECK(txt <> 'can\'t'))"
+    ))
     .await
     .unwrap();
     db.exec_raw("INSERT INTO review_expression_escaping(id,txt) VALUES(1,'x')")
@@ -596,12 +878,17 @@ async fn review_mysql_export_preserves_quotes_and_backslashes_in_expressions() {
         .unwrap();
     assert_eq!(after, before);
     assert_eq!(after[0]["generated_text"], "xit's\\end");
-    assert_eq!(after[0]["default_text"], "it's\\end");
-    assert!(
-        db.exec_raw(r"INSERT INTO review_expression_escaping(id,txt) VALUES(2,'can\'t')")
-            .await
-            .is_err()
-    );
+    if default_text {
+        assert_eq!(after[0]["default_text"], "it's\\end");
+    }
+    // TiDB drops a CHECK unless `tidb_enable_check_constraint` is set globally.
+    if !super::parity::skip_on(&[DatabaseServer::TiDb], "CHECK constraint by default") {
+        assert!(
+            db.exec_raw(r"INSERT INTO review_expression_escaping(id,txt) VALUES(2,'can\'t')")
+                .await
+                .is_err()
+        );
+    }
     db.exec_raw("DROP TABLE review_expression_escaping")
         .await
         .unwrap();
@@ -627,9 +914,16 @@ async fn review_postgres_bulk_null_assignments_keep_parameter_types() {
         names: Option<Vec<String>>,
         documents: Option<Vec<serde_json::Value>>,
     }
+    // CockroachDB has no array of JSON: its `documents` is a JSONB left NULL.
+    let documents = !super::parity::skip_on(&[DatabaseServer::CockroachDb], "array of JSON");
+    let (documents_type, document) = if documents {
+        ("JSONB[]", "ARRAY['{}'::jsonb]")
+    } else {
+        ("JSONB", "NULL")
+    };
     let db = tideorm::require_db().unwrap();
-    db.exec_raw("CREATE TABLE review_typed_nulls(id BIGINT PRIMARY KEY,payload JSONB,bytes BYTEA,ints INTEGER[],longs BIGINT[],flags BOOLEAN[],doubles DOUBLE PRECISION[],names TEXT[],documents JSONB[])").await.unwrap();
-    db.exec_raw("INSERT INTO review_typed_nulls VALUES(1,'{}','abc',ARRAY[1],ARRAY[2::bigint],ARRAY[true],ARRAY[1.5::float8],ARRAY['x'],ARRAY['{}'::jsonb])").await.unwrap();
+    db.exec_raw(&format!("CREATE TABLE review_typed_nulls(id BIGINT PRIMARY KEY,payload JSONB,bytes BYTEA,ints INTEGER[],longs BIGINT[],flags BOOLEAN[],doubles DOUBLE PRECISION[],names TEXT[],documents {documents_type})")).await.unwrap();
+    db.exec_raw(&format!("INSERT INTO review_typed_nulls VALUES(1,'{{}}','abc',ARRAY[1],ARRAY[2::bigint],ARRAY[true],ARRAY[1.5::float8],ARRAY['x'],{document})")).await.unwrap();
     for field in [
         "payload",
         "bytes",
@@ -639,7 +933,10 @@ async fn review_postgres_bulk_null_assignments_keep_parameter_types() {
         "doubles",
         "names",
         "documents",
-    ] {
+    ]
+    .into_iter()
+    .filter(|field| documents || *field != "documents")
+    {
         assert_eq!(
             Nullable::query()
                 .where_eq("id", 1)
@@ -703,7 +1000,10 @@ async fn review_postgres_empty_array_contains_excludes_sql_null() {
 #[cfg(feature = "dirty-tracking")]
 #[tokio::test]
 async fn review_postgres_failed_batch_commit_restores_snapshots() {
-    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+    if backend::DATABASE_TYPE != DatabaseType::Postgres
+        || !backend::connect().await
+        || super::parity::skip_on(&[DatabaseServer::CockroachDb], "deferrable constraint")
+    {
         return;
     }
     #[tideorm::model(table = "review_batch_commit")]
@@ -782,7 +1082,7 @@ async fn review_postgres_failed_batch_commit_restores_snapshots() {
 
 #[tokio::test]
 async fn review_postgres_export_preserves_shared_sequences_and_ownership() {
-    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+    if !postgres_export_review().await {
         return;
     }
     let db = tideorm::require_db().unwrap();
@@ -837,11 +1137,12 @@ async fn review_postgres_export_preserves_shared_sequences_and_ownership() {
 
 #[tokio::test]
 async fn review_postgres_export_preserves_partition_default_overrides() {
-    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+    if !postgres_export_review().await {
         return;
     }
     let db = tideorm::require_db().unwrap();
     for sql in [
+        "DROP SCHEMA IF EXISTS review_partition_defaults CASCADE",
         "CREATE SCHEMA review_partition_defaults",
         "CREATE TABLE review_partition_defaults.events(id INTEGER,val INTEGER DEFAULT 1,removed INTEGER DEFAULT 5) PARTITION BY RANGE(id)",
         "CREATE TABLE review_partition_defaults.leaf PARTITION OF review_partition_defaults.events FOR VALUES FROM(0) TO(10)",
@@ -1005,7 +1306,7 @@ async fn review_mysql_export_preserves_mixed_index_directions() {
 
 #[tokio::test]
 async fn review_postgres_export_preserves_rls_and_inheritance() {
-    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+    if !postgres_export_review().await {
         return;
     }
     let db = tideorm::require_db().unwrap();
@@ -1058,14 +1359,21 @@ async fn review_mysql_native_table_definitions_round_trip() {
     if backend::DATABASE_TYPE != DatabaseType::MySQL || !backend::connect().await {
         return;
     }
+    // TiDB has no invisible columns.
+    let tidb = super::parity::on(DatabaseServer::TiDb);
+    let secret = if tidb {
+        "secret INT"
+    } else {
+        "secret INT INVISIBLE"
+    };
     let db = tideorm::require_db().unwrap();
     for sql in [
-        "DROP TABLE IF EXISTS review_native_columns",
-        "DROP TABLE IF EXISTS review_native_partition",
-        "CREATE TABLE review_native_columns(id INT PRIMARY KEY, counter INT AUTO_INCREMENT UNIQUE, email VARCHAR(100) COLLATE utf8mb4_bin UNIQUE, secret INT INVISIBLE, UNIQUE KEY lower_email ((LOWER(email)))) DEFAULT CHARSET=utf8mb4",
-        "CREATE TABLE review_native_partition(id INT PRIMARY KEY) PARTITION BY RANGE(id) (PARTITION p0 VALUES LESS THAN(10), PARTITION p1 VALUES LESS THAN MAXVALUE)",
+        "DROP TABLE IF EXISTS review_native_columns".to_owned(),
+        "DROP TABLE IF EXISTS review_native_partition".to_owned(),
+        format!("CREATE TABLE review_native_columns(id INT PRIMARY KEY, counter INT AUTO_INCREMENT UNIQUE, email VARCHAR(100) COLLATE utf8mb4_bin UNIQUE, {secret}, UNIQUE KEY lower_email ((LOWER(email)))) DEFAULT CHARSET=utf8mb4"),
+        "CREATE TABLE review_native_partition(id INT PRIMARY KEY) PARTITION BY RANGE(id) (PARTITION p0 VALUES LESS THAN(10), PARTITION p1 VALUES LESS THAN MAXVALUE)".to_owned(),
     ] {
-        db.exec_raw(sql).await.unwrap();
+        db.exec_raw(&sql).await.unwrap();
     }
     let exported = exported_schema("review_native").await;
     for table in ["review_native_columns", "review_native_partition"] {
@@ -1098,7 +1406,7 @@ async fn review_mysql_native_table_definitions_round_trip() {
         .query_raw_json("SELECT * FROM review_native_columns ORDER BY id")
         .await
         .unwrap();
-    assert!(rows[0].get("secret").is_none());
+    assert_eq!(rows[0].get("secret").is_some(), tidb);
     assert_eq!(rows[1]["counter"], 3); // The rejected insert consumes a counter.
     db.exec_raw("ALTER TABLE review_native_partition DROP PARTITION p0")
         .await
@@ -1112,7 +1420,10 @@ async fn review_mysql_native_table_definitions_round_trip() {
 #[cfg(feature = "postgres")]
 #[tokio::test]
 async fn review_postgres_jsonb_array_primitives_use_json_parameters() {
-    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+    if backend::DATABASE_TYPE != DatabaseType::Postgres
+        || !backend::connect().await
+        || super::parity::skip_on(&[DatabaseServer::CockroachDb], "array of JSON")
+    {
         return;
     }
     #[tideorm::model(table = "review_jsonb_elements")]
@@ -1227,14 +1538,19 @@ async fn review_postgres_array_equality_uses_native_parameters() {
             .id,
         2
     );
-    assert_eq!(
-        Arrays::query()
-            .where_in("ints", vec![vec![1, 2], vec![2, 1]])
-            .count()
-            .await
-            .unwrap(),
-        2
-    );
+    if !super::parity::skip_on(
+        &[DatabaseServer::CockroachDb],
+        "comparison of an array with a list of arrays",
+    ) {
+        assert_eq!(
+            Arrays::query()
+                .where_in("ints", vec![vec![1, 2], vec![2, 1]])
+                .count()
+                .await
+                .unwrap(),
+            2
+        );
+    }
     db.exec_raw("DROP TABLE review_array_equality")
         .await
         .unwrap();
@@ -1242,7 +1558,7 @@ async fn review_postgres_array_equality_uses_native_parameters() {
 
 #[tokio::test]
 async fn review_postgres_export_preserves_trigger_functions_and_states() {
-    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+    if !postgres_export_review().await {
         return;
     }
     let db = tideorm::require_db().unwrap();
@@ -1287,7 +1603,7 @@ async fn review_postgres_export_preserves_trigger_functions_and_states() {
 
 #[tokio::test]
 async fn review_postgres_export_restores_function_backed_defaults() {
-    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+    if !postgres_export_review().await {
         return;
     }
     let db = tideorm::require_db().unwrap();
@@ -1321,7 +1637,7 @@ async fn review_postgres_export_restores_function_backed_defaults() {
 
 #[tokio::test]
 async fn review_postgres_export_preserves_inherited_ownership() {
-    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+    if !postgres_export_review().await {
         return;
     }
     let db = tideorm::require_db().unwrap();
@@ -1364,7 +1680,7 @@ async fn review_postgres_export_preserves_inherited_ownership() {
 
 #[tokio::test]
 async fn review_postgres_export_orders_tables_types_and_routines_together() {
-    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+    if !postgres_export_review().await {
         return;
     }
     let db = tideorm::require_db().unwrap();
@@ -1385,12 +1701,22 @@ async fn review_postgres_export_orders_tables_types_and_routines_together() {
     ] {
         db.exec_raw(sql).await.unwrap();
     }
+    let definition =
+        "SELECT pg_get_functiondef('review_object_order.items()'::regprocedure) AS definition";
+    let original = db.query_raw_json(definition).await.unwrap();
     replay_review_schema(&db, "review_object_order").await;
+    assert_eq!(db.query_raw_json(definition).await.unwrap(), original);
     db.exec_raw("INSERT INTO review_object_order.items DEFAULT VALUES")
         .await
         .unwrap();
+    // YugabyteDB fails a SQL function returning a whole row as its SETOF result.
+    let items = if super::parity::on(DatabaseServer::YugabyteDb) {
+        "review_object_order.items"
+    } else {
+        "review_object_order.items()"
+    };
     let rows = db
-        .query_raw_json("SELECT value FROM review_object_order.items()")
+        .query_raw_json(&format!("SELECT value FROM {items}"))
         .await
         .unwrap();
     assert_eq!(rows[0]["value"], 42);
@@ -1418,7 +1744,7 @@ async fn review_postgres_export_orders_tables_types_and_routines_together() {
 
 #[tokio::test]
 async fn review_postgres_export_resolves_conflicting_inherited_defaults() {
-    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+    if !postgres_export_review().await {
         return;
     }
     let db = tideorm::require_db().unwrap();
@@ -1459,11 +1785,13 @@ async fn review_postgres_export_resolves_conflicting_inherited_defaults() {
 
 #[tokio::test]
 async fn review_postgres_export_preserves_routine_execution_acl() {
-    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+    if !postgres_export_review().await {
         return;
     }
     let db = tideorm::require_db().unwrap();
     for sql in [
+        "DROP SCHEMA IF EXISTS review_routine_acl CASCADE",
+        "DROP ROLE IF EXISTS \"review Routine Guest\", \"review Routine Allowed\"",
         "CREATE ROLE \"review Routine Guest\"",
         "CREATE ROLE \"review Routine Allowed\"",
         "CREATE SCHEMA review_routine_acl",
@@ -1532,11 +1860,14 @@ async fn review_postgres_export_preserves_routine_execution_acl() {
 
 #[tokio::test]
 async fn review_postgres_domain_and_composite_collations_round_trip() {
-    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+    if !postgres_export_review().await
+        || super::parity::skip_on(&[DatabaseServer::YugabyteDb], "nondeterministic collation")
+    {
         return;
     }
     let db = tideorm::require_db().unwrap();
     for sql in [
+        "DROP SCHEMA IF EXISTS review_type_collations CASCADE",
         "CREATE SCHEMA review_type_collations",
         "CREATE COLLATION review_type_collations.fold(provider=icu,locale='und-u-ks-level2',deterministic=false)",
         "CREATE DOMAIN review_type_collations.folded AS text COLLATE review_type_collations.fold",
@@ -1577,13 +1908,14 @@ async fn review_postgres_domain_and_composite_collations_round_trip() {
 
 #[tokio::test]
 async fn review_postgres_table_owner_keeps_definer_access() {
-    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+    if !postgres_export_review().await {
         return;
     }
     let db = tideorm::require_db().unwrap();
     let role = format!("review_table_owner_{}", std::process::id());
     db.exec_raw(&format!("CREATE ROLE {role}")).await.unwrap();
     for sql in [
+        "DROP SCHEMA IF EXISTS review_table_owner CASCADE".to_owned(),
         format!("CREATE SCHEMA review_table_owner AUTHORIZATION {role}"),
         "CREATE TABLE review_table_owner.secret(id serial,value integer)".into(),
         format!("ALTER TABLE review_table_owner.secret OWNER TO {role}"),
@@ -1623,11 +1955,12 @@ async fn review_postgres_table_owner_keeps_definer_access() {
 
 #[tokio::test]
 async fn review_postgres_view_dependent_functions_restore_in_order() {
-    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+    if !postgres_export_review().await {
         return;
     }
     let db = tideorm::require_db().unwrap();
     for sql in [
+        "DROP SCHEMA IF EXISTS review_views CASCADE",
         "CREATE SCHEMA review_views",
         "CREATE TABLE review_views.items(value integer)",
         "CREATE FUNCTION review_views.increment(x integer) RETURNS integer LANGUAGE SQL IMMUTABLE RETURN x+1",
@@ -1640,12 +1973,22 @@ async fn review_postgres_view_dependent_functions_restore_in_order() {
     ] {
         db.exec_raw(sql).await.unwrap();
     }
+    let definition =
+        "SELECT pg_get_functiondef('review_views.read_visible()'::regprocedure) AS definition";
+    let original = db.query_raw_json(definition).await.unwrap();
     replay_review_schema(&db, "review_views").await;
+    assert_eq!(db.query_raw_json(definition).await.unwrap(), original);
     db.exec_raw("INSERT INTO review_views.items VALUES(6)")
         .await
         .unwrap();
+    // YugabyteDB fails a SQL function returning a whole row as its SETOF result.
+    let visible = if super::parity::on(DatabaseServer::YugabyteDb) {
+        "review_views.a_visible"
+    } else {
+        "review_views.read_visible()"
+    };
     assert_eq!(
-        db.query_raw_json("SELECT value FROM review_views.read_visible()")
+        db.query_raw_json(&format!("SELECT value FROM {visible}"))
             .await
             .unwrap()[0]["value"],
         7
@@ -1675,11 +2018,12 @@ async fn review_postgres_view_dependent_functions_restore_in_order() {
 
 #[tokio::test]
 async fn review_postgres_row_type_check_restores_after_its_function() {
-    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+    if !postgres_export_review().await {
         return;
     }
     let db = tideorm::require_db().unwrap();
     for sql in [
+        "DROP SCHEMA IF EXISTS review_row_check CASCADE",
         "CREATE SCHEMA review_row_check",
         "CREATE TABLE review_row_check.items(value integer)",
         "CREATE FUNCTION review_row_check.valid(row_value review_row_check.items) RETURNS boolean LANGUAGE SQL IMMUTABLE RETURN row_value.value > 0",
@@ -1771,11 +2115,29 @@ async fn review_mysql_array_filters_never_match_scalar_documents() {
 
 #[tokio::test]
 async fn review_postgres_restores_domain_partition_rule_and_replication_behavior() {
-    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+    if !postgres_export_review().await {
         return;
     }
+    let yugabyte = super::parity::skip_on(
+        &[DatabaseServer::YugabyteDb],
+        "ALTER DOMAIN ADD CONSTRAINT, a rule's state or a partition's own generation expression",
+    );
+    // YugabyteDB, like PostgreSQL before 16, keeps the parent's expression,
+    // which the export must then not restate.
+    let (child, computed) = if yugabyte {
+        (
+            "CREATE TABLE review_fidelity.child PARTITION OF review_fidelity.parent FOR VALUES FROM(0) TO(10)",
+            4,
+        )
+    } else {
+        (
+            "CREATE TABLE review_fidelity.child PARTITION OF review_fidelity.parent (computed WITH OPTIONS GENERATED ALWAYS AS(id*3) STORED) FOR VALUES FROM(0) TO(10)",
+            6,
+        )
+    };
     let db = tideorm::require_db().unwrap();
     for sql in [
+        "DROP SCHEMA IF EXISTS review_fidelity CASCADE",
         "CREATE SCHEMA review_fidelity",
         "CREATE DOMAIN review_fidelity.positive AS integer DEFAULT 7 CHECK(VALUE>0)",
         "ALTER DOMAIN review_fidelity.positive ADD CONSTRAINT under_ten CHECK(VALUE<10) NOT VALID",
@@ -1787,31 +2149,56 @@ async fn review_postgres_restores_domain_partition_rule_and_replication_behavior
         "CREATE VIEW review_fidelity.visible AS SELECT value FROM review_fidelity.items",
         "ALTER VIEW review_fidelity.visible ALTER COLUMN value SET DEFAULT 8",
         "CREATE TABLE review_fidelity.parent(id integer,value integer,computed integer GENERATED ALWAYS AS(id*2) STORED) PARTITION BY RANGE(id)",
-        "CREATE TABLE review_fidelity.child PARTITION OF review_fidelity.parent (computed WITH OPTIONS GENERATED ALWAYS AS(id*3) STORED) FOR VALUES FROM(0) TO(10)",
+        child,
         "ALTER TABLE review_fidelity.child ALTER COLUMN value SET NOT NULL",
         "CREATE UNLOGGED TABLE review_fidelity.scratch(id integer) WITH(fillfactor=50,autovacuum_enabled=false)",
         "ALTER TABLE review_fidelity.items REPLICA IDENTITY FULL",
-    ] {
+        // A rule in each state; the default one gets no statement of its own.
+        "CREATE RULE always_on AS ON UPDATE TO review_fidelity.log DO ALSO NOTHING",
+        "ALTER TABLE review_fidelity.log ENABLE ALWAYS RULE always_on",
+        "CREATE RULE replica_on AS ON DELETE TO review_fidelity.log DO ALSO NOTHING",
+        "ALTER TABLE review_fidelity.log ENABLE REPLICA RULE replica_on",
+        "CREATE RULE switched_off AS ON UPDATE TO review_fidelity.scratch DO ALSO NOTHING",
+        "ALTER TABLE review_fidelity.scratch DISABLE RULE switched_off",
+    ]
+    .into_iter()
+    .filter(|sql| {
+        !yugabyte
+            || !(sql.starts_with("ALTER DOMAIN")
+                || (sql.starts_with("ALTER TABLE") && sql.contains(" RULE ")))
+    })
+    {
         db.exec_raw(sql).await.unwrap();
     }
     // The rule evaluates the domain again after the row exists. Validate the
     // source fixture before testing the same behavior after schema replay.
-    db.exec_raw("INSERT INTO review_fidelity.items DEFAULT VALUES; INSERT INTO review_fidelity.visible DEFAULT VALUES; TRUNCATE review_fidelity.items,review_fidelity.log")
-        .await
-        .unwrap();
+    // One statement each: YugabyteDB retries a read restart only for a single statement.
+    for sql in [
+        "INSERT INTO review_fidelity.items DEFAULT VALUES",
+        "INSERT INTO review_fidelity.visible DEFAULT VALUES",
+        "TRUNCATE review_fidelity.items,review_fidelity.log",
+    ] {
+        db.exec_raw(sql).await.unwrap();
+    }
     let metadata = "SELECT c.relname,c.relpersistence::text,c.relreplident::text,c.reloptions::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='review_fidelity' AND c.relkind IN ('r','p') ORDER BY c.relname";
+    let rules = "SELECT r.rulename,r.ev_enabled::text FROM pg_rewrite r JOIN pg_class c ON c.oid=r.ev_class JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='review_fidelity' AND r.rulename<>'_RETURN' ORDER BY r.rulename";
     let before = db.query_raw_json(metadata).await.unwrap();
+    let rules_before = db.query_raw_json(rules).await.unwrap();
+    assert_eq!(rules_before.len(), 4);
     replay_review_schema(&db, "review_fidelity").await;
     assert_eq!(before, db.query_raw_json(metadata).await.unwrap());
+    assert_eq!(rules_before, db.query_raw_json(rules).await.unwrap());
     assert!(
         db.exec_raw("INSERT INTO review_fidelity.items VALUES(-1)")
             .await
             .is_err()
     );
     assert!(
-        db.exec_raw("INSERT INTO review_fidelity.items VALUES(10)")
-            .await
-            .is_err()
+        yugabyte
+            || db
+                .exec_raw("INSERT INTO review_fidelity.items VALUES(10)")
+                .await
+                .is_err()
     );
     assert!(
         db.exec_raw("INSERT INTO review_fidelity.parent(id,value) VALUES(1,NULL)")
@@ -1825,7 +2212,7 @@ async fn review_postgres_restores_domain_partition_rule_and_replication_behavior
         db.query_raw_json("SELECT computed FROM review_fidelity.parent")
             .await
             .unwrap()[0]["computed"],
-        6
+        computed
     );
     db.exec_raw("INSERT INTO review_fidelity.items DEFAULT VALUES")
         .await
@@ -1844,15 +2231,17 @@ async fn review_postgres_restores_domain_partition_rule_and_replication_behavior
             serde_json::json!({"value":8})
         ]
     );
-    assert_eq!(
-        db.query_raw_json(
-            "SELECT convalidated FROM pg_constraint \
-             WHERE contypid='review_fidelity.positive'::regtype AND conname='under_ten'"
-        )
-        .await
-        .unwrap()[0]["convalidated"],
-        false
-    );
+    if !yugabyte {
+        assert_eq!(
+            db.query_raw_json(
+                "SELECT convalidated FROM pg_constraint \
+                 WHERE contypid='review_fidelity.positive'::regtype AND conname='under_ten'"
+            )
+            .await
+            .unwrap()[0]["convalidated"],
+            false
+        );
+    }
     db.exec_raw("DROP SCHEMA review_fidelity CASCADE")
         .await
         .unwrap();
@@ -1860,7 +2249,7 @@ async fn review_postgres_restores_domain_partition_rule_and_replication_behavior
 
 #[tokio::test]
 async fn review_postgres_grant_chains_and_default_privileges_survive_export() {
-    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+    if !postgres_export_review().await {
         return;
     }
     let db = tideorm::require_db().unwrap();
@@ -1869,6 +2258,7 @@ async fn review_postgres_grant_chains_and_default_privileges_survive_export() {
     for sql in [
         format!("CREATE ROLE {grantor}"),
         format!("CREATE ROLE {reader}"),
+        "DROP SCHEMA IF EXISTS review_acl_chain CASCADE".to_owned(),
         "CREATE SCHEMA review_acl_chain".to_owned(),
         "CREATE TABLE review_acl_chain.items(id integer,secret text)".to_owned(),
         format!("GRANT USAGE ON SCHEMA review_acl_chain TO {grantor},{reader}"),
@@ -1935,6 +2325,10 @@ async fn review_mysql_complete_export_is_portable_and_preserves_stored_objects()
         backend::DATABASE_TYPE,
         DatabaseType::MySQL | DatabaseType::MariaDB
     ) || !backend::connect().await
+        || super::parity::skip_on(
+            &[DatabaseServer::TiDb, DatabaseServer::Vitess],
+            "stored programs (TiDB) or CREATE DATABASE (Vitess)",
+        )
     {
         return;
     }
@@ -2137,7 +2531,7 @@ async fn review_postgres_raw_select_mutations_flush_cached_queries() {
 
 #[tokio::test]
 async fn review_postgres_export_preserves_namespace_context_and_collation_owner() {
-    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+    if !postgres_export_review().await {
         return;
     }
     let db = Database::builder()
@@ -2205,7 +2599,7 @@ async fn review_postgres_export_preserves_namespace_context_and_collation_owner(
 
 #[tokio::test]
 async fn review_postgres18_export_preserves_not_null_no_inherit() {
-    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+    if !postgres_export_review().await {
         return;
     }
     let db = tideorm::require_db().unwrap();
@@ -2247,7 +2641,12 @@ async fn review_postgres18_export_preserves_not_null_no_inherit() {
 
 #[tokio::test]
 async fn review_postgres_replica_identity_finds_renamed_partition_index() {
-    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+    if !postgres_export_review().await
+        || super::parity::skip_on(
+            &[DatabaseServer::YugabyteDb],
+            "REPLICA IDENTITY USING INDEX",
+        )
+    {
         return;
     }
     let db = tideorm::require_db().unwrap();
@@ -2300,7 +2699,7 @@ async fn review_postgres_replica_identity_finds_renamed_partition_index() {
 
 #[tokio::test]
 async fn review_postgres_domain_default_qualifies_its_sequence() {
-    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+    if !postgres_export_review().await {
         return;
     }
     let db = Database::builder()
@@ -2363,7 +2762,7 @@ async fn review_postgres_domain_default_qualifies_its_sequence() {
 
 #[tokio::test]
 async fn review_postgres_unsupported_dependencies_fail_before_writing_export() {
-    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+    if !postgres_export_review().await {
         return;
     }
     let db = tideorm::require_db().unwrap();
@@ -2626,6 +3025,8 @@ async fn review_postgres_raw_rows_read_types_without_a_typed_decoder() {
     if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
         return;
     }
+    // CockroachDB has the first three types, and no cidr, range or money.
+    let cockroach = super::parity::on(DatabaseServer::CockroachDb);
     // Each value beside `format('%s', v)`, the server's own text for it, in
     // one transaction holding the settings that text follows.
     let checks: [(&str, &[&str]); 10] = [
@@ -2685,6 +3086,7 @@ async fn review_postgres_raw_rows_read_types_without_a_typed_decoder() {
         ),
         ("tstzrange", &["[2020-01-01 10:00+02,2020-01-02 00:00+00)"]),
     ];
+    let checks = checks[..if cockroach { 3 } else { checks.len() }].to_vec();
     let db = tideorm::require_db().unwrap();
     let rows = db
         .transaction(async move |_| {
@@ -2695,6 +3097,8 @@ async fn review_postgres_raw_rows_read_types_without_a_typed_decoder() {
             for (type_name, values) in checks {
                 let values = values
                     .iter()
+                    // CockroachDB prints this IPv4-compatible address `::102:304`.
+                    .filter(|value| !cockroach || **value != "::1.2.3.4")
                     .map(|value| format!("('{value}'::{type_name})"))
                     .collect::<Vec<_>>()
                     .join(", ");
@@ -2706,21 +3110,29 @@ async fn review_postgres_raw_rows_read_types_without_a_typed_decoder() {
                 );
             }
             // A MONEY is its amount, which the server prints by locale.
-            rows.extend(
-                Database::raw_json(
-                    "SELECT v, v::numeric::text AS text FROM (VALUES ('1234.56'::money), \
-                         ('-0.01'::money), ('92233720368547758.07'::money)) AS t(v)",
-                )
-                .await?,
-            );
+            if !cockroach {
+                rows.extend(
+                    Database::raw_json(
+                        "SELECT v, v::numeric::text AS text FROM (VALUES ('1234.56'::money), \
+                             ('-0.01'::money), ('92233720368547758.07'::money)) AS t(v)",
+                    )
+                    .await?,
+                );
+            }
             Ok(rows)
         })
         .await
         .unwrap();
-    assert_eq!(rows.len(), 36);
+    assert_eq!(rows.len(), if cockroach { 16 } else { 36 });
     for row in &rows {
         assert!(row["v"].is_string(), "{row}");
         assert_eq!(row["v"], row["text"], "{row}");
+    }
+    if super::parity::skip_on(
+        &[DatabaseServer::CockroachDb],
+        "multidimensional array, money, range or geometric type",
+    ) {
+        return;
     }
 
     let row = Database::raw_json(

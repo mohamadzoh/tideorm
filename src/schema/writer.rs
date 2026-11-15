@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use crate::config::DatabaseType;
+use crate::config::{DatabaseServer, DatabaseType};
 use crate::database::Database;
 use crate::error::{Error, Result};
 use crate::internal::sql_safety::{quote_ident, quote_qualified};
@@ -12,6 +12,7 @@ use crate::model::IndexDefinition;
 use super::catalog::{get, query};
 use super::{ColumnSchema, SchemaGenerator, TableSchema, TableSchemaBuilder};
 
+mod cockroach;
 mod mysql_objects;
 mod postgres;
 mod postgres_dependencies;
@@ -62,6 +63,12 @@ impl SchemaWriter {
     /// Schemas, extensions and collations precede these objects. Unsupported types, custom aggregates, operators, foreign tables/servers and text-search objects fail
     /// the export instead of producing a file that cannot recreate them.
     ///
+    /// CockroachDB's file is what its `SHOW CREATE ALL` statements write:
+    /// schemas, types, tables, sequences and views (foreign keys after every
+    /// table), then routines and triggers. A table or view that calls a
+    /// routine of its own database comes before that routine, so its script
+    /// cannot be replayed as written.
+    ///
     /// SQLite keeps the statement that created each table, view, index and
     /// trigger, so its file is those statements, generated columns,
     /// collations and `AUTOINCREMENT` included. Its FTS5 shadow tables are
@@ -75,6 +82,10 @@ impl SchemaWriter {
     /// explicit external-database references and dynamic SQL strings retain
     /// their original text.
     pub async fn schema_sql(db: &Database) -> Result<String> {
+        // A lazy pool names its server once it has opened a connection.
+        if db.server().is_none() {
+            db.ping().await?;
+        }
         let db_type = db.backend();
         let conn = db.__internal_connection()?;
 
@@ -85,6 +96,9 @@ impl SchemaWriter {
             verbatim,
             constraints,
         } = match db_type {
+            DatabaseType::Postgres if db.server() == Some(DatabaseServer::CockroachDb) => {
+                cockroach::introspect(&conn).await?
+            }
             DatabaseType::Postgres => postgres::introspect_postgres(&conn).await?,
             DatabaseType::MySQL | DatabaseType::MariaDB => mysql_objects::introspect(&conn).await?,
             DatabaseType::SQLite => introspect_sqlite(&conn).await?,

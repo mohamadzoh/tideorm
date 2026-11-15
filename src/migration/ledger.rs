@@ -148,7 +148,7 @@ impl<'a> Ledger<'a> {
 
     pub(super) fn create_table_sql(&self, db_type: DatabaseType) -> String {
         let (id_type, text_type, timestamp_type) = match db_type {
-            DatabaseType::Postgres => ("SERIAL PRIMARY KEY", "VARCHAR(255)", "TIMESTAMP"),
+            DatabaseType::Postgres => ("SERIAL4 PRIMARY KEY", "VARCHAR(255)", "TIMESTAMP"),
             DatabaseType::MySQL | DatabaseType::MariaDB => (
                 "INT AUTO_INCREMENT PRIMARY KEY",
                 "VARCHAR(255)",

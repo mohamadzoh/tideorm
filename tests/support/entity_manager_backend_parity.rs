@@ -1647,9 +1647,18 @@ async fn hasmany_without_entity_manager_unchanged() -> tideorm::Result<()> {
         .expect("user should exist in default path");
     let loaded_posts = user.posts.load().await?;
 
-    assert_eq!(loaded_posts.len(), 2);
-    assert_eq!(loaded_posts[0].user_id, saved_user.id);
-    assert_eq!(loaded_posts[1].id, posts[1].id);
+    assert!(
+        loaded_posts
+            .iter()
+            .all(|post| post.user_id == saved_user.id)
+    );
+    // `load()` promises no order; YugabyteDB returns the rows in hash order.
+    let ids = |rows: &[EntityManagerPost]| {
+        let mut ids: Vec<_> = rows.iter().map(|post| post.id).collect();
+        ids.sort_unstable();
+        ids
+    };
+    assert_eq!(ids(&loaded_posts), ids(&posts));
 
     Ok(())
 }

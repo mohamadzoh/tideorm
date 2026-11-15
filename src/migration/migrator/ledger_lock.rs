@@ -80,8 +80,9 @@ enum LedgerLock {
     #[cfg(any(feature = "postgres", feature = "mysql"))]
     Session {
         session: Database,
-        /// The statement releasing the lock, and the lock it names.
-        release: (&'static str, crate::DbValue),
+        /// The statement releasing the lock, and the lock it names (none
+        /// for the `ROLLBACK` ending CockroachDB's lock transaction).
+        release: (&'static str, Option<crate::DbValue>),
     },
 }
 
@@ -148,12 +149,35 @@ impl LedgerLock {
     #[cfg(feature = "postgres")]
     async fn acquire_postgres(db: &Database, kind: LockKind) -> Result<Self> {
         let session = db.pin_session().await?;
+        // The session idles for the whole run: a server timeout ending it
+        // would free the lock while migrations still run.
         session
-            .fetch_rows("SELECT pg_advisory_lock($1)", vec![kind.key().into()])
+            .fetch_rows(
+                "SELECT set_config(name, '0', false) FROM pg_catalog.pg_settings \
+                 WHERE name IN ('idle_session_timeout', \
+                 'idle_in_transaction_session_timeout', 'transaction_timeout')",
+                Vec::new(),
+            )
+            .await?;
+        let key = crate::DbValue::from(kind.key());
+        if session.server() == Some(crate::config::DatabaseServer::CockroachDb) {
+            // CockroachDB has no session advisory lock; a transaction's is
+            // held until the transaction ends
+            session.exec_unprepared("BEGIN").await?;
+            session
+                .fetch_rows("SELECT pg_advisory_xact_lock($1)", vec![key])
+                .await?;
+            return Ok(Self::Session {
+                session,
+                release: ("ROLLBACK", None),
+            });
+        }
+        session
+            .fetch_rows("SELECT pg_advisory_lock($1)", vec![key.clone()])
             .await?;
         Ok(Self::Session {
             session,
-            release: ("SELECT pg_advisory_unlock($1)", kind.key().into()),
+            release: ("SELECT pg_advisory_unlock($1)", Some(key)),
         })
     }
 
@@ -161,12 +185,16 @@ impl LedgerLock {
     #[cfg(feature = "mysql")]
     async fn acquire_mysql(db: &Database, kind: LockKind) -> Result<Self> {
         let session = db.pin_session().await?;
-        let database = session
-            .fetch_rows("SELECT DATABASE() AS name", Vec::new())
+        let database = match session
+            .fetch_rows("SELECT DATABASE()", Vec::new())
             .await?
             .first()
-            .and_then(|row| row.try_get::<Option<String>>("name").ok())
-            .flatten();
+        {
+            Some(row) => row
+                .try_get_by_index::<Option<String>>(0)
+                .map_err(crate::internal::translate_error)?,
+            None => None,
+        };
         let name = mysql_lock_name(kind, database.as_deref());
         let rows = session
             .fetch_rows(
@@ -174,10 +202,11 @@ impl LedgerLock {
                 vec![name.clone().into(), MIGRATION_LOCK_TIMEOUT_SECONDS.into()],
             )
             .await?;
-        // `GET_LOCK` is 1 once acquired, 0 on timeout, NULL on error.
+        // `GET_LOCK` is 1 once acquired, 0 on timeout, NULL on error. Read by
+        // position: Vitess evaluates it itself and drops the alias.
         let acquired = rows
             .first()
-            .and_then(|row| row.try_get::<Option<i64>>("acquired").ok())
+            .and_then(|row| row.try_get_by_index::<Option<i64>>(0).ok())
             .flatten();
         if acquired != Some(1) {
             return Err(Error::transaction(format!(
@@ -186,7 +215,7 @@ impl LedgerLock {
         }
         Ok(Self::Session {
             session,
-            release: ("SELECT RELEASE_LOCK(?)", name.into()),
+            release: ("SELECT RELEASE_LOCK(?)", Some(name.into())),
         })
     }
 
@@ -206,9 +235,12 @@ impl LedgerLock {
                 session,
                 release: (sql, lock),
             } => {
-                let released = session.fetch_rows(sql, vec![lock]).await;
+                let released = match lock {
+                    Some(lock) => session.fetch_rows(sql, vec![lock]).await.map(drop),
+                    None => session.exec_unprepared(sql).await.map(drop),
+                };
                 let closed = session.close().await;
-                released.map(drop).and(closed)
+                released.and(closed)
             }
         }
     }

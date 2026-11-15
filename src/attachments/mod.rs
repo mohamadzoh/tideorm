@@ -14,7 +14,7 @@
 //! payload.
 //!
 //! Typical workflow:
-//! - declare the `files` JSON or JSONB column plus `#[tideorm(has_one_file = ...)]` or `#[tideorm(has_many_files = ...)]`
+//! - declare the `files` JSON or JSONB column plus `#[tideorm(has_one_files = ...)]` or `#[tideorm(has_many_files = ...)]`
 //! - use `attach()` or `attach_many()` to append metadata-backed file references
 //! - use `detach()` or `sync()` when the relation should be removed or replaced wholesale
 //! - save the model afterward so the updated payload is persisted

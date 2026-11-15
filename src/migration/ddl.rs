@@ -257,7 +257,8 @@ pub(crate) fn sqlite_can_add_with_default(default: &str) -> bool {
 fn postgres_serial_type(sql_type: &str) -> Option<&'static str> {
     match sql_type.trim().to_uppercase().as_str() {
         "SMALLINT" | "INT2" => Some("SMALLSERIAL"),
-        "INTEGER" | "INT" | "INT4" => Some("SERIAL"),
+        // CockroachDB makes a plain `SERIAL` a 64-bit column.
+        "INTEGER" | "INT" | "INT4" => Some("SERIAL4"),
         "BIGINT" | "INT8" => Some("BIGSERIAL"),
         _ => None,
     }

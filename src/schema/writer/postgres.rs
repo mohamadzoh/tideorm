@@ -174,19 +174,25 @@ async fn postgres_late_statements(conn: &impl ConnectionTrait) -> Result<Vec<Str
         }
         output.push(get(&row, "state")?);
     }
-    output.extend(statements(conn,
+    for row in query(conn, DatabaseType::Postgres,
         "SELECT pg_catalog.pg_get_ruledef(r.oid, false) AS definition,
-             format('ALTER TABLE %I.%I %s RULE %I', n.nspname, c.relname,
+             CASE WHEN r.ev_enabled <> 'O' THEN format('ALTER TABLE %I.%I %s RULE %I', n.nspname, c.relname,
                  CASE r.ev_enabled WHEN 'D' THEN 'DISABLE' WHEN 'R' THEN 'ENABLE REPLICA'
-                     WHEN 'A' THEN 'ENABLE ALWAYS' ELSE 'ENABLE' END, r.rulename) AS state
+                     ELSE 'ENABLE ALWAYS' END, r.rulename) END AS state
          FROM pg_catalog.pg_rewrite r JOIN pg_catalog.pg_class c ON c.oid=r.ev_class
          JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
          WHERE r.rulename <> '_RETURN' AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
            AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid='pg_catalog.pg_rewrite'::regclass AND d.objid=r.oid AND d.deptype='e')
-         ORDER BY n.nspname,c.relname,r.rulename", Vec::new(), &["definition", "state"]).await?);
+         ORDER BY n.nspname,c.relname,r.rulename", Vec::new()).await? {
+        output.push(get(&row, "definition")?);
+        // a rule in its default state needs no statement
+        output.extend(get::<Option<String>>(&row, "state")?);
+    }
     // Recursive CREATE INDEX chooses new names for descendant indexes. Locate
     // an inherited replica index by its root and owning table after replay,
-    // including nested partitions and constraint-backed indexes.
+    // including nested partitions and constraint-backed indexes. 'c' is
+    // YugabyteDB's CHANGE, the default it gives new tables; a value not
+    // listed is NULL, which fails the export.
     output.extend(statements(conn,
         "SELECT CASE WHEN root.name IS NOT NULL THEN
              format('DO %L', format('DECLARE replica_index text; BEGIN
@@ -202,9 +208,10 @@ async fn postgres_late_statements(conn: &impl ConnectionTrait) -> Result<Vec<Str
                  EXECUTE %L || pg_catalog.quote_ident(replica_index);
              END', root.name, format('%I.%I', n.nspname,c.relname),
                  format('ALTER TABLE %I.%I REPLICA IDENTITY USING INDEX ', n.nspname,c.relname)))
-             ELSE format('ALTER TABLE %I.%I REPLICA IDENTITY %s', n.nspname,c.relname,
+             ELSE format('ALTER TABLE %I.%I REPLICA IDENTITY ', n.nspname,c.relname) ||
                  CASE c.relreplident WHEN 'f' THEN 'FULL' WHEN 'n' THEN 'NOTHING' WHEN 'd' THEN 'DEFAULT'
-                     WHEN 'i' THEN 'USING INDEX ' || quote_ident(i.relname) END) END AS definition
+                     WHEN 'c' THEN 'CHANGE'
+                     WHEN 'i' THEN 'USING INDEX ' || quote_ident(i.relname) END END AS definition
          FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
          LEFT JOIN pg_catalog.pg_index ix ON ix.indrelid=c.oid AND ix.indisreplident
          LEFT JOIN pg_catalog.pg_class i ON i.oid=ix.indexrelid

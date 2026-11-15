@@ -52,7 +52,8 @@ impl<M: Model> QueryBuilder<M> {
     /// `QueryCache::init_global(..)` turns it on, nothing is cached, and the
     /// first such query logs a warning saying so.
     ///
-    /// A TideORM write drops the cached reads of its table. Inside a
+    /// A TideORM write drops every cached read of its database, since cascades
+    /// and triggers can write other tables. Inside a
     /// transaction it drops them again once the transaction commits, since
     /// other requests read, and may cache, the replaced rows until then, and a
     /// read that a write overtook is not cached at all. Reads inside a

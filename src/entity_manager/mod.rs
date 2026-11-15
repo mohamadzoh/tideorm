@@ -40,8 +40,8 @@ impl std::fmt::Debug for EntityManager {
     }
 }
 
-/// A relation [`EntityManager::load`] can load: every relation wrapper a
-/// model declares implements it.
+/// A relation [`EntityManager::load`] can load: `HasOne`, `HasMany`,
+/// `BelongsTo` and `HasManyThrough` implement it.
 ///
 /// The relation's rows come from the manager's identity map when it holds
 /// them, so two relations reaching one row share its instance, and the

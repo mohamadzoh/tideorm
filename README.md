@@ -17,7 +17,7 @@ A Rust ORM with field-declared relations and a fluent query builder.
 - **Optional Dirty Tracking** - Enable `dirty-tracking` only when you want `changed_fields()` and `original_value()` model inspection helpers
 - **Async-First** - Built for modern async/await workflows
 - **Auto Schema Sync** - Automatic table management during development
-- **Multi-Database** - PostgreSQL, MySQL, and SQLite support
+- **Multi-Database** - PostgreSQL, MySQL, MariaDB and SQLite, plus CockroachDB, YugabyteDB, TiDB and Vitess through the PostgreSQL and MySQL drivers ([Compatible Servers](docs/compatible-servers.md))
 - **Several Databases at Once** - The global connection is only the default: `Database::connect(url)` opens more, and `db.scope(async { .. })` runs every model call inside it on that database, for tenants and replicas
 - **Query Builder** - Fluent filtering, OR groups, joins, unions, CTEs, and window functions
 - **Typed Results** - Aggregates read as the type you ask for (`sum::<Decimal>`, `min::<DateTime<Utc>>`), `pluck`/`value` read one column, `get_as::<T>()` reads rows into your own struct, and `paginate()` returns a page with its total
@@ -33,7 +33,7 @@ A Rust ORM with field-declared relations and a fluent query builder.
 
 ```toml
 [dependencies]
-tideorm = { version = "0.17.7", default-features = false, features = ["sqlite", "runtime-tokio"] }
+tideorm = { version = "0.17.8", default-features = false, features = ["sqlite", "runtime-tokio"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -158,7 +158,7 @@ users left: 0
 
 Swap the `sqlite` feature and the URL for `postgres` (`postgres://user:pass@localhost/app`) or `mysql` to run the same program on another backend; [Installation](#installation) lists the feature sets.
 
-The global connection the quick start sets up is a default, not a limit. `Database::connect(url)` opens another database, `User::query_with(&replica)` reads from it, and `tenant_db.scope(async { .. })` runs every model call inside the block on it, so no handle has to be threaded through your code; see [Choosing the Database a Call Uses](docs/models.md#choosing-the-database-a-call-uses).
+The global connection the quick start sets up is a default, not a limit. `Database::connect(url)` opens another database, `User::query_with(&replica)` reads from it, and `tenant_db.scope(async { .. })` runs every model call inside the block on it, so no handle has to be threaded through your code; see [Several Databases at Once](docs/databases.md#several-databases-at-once).
 
 Relation helper fields like `HasOne<T>` and `HasMany<T>` are runtime-only wrappers, not persisted columns. TideORM's generated serde support serializes their cached payloads when present and rebuilds the runtime wrappers on deserialize, so round-tripped JSON can preserve loaded relations without turning the wrappers themselves into stored schema fields.
 
@@ -178,7 +178,7 @@ Use model-level encrypted fields when you want selected persisted columns, such 
 
 ```toml
 [dependencies]
-tideorm = { version = "0.17.7", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
+tideorm = { version = "0.17.8", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
 ```
 
 ```rust,ignore
@@ -224,31 +224,31 @@ driver stack.
 ```toml
 [dependencies]
 # PostgreSQL
-tideorm = { version = "0.17.7", default-features = false, features = ["postgres", "runtime-tokio"] }
+tideorm = { version = "0.17.8", default-features = false, features = ["postgres", "runtime-tokio"] }
 
 # MySQL / MariaDB
-tideorm = { version = "0.17.7", default-features = false, features = ["mysql", "runtime-tokio"] }
+tideorm = { version = "0.17.8", default-features = false, features = ["mysql", "runtime-tokio"] }
 
 # SQLite
-tideorm = { version = "0.17.7", default-features = false, features = ["sqlite", "runtime-tokio"] }
+tideorm = { version = "0.17.8", default-features = false, features = ["sqlite", "runtime-tokio"] }
 
 # Enable attachments support explicitly
-tideorm = { version = "0.17.7", default-features = false, features = ["postgres", "runtime-tokio", "attachments"] }
+tideorm = { version = "0.17.8", default-features = false, features = ["postgres", "runtime-tokio", "attachments"] }
 
 # Enable translations support explicitly
-tideorm = { version = "0.17.7", default-features = false, features = ["postgres", "runtime-tokio", "translations"] }
+tideorm = { version = "0.17.8", default-features = false, features = ["postgres", "runtime-tokio", "translations"] }
 
 # Enable full-text search support explicitly
-tideorm = { version = "0.17.7", default-features = false, features = ["postgres", "runtime-tokio", "fulltext"] }
+tideorm = { version = "0.17.8", default-features = false, features = ["postgres", "runtime-tokio", "fulltext"] }
 
 # Enable the entity manager explicitly
-tideorm = { version = "0.17.7", default-features = false, features = ["postgres", "runtime-tokio", "entity-manager"] }
+tideorm = { version = "0.17.8", default-features = false, features = ["postgres", "runtime-tokio", "entity-manager"] }
 
 # Enable model dirty tracking explicitly
-tideorm = { version = "0.17.7", default-features = false, features = ["postgres", "runtime-tokio", "dirty-tracking"] }
+tideorm = { version = "0.17.8", default-features = false, features = ["postgres", "runtime-tokio", "dirty-tracking"] }
 
 # Enable model encrypted fields explicitly
-tideorm = { version = "0.17.7", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
+tideorm = { version = "0.17.8", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
 ```
 
 Swap `runtime-tokio` for `runtime-async-std` if you run on async-std.
@@ -268,6 +268,8 @@ works without it.
 | `postgres` | PostgreSQL support (default) |
 | `mysql` | MySQL/MariaDB support |
 | `sqlite` | SQLite support |
+| `mariadb`, `tidb`, `vitess` | The same as `mysql`, named after the server you use |
+| `cockroachdb`, `yugabytedb` | The same as `postgres`, named after the server you use |
 | `runtime-tokio` | Tokio runtime (default) |
 | `runtime-async-std` | async-std runtime |
 | `attachments` | Compile-time-only feature gate for the attachments API and attachment-specific benchmarks/tests; adds no extra dependencies |
@@ -317,15 +319,21 @@ The docs now ship as an mdBook.
 - Rebuild the generated site locally with `mdbook build` or preview it with `mdbook serve --open`
 
 Core chapters:
-- [Getting Started](docs/getting-started.md) - Configuration, type mappings, examples, and testing
-- [Models](docs/models.md) - Model definition, CRUD behavior, lifecycle hooks, validation, tokenization, and advanced TideORM helpers
-- [Queries](docs/queries.md) - Query builder, full-text search, multi-database behavior, raw SQL, logging, and errors
-- [Profiling](docs/profiling.md) - Global query timing, slow-query stats, manual reports, and query analysis
-- [Benchmarking](docs/benchmarking.md) - Benchmark target matrix, PostgreSQL setup, feature-gated bench commands, and Criterion baseline workflow
+- [Installation](docs/installation.md) - Cargo features for backends, runtimes and optional modules
+- [Quick Start](docs/quick-start.md) - A complete SQLite program, migrations, and the runnable examples
+- [Configuration](docs/configuration.md) - Connecting, pool and driver options, pinned sessions, and environment variables
+- [Databases](docs/databases.md) - Backend detection, several databases at once, type mappings, and backend differences
+- [Models](docs/models.md) - Model definition and attributes, with CRUD, validation, callbacks, soft deletes, typed columns, encrypted fields and tokenization in the pages under it
+- [Queries](docs/queries.md) - The query builder, with advanced SQL, JSON and arrays, full-text search, raw SQL and the query cache in the pages under it
 - [Relations](docs/relations.md) - Field-declared relations, attachments, translations, and runtime relation wrappers
 - [Entity Manager](docs/entity-manager.md) - Persistence-context identity map, aggregate synchronization helpers, and managed entity lifecycle operations
-- [Migrations](docs/migrations.md) - Schema builder column types, migration authoring, and schema sync guidance
+- [Transactions](docs/transactions.md) - Transactions, savepoints, and how model calls join them
+- [Migrations](docs/migrations.md) - Schema builder column types and migration authoring, with seeding and schema sync on their own pages
+- [Errors](docs/errors.md) - Error variants, database failure kinds, retries, and answering a request
+- [Logging and Profiling](docs/profiling.md) - Query debugging, query logging, global timing, manual reports, and query analysis
 - [Project Rules](docs/project-rules.md) - Opt-in limits on models and queries, written in `tideorm.toml`, with per-model exceptions
+- [Testing](docs/testing.md) - Testing an application built on TideORM, and TideORM's own suites
+- [Benchmarking](docs/benchmarking.md) - Benchmark target matrix, PostgreSQL setup, feature-gated bench commands, and Criterion baseline workflow
 
 ## Ecosystem
 
@@ -360,7 +368,7 @@ cargo test --test sqlite_ci_smoke_test --features "sqlite runtime-tokio" --no-de
 
 The backends do not share gate semantics: SQLite is opt-out (`SKIP_SQLITE_TESTS`), MySQL is opt-in (`RUN_MYSQL_TESTS` or `MYSQL_DATABASE_URL`, overridden by `SKIP_MYSQL_TESTS`), so is MariaDB (the same with `MARIADB`), and PostgreSQL is opt-in as well (`TEST_DATABASE_URL`, `POSTGRESQL_DATABASE_URL` or `RUN_POSTGRES_TESTS`, overridden by `SKIP_POSTGRES_TESTS`). See [CONTRIBUTING.md](CONTRIBUTING.md#test-database-environment-variables) for the full variable table.
 
-See [docs/getting-started.md](docs/getting-started.md#testing) for more.
+See [docs/testing.md](docs/testing.md#testing-tideorm-itself) for more.
 
 ## Benchmarking
 

@@ -30,8 +30,9 @@ use super::state::{RelationState, relation_serde};
 /// pub roles: HasManyThrough<Role, UserRole>,
 /// ```
 ///
-/// `pivot`, `foreign_key` and `related_key` are all required — the derive
-/// rejects the field otherwise. `local_key` and `owner_key` default to `"id"`.
+/// `foreign_key` and `related_key` are required — the derive rejects the field
+/// otherwise. `pivot` defaults to the `Pivot` model's table, and `local_key`
+/// and `owner_key` to `"id"`.
 ///
 /// # Duplicate pivot rows
 ///

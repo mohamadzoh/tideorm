@@ -132,10 +132,10 @@ fn self_ref_tree_sql_collapses_cyclic_duplicates_to_one_row_per_node() {
     .unwrap();
 
     assert!(
-        sql.contains("MIN(\"tide_tree\".\"depth\") AS \"depth\""),
+        sql.contains("MIN(\"walk\".\"depth\") AS \"depth\""),
         "a cycle in the foreign key must not repeat a node once per level: {sql}"
     );
-    assert!(sql.contains("GROUP BY \"tide_tree\".\"pk\""), "{sql}");
+    assert!(sql.contains("GROUP BY \"walk\".\"pk\""), "{sql}");
     assert!(
         sql.contains(") \"result_tree\" ON \"result_node\".\"id\" = \"result_tree\".\"pk\""),
         "{sql}"
@@ -158,7 +158,7 @@ fn self_ref_tree_sql_matches_every_column_of_a_composite_key() {
         "{sql}"
     );
     assert!(
-        sql.contains("GROUP BY \"tide_tree\".\"pk\", \"tide_tree\".\"pk_2\""),
+        sql.contains("GROUP BY \"walk\".\"pk\", \"walk\".\"pk_2\""),
         "{sql}"
     );
     assert!(

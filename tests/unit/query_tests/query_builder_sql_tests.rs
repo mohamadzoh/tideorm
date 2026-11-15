@@ -521,7 +521,7 @@ fn test_build_select_sql_with_params_parameterizes_postgres_json_predicates() {
 
     assert!(sql.contains("(\"data\")::jsonb @> $1"));
     assert!(sql.contains("(\"data\")::jsonb ? $2"));
-    assert!(sql.contains("(\"data\")::jsonb @? ($3::jsonpath)"));
+    assert!(sql.contains("jsonb_path_exists((\"data\")::jsonb, ($3::jsonpath), '{}', TRUE)"));
     assert!(!sql.contains("admin'"));
     assert!(!sql.contains("unsafe'key"));
     assert_eq!(params.len(), 3);

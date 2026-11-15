@@ -300,7 +300,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
     }
 
     /// On PostgreSQL, which stores `i8`/`u8` in a SMALLINT, `u16` in an
-    /// INTEGER and `u32`/`u64` in a BIGINT, `expression` kept within the
+    /// INT4 and `u32`/`u64` in a BIGINT, `expression` kept within the
     /// field's range, as the assignment rounds it, so the model can still read
     /// the row: anything else fails the whole statement, by casting text that
     /// names the column and the value to BIGINT. NULL stays NULL.

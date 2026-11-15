@@ -452,6 +452,12 @@ impl ConnectionRef {
         self.executor().get_database_backend()
     }
 
+    /// The server the statements run on, as it said when the connection
+    /// opened.
+    pub(crate) fn server(&self) -> Option<crate::config::DatabaseServer> {
+        self.executor().get_database_server()
+    }
+
     /// The identity of the pool this connection's statements run on; a
     /// session lent its pool's has that one.
     pub(crate) fn identity(&self) -> u64 {

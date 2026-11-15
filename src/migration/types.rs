@@ -14,7 +14,7 @@ pub use crate::orm::sql_builder::StringLen;
 ///
 /// PostgreSQL has no unsigned integers, so each unsigned type lands on the
 /// narrowest signed type that holds all its values (`u8` on `SMALLINT`, `u16`
-/// on `INTEGER`, `u32` on `BIGINT`); a `u64` lands on `BIGINT` too, so one past
+/// on `INT4`, `u32` on `BIGINT`); a `u64` lands on `BIGINT` too, so one past
 /// `i64::MAX` is refused when it is bound. MySQL has native unsigned integers
 /// and no arrays, which it stores as `JSON`, and three renderings avoid its
 /// defaults that silently lose data: text and binary are `LONGTEXT`/`LONGBLOB`
@@ -64,7 +64,8 @@ fn postgres_sql(column_type: &ColumnType) -> String {
         | ColumnType::SmallInteger
         | ColumnType::TinyUnsigned
         | ColumnType::Year => "SMALLINT".to_string(),
-        ColumnType::Integer | ColumnType::SmallUnsigned => "INTEGER".to_string(),
+        // `INT4`, not `INTEGER`, which CockroachDB reads as a 64-bit integer.
+        ColumnType::Integer | ColumnType::SmallUnsigned => "INT4".to_string(),
         ColumnType::BigInteger | ColumnType::Unsigned | ColumnType::BigUnsigned => {
             "BIGINT".to_string()
         }

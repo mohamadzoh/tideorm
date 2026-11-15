@@ -132,7 +132,7 @@ impl TideConfig {
     ///
     /// `T` is a model type (`models::<User>()`) or a tuple of model types
     /// (`models::<(User, Post)>()`). Registration is what makes a model visible
-    /// to schema sync and schema export; use
+    /// to schema sync; use
     /// [`auto_models`](TideConfig::auto_models) to discover all linked models
     /// instead.
     #[must_use]

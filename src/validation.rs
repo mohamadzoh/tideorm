@@ -219,7 +219,7 @@ pub enum ValidationRule {
     RangeExact(String, String),
     /// Must match a regular expression pattern
     Regex(String),
-    /// Must contain only letters (a-zA-Z)
+    /// Must contain only letters, of any alphabet
     Alpha,
     /// Must contain only letters and numbers
     Alphanumeric,

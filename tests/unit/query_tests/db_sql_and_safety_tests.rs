@@ -206,7 +206,7 @@ fn test_json_path_exists_binds_the_path() {
             false
         ),
         Some((
-            "CASE WHEN \"data\" IS NOT NULL THEN COALESCE((\"data\")::jsonb @? ($1::jsonpath), FALSE) END"
+            "CASE WHEN \"data\" IS NOT NULL THEN COALESCE(jsonb_path_exists((\"data\")::jsonb, ($1::jsonpath), '{}', TRUE), FALSE) END"
                 .to_string(),
             "strict $.\"user\".\"name\"".to_string()
         ))
@@ -277,7 +277,7 @@ fn test_json_path_not_exists_negates_the_path_test_and_binds_the_path() {
 
     assert!(
         sql.ends_with(
-            "WHERE NOT (CASE WHEN \"data\" IS NOT NULL THEN COALESCE((\"data\")::jsonb @? ($1::jsonpath), FALSE) END)"
+            "WHERE NOT (CASE WHEN \"data\" IS NOT NULL THEN COALESCE(jsonb_path_exists((\"data\")::jsonb, ($1::jsonpath), '{}', TRUE), FALSE) END)"
         ),
         "{sql}"
     );

@@ -2,8 +2,8 @@
 //! `support/integration_parity.rs`; those of the server backends, in
 //! `support/review_backend.rs`; and below, raw JSON decoding of PostgreSQL's
 //! own types, native array columns, a `NULLS NOT DISTINCT` upsert, the
-//! closing of statements a full statement cache evicts, and a batch
-//! `coalesce` on `json` and `jsonb` columns.
+//! closing of statements a full statement cache evicts, a batch `coalesce`
+//! on `json` and `jsonb` columns, and the width of a migration's integers.
 //!
 //! Opt-in: set `RUN_POSTGRES_TESTS`, `TEST_DATABASE_URL` or
 //! `POSTGRESQL_DATABASE_URL`; `SKIP_POSTGRES_TESTS` turns them off again. Once
@@ -133,28 +133,36 @@ async fn raw_json_preserves_postgres_nonfinite_float_arrays() {
     if !backend::connect().await {
         return;
     }
+    let matrix = !parity::skip_on(
+        &[tideorm::config::DatabaseServer::CockroachDb],
+        "multidimensional array",
+    );
     let db = tideorm::require_db().unwrap();
     let rows = db
-        .query_raw_json(
+        .query_raw_json(&format!(
             "SELECT ARRAY[1.5::real, 'NaN', 'Infinity', '-Infinity'] AS reals, \
                 ARRAY[1.5::double precision, 'NaN', 'Infinity', '-Infinity'] AS doubles, \
                 ARRAY[NULL, 'NaN', 'Infinity', '-Infinity']::double precision[] AS nullable, \
-                ARRAY[[1.5::real, 'NaN'], ['Infinity'::real, '-Infinity']] AS matrix, \
-                ARRAY[]::double precision[] AS empty, NULL::real[] AS absent",
-        )
+                {}ARRAY[]::double precision[] AS empty, NULL::real[] AS absent",
+            if matrix {
+                "ARRAY[[1.5::real, 'NaN'], ['Infinity'::real, '-Infinity']] AS matrix, "
+            } else {
+                ""
+            }
+        ))
         .await
         .unwrap();
-    assert_eq!(
-        rows,
-        vec![serde_json::json!({
-            "reals": [1.5, "NaN", "inf", "-inf"],
-            "doubles": [1.5, "NaN", "inf", "-inf"],
-            "nullable": [null, "NaN", "inf", "-inf"],
-            "matrix": [[1.5, "NaN"], ["inf", "-inf"]],
-            "empty": [],
-            "absent": null
-        })]
-    );
+    let mut expected = serde_json::json!({
+        "reals": [1.5, "NaN", "inf", "-inf"],
+        "doubles": [1.5, "NaN", "inf", "-inf"],
+        "nullable": [null, "NaN", "inf", "-inf"],
+        "empty": [],
+        "absent": null
+    });
+    if matrix {
+        expected["matrix"] = serde_json::json!([[1.5, "NaN"], ["inf", "-inf"]]);
+    }
+    assert_eq!(rows, vec![expected]);
 }
 
 #[tideorm::model(table = "test_array_documents")]
@@ -248,7 +256,12 @@ struct NullsNotDistinctContact {
 /// updates it rather than failing on a plain insert.
 #[tokio::test]
 async fn an_upsert_follows_a_nulls_not_distinct_constraint() {
-    if !backend::connect().await {
+    if !backend::connect().await
+        || parity::skip_on(
+            &[tideorm::config::DatabaseServer::CockroachDb],
+            "NULLS NOT DISTINCT",
+        )
+    {
         return;
     }
     Database::execute("DROP TABLE IF EXISTS test_nulls_not_distinct_contacts")
@@ -383,4 +396,52 @@ async fn a_batch_coalesce_fills_json_and_jsonb_columns() {
     Database::execute("DROP TABLE test_coalesced_documents")
         .await
         .expect("failed to drop test_coalesced_documents");
+}
+
+/// A migration's integers keep their width on every server: CockroachDB reads
+/// a bare `INT` or `SERIAL` as 64-bit, so migrations write `INT4`/`SERIAL4`,
+/// and its connections leave `default_int_size` at 8, which at 4 capped every
+/// sequence, `id()`'s too, at 2^31 - 1.
+#[tokio::test]
+async fn migration_integers_keep_their_width() {
+    if !backend::connect().await {
+        return;
+    }
+    parity::fresh_table("width_small_keys", |t| {
+        t.increments("id");
+        t.integer("score");
+    })
+    .await;
+    parity::fresh_table("width_big_keys", |t| {
+        t.id();
+    })
+    .await;
+
+    let db = tideorm::require_db().expect("database should be available");
+    for (table, expected) in [
+        (
+            "width_small_keys",
+            &[("id", "integer"), ("score", "integer")][..],
+        ),
+        ("width_big_keys", &[("id", "bigint")]),
+    ] {
+        let columns = db.catalog().columns(table).await.expect("columns read");
+        let columns: Vec<_> = columns
+            .iter()
+            .map(|column| (column.name.as_str(), column.data_type.as_str()))
+            .collect();
+        assert_eq!(columns, expected, "{table}");
+    }
+
+    let sequence = Database::raw_json(
+        "SELECT CAST(maximum_value AS TEXT) AS maximum FROM information_schema.sequences \
+         WHERE sequence_name = 'width_big_keys_id_seq'",
+    )
+    .await
+    .expect("sequence read");
+    assert_eq!(sequence[0]["maximum"], "9223372036854775807");
+
+    Database::execute("DROP TABLE width_small_keys, width_big_keys")
+        .await
+        .expect("drop failed");
 }

@@ -18,10 +18,11 @@ use super::json_rows::ColumnTypeLookup;
 //   no receiver to honor.
 // - `query_raw`, `exec_raw` and `query_raw_json` (with their `_with_params`
 //   forms) are the instance equivalents, for code that holds a specific handle.
-//   Like every other *executing* method on `Database`, an enclosing transaction
-//   scope still wins over the handle stored in `self`, so a statement issued
-//   inside `Database::transaction` joins that transaction rather than opening a
-//   second, independent one on `self`'s pool. Metadata is the exception:
+//   Like every other *executing* method on `Database`, they join the innermost
+//   enclosing transaction opened on `self`'s own pool, so a statement issued
+//   inside `Database::transaction` does not open a second, independent one
+//   there; a transaction on another database is passed over, and with none
+//   `self`'s own connection runs it. Metadata is the exception:
 //   `ping` — like `backend` — answers for the handle it was called on, because a
 //   question about a specific connection cannot be answered by another one.
 //
@@ -77,9 +78,10 @@ impl Database {
 
     /// Execute a raw SQL query on this handle and return all results
     ///
-    /// The instance form of [`Database::raw`]. An enclosing
-    /// [`Database::transaction`] scope still takes precedence over `self`, so
-    /// the statement joins that transaction instead of opening a second one.
+    /// The instance form of [`Database::raw`]. Inside a
+    /// [`Database::transaction`] opened on `self`'s pool, the statement joins
+    /// that transaction instead of opening a second one; a transaction on
+    /// another database does not take it.
     pub async fn query_raw<T: crate::model::Model>(&self, sql: &str) -> Result<Vec<T>> {
         self.query_raw_with_params(sql, Vec::new()).await
     }

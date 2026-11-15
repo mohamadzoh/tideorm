@@ -210,6 +210,9 @@ async fn postgres_columns(
     // upcasing it would turn a quoted mixed-case enum type such as
     // `"MyStatus"` into an identifier that does not exist.
     let mut partition_columns = Vec::new();
+    // The sequence join names the table with `quote_ident`, which passes a
+    // NULL through: YugabyteDB's batched nested loop also evaluates the join
+    // key for the NULL slots of a part-filled batch, where `format('%I')` fails.
     let columns = query(
         conn,
         DatabaseType::Postgres,
@@ -228,12 +231,18 @@ async fn postgres_columns(
                     pg_catalog.pg_get_expr(d.adbin, d.adrelid) AS column_default,
                     a.attidentity::text AS identity,
                     a.attgenerated::text AS generated,
+                    CASE WHEN a.attgenerated <> '' AND c.relispartition THEN
+                        (SELECT pg_catalog.pg_get_expr(pd.adbin, pd.adrelid)
+                         FROM pg_catalog.pg_inherits i
+                         JOIN pg_catalog.pg_attribute pa ON pa.attrelid = i.inhparent AND pa.attname = a.attname
+                         JOIN pg_catalog.pg_attrdef pd ON pd.adrelid = pa.attrelid AND pd.adnum = pa.attnum
+                         WHERE i.inhrelid = c.oid) END AS parent_generation,
                     CASE WHEN a.attcollation <> 0 THEN
                         format('%I.%I', cn.nspname, co.collname) END AS collation,
                     CASE WHEN a.attidentity <> '' THEN
                         format('GENERATED %s AS IDENTITY (SEQUENCE NAME %s START WITH %s INCREMENT BY %s MINVALUE %s MAXVALUE %s CACHE %s %s)',
                             CASE a.attidentity WHEN 'a' THEN 'ALWAYS' ELSE 'BY DEFAULT' END,
-                            pg_catalog.pg_get_serial_sequence(format('%I.%I', ns.nspname, c.relname), a.attname),
+                            pg_catalog.pg_get_serial_sequence(quote_ident(ns.nspname) || '.' || quote_ident(c.relname), a.attname),
                             seq.seqstart, seq.seqincrement, seq.seqmin, seq.seqmax, seq.seqcache,
                             CASE WHEN seq.seqcycle THEN 'CYCLE' ELSE 'NO CYCLE' END)
                     END AS identity_definition
@@ -245,7 +254,7 @@ async fn postgres_columns(
              LEFT JOIN pg_catalog.pg_attrdef d
                  ON d.adrelid = a.attrelid AND d.adnum = a.attnum
              LEFT JOIN pg_catalog.pg_sequence seq ON a.attidentity <> '' AND seq.seqrelid =
-                 pg_catalog.pg_get_serial_sequence(format('%I.%I', ns.nspname, c.relname), a.attname)::regclass
+                 pg_catalog.pg_get_serial_sequence(quote_ident(ns.nspname) || '.' || quote_ident(c.relname), a.attname)::regclass
              WHERE ns.nspname = $1 AND c.relname = $2
              AND a.attnum > 0 AND NOT a.attisdropped AND (a.attislocal OR c.relispartition)
              ORDER BY a.attnum",
@@ -269,7 +278,9 @@ async fn postgres_columns(
         };
         if let (Some(kind), Some(expression)) = (generation, &default) {
             sql_type = format!("{sql_type} GENERATED ALWAYS AS ({expression}) {kind}");
-            if partition {
+            // A partition takes its parent's expression by itself; one of its
+            // own (PostgreSQL 16+) is restated, which older servers refuse.
+            if partition && get::<Option<String>>(row, "parent_generation")?.as_ref() != Some(expression) {
                 partition_columns.push(format!("{} WITH OPTIONS GENERATED ALWAYS AS ({expression}) {kind}",
                     quote_ident(DatabaseType::Postgres, &get::<String>(row, "column_name")?)));
             }

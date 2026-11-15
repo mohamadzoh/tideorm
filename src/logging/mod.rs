@@ -29,8 +29,8 @@
 //! Read once, the first time the logger is used; settings made in code
 //! afterwards take precedence.
 //!
-//! - `TIDE_LOG_QUERIES=true` - Print every statement: query-builder and migration ones before
-//!   they run, the typed CRUD paths and raw SQL once they complete
+//! - `TIDE_LOG_QUERIES=true` - Print every statement: query-builder ones before they run, the
+//!   rest (typed CRUD, raw SQL, migration DDL) once they complete
 //! - `TIDE_LOG_LEVEL=debug` - Enable logging at this level (off, error, warn, info, debug, trace)
 //! - `TIDE_SLOW_QUERY_MS=100` - Slow query threshold in milliseconds
 //!

@@ -1,7 +1,7 @@
 //! Cache invalidations an open transaction replays when it commits, and the
 //! in-memory state it restores if it does not.
 //!
-//! A write invalidates the cached reads of its table at once, but until the
+//! A write invalidates the cached reads of its database at once, but until the
 //! transaction commits, every other connection still reads the rows it
 //! replaced. A cached read made meanwhile would serve them for its whole TTL,
 //! so each transaction records what its writes invalidated and invalidates it

@@ -346,6 +346,8 @@ pub(crate) fn build_self_ref_tree_sql<E: Model>(
     let tree = quote_ident(db_type, "tree");
     let result = quote_ident(db_type, "result_node");
     let result_tree = quote_ident(db_type, "result_tree");
+    // TiDB cannot name an unaliased recursive CTE in a derived table's GROUP BY
+    let walk = quote_ident(db_type, "walk");
     let pk_aliases: Vec<String> = (1..=primary_keys.len())
         .map(|position| match position {
             1 => quote_ident(db_type, "pk"),
@@ -364,7 +366,7 @@ pub(crate) fn build_self_ref_tree_sql<E: Model>(
     };
     let grouped_keys = pk_aliases
         .iter()
-        .map(|alias| format!("{cte}.{alias}"))
+        .map(|alias| format!("{walk}.{alias}"))
         .collect::<Vec<_>>();
     let result_join = primary_keys
         .iter()
@@ -421,8 +423,8 @@ pub(crate) fn build_self_ref_tree_sql<E: Model>(
          SELECT {result_columns} \
          FROM {table} {result} \
          INNER JOIN ( \
-         SELECT {grouped_select}, MIN({cte}.{depth_alias}) AS {depth_alias} \
-         FROM {cte} \
+         SELECT {grouped_select}, MIN({walk}.{depth_alias}) AS {depth_alias} \
+         FROM {cte} {walk} \
          GROUP BY {group_by} \
          ) {result_tree} ON {result_join} \
          ORDER BY {result_tree}.{depth_alias}",
