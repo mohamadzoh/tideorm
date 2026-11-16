@@ -2,6 +2,7 @@
 //! a multi-row insert returns back in the caller's order.
 
 use crate::config::DatabaseType;
+use crate::orm::sql_builder::ValueKey;
 use std::collections::{HashMap, HashSet};
 use std::iter::Peekable;
 
@@ -46,11 +47,10 @@ enum Order {
     ByClientKey(Vec<ClientKey>),
 }
 
-/// The key a model sets itself: its column values, and their text to match a
-/// row read back against.
+/// The key a model sets itself: its column values, compared as [`ValueKey`]s
+/// to match a row read back against.
 struct ClientKey {
-    text: String,
-    values: Vec<Value>,
+    values: Vec<ValueKey>,
 }
 
 /// Insert `models` and return them as stored, in the order they were passed.
@@ -271,14 +271,13 @@ fn client_keys<M: InternalModel>(
                 .iter()
                 .all(|value| returns_exactly(value, backend))
                 .then(|| ClientKey {
-                    text: format!("{values:?}"),
-                    values,
+                    values: values.into_iter().map(ValueKey::new).collect(),
                 })
         })
         .collect::<Option<Vec<_>>>()?;
     let mut seen = HashSet::with_capacity(keys.len());
     keys.iter()
-        .all(|key| seen.insert(key.text.as_str()))
+        .all(|key| seen.insert(key.values.as_slice()))
         .then_some(keys)
 }
 
@@ -293,29 +292,29 @@ fn returns_exactly(value: &Value, backend: DatabaseType) -> bool {
     }
 }
 
-/// The text of `row`'s key, as [`ClientKey::text`] renders a sent one.
-fn stored_key<M: InternalModel>(row: &M) -> String {
-    let values: Vec<Value> = M::primary_key_columns()
+/// `row`'s key, as [`ClientKey::values`] holds a sent one.
+fn stored_key<M: InternalModel>(row: &M) -> Vec<ValueKey> {
+    M::primary_key_columns()
         .into_iter()
-        .map(|column| row.get(column))
-        .collect();
-    format!("{values:?}")
+        .map(|column| ValueKey::new(row.get(column)))
+        .collect()
 }
 
 /// Put `rows` in the order of `keys`, the keys of the models that were
 /// inserted, failing if a row is missing or was not among them.
 fn order_by_keys<M: InternalModel>(rows: Vec<M>, keys: &[ClientKey]) -> Result<Vec<M>> {
-    let mut positions: HashMap<&str, usize> = keys
+    let mut positions: HashMap<&[ValueKey], usize> = keys
         .iter()
         .enumerate()
-        .map(|(position, key)| (key.text.as_str(), position))
+        .map(|(position, key)| (key.values.as_slice(), position))
         .collect();
     let mut ordered: Vec<Option<M>> = std::iter::repeat_with(|| None).take(keys.len()).collect();
     for row in rows {
         let key = stored_key::<M>(&row);
-        let position = positions.remove(key.as_str()).ok_or_else(|| {
+        let position = positions.remove(key.as_slice()).ok_or_else(|| {
+            let values: Vec<&Value> = key.iter().map(ValueKey::value).collect();
             Error::query(format!(
-                "insert_all read back a row under a key it did not insert: {key}"
+                "insert_all read back a row under a key it did not insert: {values:?}"
             ))
         })?;
         ordered[position] = Some(row);
@@ -423,14 +422,18 @@ where
 
     let columns = M::primary_key_columns();
     let condition = match columns.as_slice() {
-        [column] => Condition::all()
-            .add(column.is_in(keys.iter().filter_map(|key| key.values.first().cloned()))),
+        [column] => Condition::all().add(
+            column.is_in(
+                keys.iter()
+                    .filter_map(|key| Some(key.values.first()?.value().clone())),
+            ),
+        ),
         _ => keys.iter().fold(Condition::any(), |any, key| {
             let matches = columns
                 .iter()
                 .zip(&key.values)
                 .fold(Condition::all(), |all, (column, value)| {
-                    all.add(column.eq(value.clone()))
+                    all.add(column.eq(value.value().clone()))
                 });
             any.add(matches)
         }),

@@ -14,7 +14,9 @@ use super::{EntityState, FieldChanges, ManagedEntry, merge_fields};
 /// put back if the flush's transaction does not commit.
 struct FlushUndo<T> {
     fields: Option<FieldChanges<T>>,
-    snapshot: (Option<T>, Option<T>),
+    /// The snapshot before the flush. The one it left is the row it wrote,
+    /// `fields`' `after`, and none for a removal.
+    snapshot: Option<T>,
     persisted_key: (Option<String>, Option<String>),
     identity_key: (Option<String>, Option<String>),
     state: (EntityState, EntityState),
@@ -66,7 +68,7 @@ where
         self.evict(entity_manager);
         let undo = FlushUndo {
             fields: None,
-            snapshot: (snapshot, None),
+            snapshot,
             persisted_key: (persisted_key, None),
             identity_key: (identity_key, None),
             state: (state, EntityState::Detached),
@@ -128,11 +130,7 @@ where
             let mut stored = saved.clone();
             let fields = merge_fields(&mut stored, &*live, &current, &saved)?;
             *live = stored;
-            FieldChanges {
-                fields,
-                before: current,
-                after: saved.clone(),
-            }
+            fields
         };
         let snapshot = self.snapshot.write().replace(saved.clone());
         let persisted_key = std::mem::replace(&mut *self.persisted_key.write(), next_key.clone());
@@ -160,8 +158,12 @@ where
             }
         }
         let undo = FlushUndo {
-            fields: Some(fields),
-            snapshot: (snapshot, Some(saved)),
+            fields: Some(FieldChanges {
+                fields,
+                before: current,
+                after: saved,
+            }),
+            snapshot,
             persisted_key: (persisted_key, next_key),
             identity_key: (identity_before, self.identity_key.read().clone()),
             state: (state_before, *state),
@@ -192,7 +194,7 @@ where
             return;
         };
         let mut state = self.state.write();
-        if let Some(fields) = undo.fields {
+        if let Some(fields) = &undo.fields {
             let mut current = self.current.write();
             // The entry took the stored row's relation wrappers, with the
             // rows the flush wrote and the keys a save diffs against; unless
@@ -204,12 +206,13 @@ where
         }
         {
             let mut snapshot = self.snapshot.write();
-            let unchanged = match (snapshot.as_ref(), undo.snapshot.1.as_ref()) {
+            let written = undo.fields.as_ref().map(|fields| &fields.after);
+            let unchanged = match (snapshot.as_ref(), written) {
                 (Some(now), Some(written)) => now.same_columns(written),
                 (now, written) => now.is_none() && written.is_none(),
             };
             if unchanged {
-                *snapshot = undo.snapshot.0;
+                *snapshot = undo.snapshot;
             }
         }
         {

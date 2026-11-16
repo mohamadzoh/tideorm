@@ -503,6 +503,27 @@ fn test_change_column_writes_the_current_time_as_precise_as_the_new_type() {
 }
 
 #[test]
+fn test_change_column_leaves_the_current_time_out_of_another_type() {
+    let create_table = "CREATE TABLE `events` (
+  `seen` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `day` datetime NOT NULL DEFAULT '2000-01-01 00:00:00' ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB";
+    let mut builder = AlterTableBuilder::new("events", DatabaseType::MySQL);
+    builder
+        .change_column("seen", ColumnType::BigInteger)
+        .change_column("day", ColumnType::String(StringLen::N(32)));
+    builder.keep_column_attributes(create_table);
+
+    assert_eq!(
+        builder.build().unwrap(),
+        [
+            "ALTER TABLE `events` MODIFY COLUMN `seen` BIGINT NOT NULL",
+            "ALTER TABLE `events` MODIFY COLUMN `day` VARCHAR(32) NOT NULL DEFAULT '2000-01-01 00:00:00'",
+        ]
+    );
+}
+
+#[test]
 fn test_add_column_writes_the_current_time_as_precise_as_its_type() {
     let mut builder = AlterTableBuilder::new("events", DatabaseType::MySQL);
     builder

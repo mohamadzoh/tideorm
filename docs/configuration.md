@@ -197,6 +197,13 @@ The connection closes with `close()` or once the last clone of the handle drops,
 
 `db.ping().await?` checks that the handle's own connection answers, even inside a transaction opened on another database; any failure is an `Error::Connection`.
 
+`db.pool_status()?` reports what the pool holds now, to export as metrics or show in a health endpoint: `size` (open connections), `idle`, `max_connections`, and `in_use()`. A pinned session's or a transaction's handle answers with the pool it came from.
+
+```rust,ignore
+let status = db.pool_status()?;
+metrics::gauge!("db_connections_in_use").set(status.in_use() as f64);
+```
+
 `db.close().await?` waits for the connections in use to come back and closes the pool (SQLite then releases its file). Every clone of the handle shares the pool, so statements on any of them fail afterwards. It fails on a transaction's handle, which belongs to its scope.
 
 ## Database Types

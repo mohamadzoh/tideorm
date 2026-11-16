@@ -138,8 +138,14 @@ fn typed_value(value: &serde_json::Value, column_type: &ColumnType) -> Option<Va
         (ColumnType::Decimal(_) | ColumnType::Money(_), Json::Number(number)) => {
             parse_decimal(&number.to_string()).map(Value::from)
         }
+        // A fraction (a `Decimal` filter reads as its text) compares exactly
+        // as a decimal: as text, PostgreSQL refuses `integer > text`.
         (column_type, Json::String(text)) if is_integer(column_type) => {
-            text.trim().parse::<i64>().ok().map(Value::from)
+            let text = text.trim();
+            text.parse::<i64>()
+                .ok()
+                .map(Value::from)
+                .or_else(|| parse_decimal(text).map(Value::from))
         }
         (ColumnType::Float | ColumnType::Double, Json::String(text)) => {
             text.trim().parse::<f64>().ok().map(Value::from)

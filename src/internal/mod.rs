@@ -460,15 +460,16 @@ where
         .map(|row| row.finish_load(connection)))
 }
 
-/// The decoded `rows` read through `connection`, loaded, each remembered as
-/// read from that connection's pool.
+/// The decoded `rows` read through `connection`, loaded as
+/// [`finish_load`](InternalModel::finish_load) loads one, each remembered as
+/// read from that connection's pool, all under one lock.
 pub(crate) fn models_read_through<M: crate::model::Model>(
     connection: &crate::database::ConnectionRef,
     rows: impl IntoIterator<Item = M>,
 ) -> Vec<M> {
-    rows.into_iter()
-        .map(|row| row.finish_load(connection))
-        .collect()
+    let mut models: Vec<M> = rows.into_iter().map(M::__rebuild_relations).collect();
+    crate::model::finish_loads(&mut models, connection);
+    models
 }
 
 #[cfg(test)]

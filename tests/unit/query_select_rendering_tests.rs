@@ -247,6 +247,70 @@ fn test_lock_for_update_closes_the_statement_and_survives_a_fragment() {
     assert!(sql.ends_with(" FOR UPDATE"), "{sql}");
 }
 
+#[test]
+fn test_lock_options_render_in_each_dialect() {
+    let rendered = |query: crate::query::QueryBuilder<SelectRenderUser>, db_type| {
+        query
+            .limit(1)
+            .build_select_sql_with_params_for_db(db_type)
+            .unwrap()
+            .0
+    };
+    let query = SelectRenderUser::query;
+    for (query, db_type, tail) in [
+        (
+            query().lock_for_update().skip_locked(),
+            DatabaseType::Postgres,
+            " LIMIT 1 FOR UPDATE SKIP LOCKED",
+        ),
+        (
+            query().lock_for_share().nowait(),
+            DatabaseType::Postgres,
+            " LIMIT 1 FOR SHARE NOWAIT",
+        ),
+        (
+            query().lock_for_share().skip_locked(),
+            DatabaseType::MySQL,
+            " LIMIT 1 FOR SHARE SKIP LOCKED",
+        ),
+        (
+            query().nowait().lock_for_share(),
+            DatabaseType::MariaDB,
+            " LIMIT 1 LOCK IN SHARE MODE NOWAIT",
+        ),
+        // An exclusive lock wins, whichever is called first.
+        (
+            query().lock_for_update().lock_for_share(),
+            DatabaseType::Postgres,
+            " LIMIT 1 FOR UPDATE",
+        ),
+        (
+            query().lock_for_share().lock_for_update(),
+            DatabaseType::Postgres,
+            " LIMIT 1 FOR UPDATE",
+        ),
+        (
+            query().lock_for_share().skip_locked(),
+            DatabaseType::SQLite,
+            " LIMIT 1",
+        ),
+    ] {
+        let sql = rendered(query, db_type);
+        assert!(sql.ends_with(tail), "{db_type:?}: {sql}");
+    }
+
+    let error = query().skip_locked().validate().unwrap_err();
+    assert!(error.to_string().contains("lock_for_update()"), "{error}");
+
+    let fragment = query().lock_for_share().nowait().consolidate();
+    assert!(!fragment.is_empty());
+    let sql = rendered(
+        query().lock_for_update().apply(&fragment),
+        DatabaseType::Postgres,
+    );
+    assert!(sql.ends_with(" FOR UPDATE NOWAIT"), "{sql}");
+}
+
 /// The page size is written into the SQL and the offset bound after every
 /// other value, so each page of a paged query reuses one prepared statement.
 /// An offset without a limit takes each backend's way to write no limit.

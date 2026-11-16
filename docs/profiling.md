@@ -237,6 +237,20 @@ A `QuerySuggestion` has a `level` (`SuggestionLevel::Info`, `Warning` or `Critic
 
 The analyzer reads text; it does not ask the database for a plan. Run `EXPLAIN` through [Raw SQL](raw-sql.md) for that.
 
+## Tracing Spans
+
+Every statement runs inside a [`tracing`](https://docs.rs/tracing) span named `db.query` (transaction control, `BEGIN`, `COMMIT`, `ROLLBACK` and savepoints, does not, nor does the wait for a pool connection), at `DEBUG` under the target `tideorm::query`, so any subscriber sees it, and through `tracing-opentelemetry` it becomes a client span of your traces. Its fields follow OpenTelemetry's database conventions:
+
+| Field | Holds |
+|---|---|
+| `otel.kind` | `client` |
+| `db.system.name` | The server: `postgresql`, `mysql`, `mariadb`, `sqlite`, `cockroachdb`, `yugabytedb`, `tidb` or `vitess` |
+| `db.query.text` | The statement with markers (`$1`, `?`) for its bound values; what is written into the SQL itself stays (a raw statement's literals, a `LIMIT`, an integer `IN` list of more than 1,000 values). Empty for unprepared SQL (`exec_raw`, `Database::execute`, migration DDL), whose text can hold values |
+| `db.response.returned_rows` | The rows a statement returned or changed, once it succeeded |
+| `otel.status_code` | `ERROR` when it failed |
+
+A span opened by your code around the call, such as a request's, is its parent. Enable the target in the subscriber's filter, for instance `RUST_LOG=tideorm::query=debug` with `tracing_subscriber::EnvFilter`.
+
 ## Slow-Query Thresholds
 
 The logger and `GlobalProfiler` each keep their own slow-query threshold. Both start at `TIDE_SLOW_QUERY_MS`, or 100 ms, and a statement counts as slow at or above it. Change the logger's with the builder's `slow_query_threshold`, the profiler's with `GlobalProfiler::set_slow_threshold`. `ProfileReport::suggestions()` follows the profiler's.

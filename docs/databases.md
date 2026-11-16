@@ -240,6 +240,8 @@ The query builder, the model API and migrations work on every backend. These are
 | Full-text search | Yes | Yes | Yes | Yes (FTS5) |
 | Schema-qualified tables (`schema.table`) | Schemas | Databases | Databases | No |
 | `lock_for_update()` | Yes | Yes | Yes | Renders nothing: SQLite locks the whole database |
+| `lock_for_share()` | `FOR SHARE` | `FOR SHARE` | `LOCK IN SHARE MODE` | Renders nothing |
+| `skip_locked()`, `nowait()` | Yes | Yes | Yes (`SKIP LOCKED` from 10.6) | Render nothing |
 
 A clause a backend lacks fails the query with an error when it runs; TideORM never drops it or runs the query without it. `debug_for(DatabaseType::MySQL)` and `build_sql_preview_for(..)` show a query in another backend's dialect (see [Logging and Profiling](profiling.md)).
 

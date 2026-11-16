@@ -216,14 +216,17 @@ pub(super) fn restate_attributes(
         }
     }
 
+    // MySQL refuses the current time less or more precise than the column,
+    // and in a column of any other type, where `ON UPDATE` is refused too:
+    // a stored one is left out when the type changes to such a column.
+    let now = current_time_for(type_sql);
     let nullable = nullable.or(stored_nullable);
     let default = match default {
         Some(default) => default.clone(),
-        None => stored_default,
+        None => stored_default.filter(|stored| now.is_some() || !is_current_timestamp(stored)),
     }
     .filter(|default| nullable != Some(false) || !default.eq_ignore_ascii_case("NULL"));
-    // MySQL refuses the current time less or more precise than the column.
-    let now = current_time_for(type_sql);
+    let on_update = on_update.filter(|_| now.is_some());
     let timed = |value: String| match &now {
         Some(now) if is_current_timestamp(&value) => now.clone(),
         _ => value,

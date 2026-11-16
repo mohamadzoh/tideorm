@@ -118,6 +118,15 @@ impl<M: Model> QueryBuilder<M> {
     /// rejected here instead of being silently dropped from the WHERE clause.
     pub(crate) fn ensure_query_is_executable(&self) -> Result<()> {
         self.ensure_query_is_valid()?;
+        // TiDB parses `SKIP LOCKED` and ignores it, so every worker would get the same rows.
+        if self.clauses.lock_behavior == Some(crate::orm::sql_builder::LockBehavior::SkipLocked)
+            && self.current_db().ok().and_then(|db| db.server())
+                == Some(crate::config::DatabaseServer::TiDb)
+        {
+            return Err(Error::query(
+                "skip_locked(): TiDB has no SKIP LOCKED and would return the rows other transactions hold",
+            ));
+        }
         self.ensure_conditions_are_representable()?;
         self.ensure_query_follows_rules()
     }

@@ -9,7 +9,7 @@ pub use crate::callbacks::Callbacks;
 pub use crate::config::FileUrlGenerator;
 pub use crate::config::{Config, DatabaseServer, DatabaseType, PoolConfig, TideConfig};
 pub use crate::database::{AccessMode, IsolationLevel, SqliteTransactionMode, TransactionOptions};
-pub use crate::database::{Database, DatabaseBuilder, Transaction};
+pub use crate::database::{Database, DatabaseBuilder, PoolStatus, Transaction};
 pub use crate::database::{db, has_global_db, require_db};
 // The drivers' connection options, for `DatabaseBuilder` settings a URL does not name.
 #[cfg(feature = "mysql")]

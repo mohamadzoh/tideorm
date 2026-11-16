@@ -176,11 +176,11 @@ fn test_composite_primary_key_metadata_and_accessors() {
 fn test_original_value_resolves_field_and_column_names_and_rejects_unknown_ones() {
     crate::model::clear_dirty_snapshots();
 
-    crate::model::dirty_tracking::remember_model_from(
-        &CustomPrimaryKeyColumnModel {
+    crate::model::dirty_tracking::remember_models_from(
+        &[CustomPrimaryKeyColumnModel {
             id: 7,
             name: "Alice".to_string(),
-        },
+        }],
         None,
     );
     let changed = CustomPrimaryKeyColumnModel {

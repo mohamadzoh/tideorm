@@ -195,6 +195,21 @@ fn test_order_and_group_by_reject_sql_expressions_from_strings() {
         group_err.to_string().contains("unsafe GROUP BY column"),
         "unexpected error: {group_err}"
     );
+
+    // An alias belongs to the select list; written here it is not SQL.
+    for query in [
+        QueryBuilder::<QueryTestUser>::new().order_by("id AS x", Order::Asc),
+        QueryBuilder::<QueryTestUser>::new().order_by("id AS x DESC", Order::Desc),
+        QueryBuilder::<QueryTestUser>::new().group_by("id AS x"),
+    ] {
+        let error = query
+            .ensure_query_is_valid()
+            .expect_err("an aliased term must be refused");
+        assert!(
+            error.to_string().contains("unsafe"),
+            "unexpected error: {error}"
+        );
+    }
 }
 
 #[test]

@@ -5,6 +5,37 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.9] - 2026-11-16
+
+### Added
+
+- Row-lock options: `lock_for_share()` (`FOR SHARE`, MariaDB's `LOCK IN SHARE MODE`), and
+  `skip_locked()` and `nowait()` for either lock. A query with both locks takes the exclusive
+  one; an option without a lock fails the query, and so does `skip_locked()` on TiDB, which
+  ignores `SKIP LOCKED`. A `#[tideorm::scopes]` scope can no longer take one of these names,
+  which the builder's own method would shadow.
+- `Database::transaction_retrying(options, attempts, f)` runs a transaction again after a
+  deadlock, a serialization failure or a lock it could not take, with a short random backoff;
+  inside a transaction on the same pool it runs once, as a savepoint, leaving the options to the
+  enclosing transaction.
+- `Database::test_transaction(future)` runs a test in a transaction that always rolls back.
+- `Database::pool_status()` reports a pool's open, idle and largest number of connections
+  (`PoolStatus`).
+- Every statement, transaction control aside, runs in a `tracing` span `db.query` (target
+  `tideorm::query`, `DEBUG`) with OpenTelemetry's database fields: `db.system.name`, the
+  parameterized `db.query.text` (none for unprepared SQL), `db.response.returned_rows` and
+  `otel.status_code` (`tideorm-engine` 0.1.7).
+- TiDB's write conflict (error 9007) is a `SerializationFailure`, so `is_retryable()` is true
+  (`tideorm-driver-mysql` 0.1.7).
+
+### Changed
+
+- A pooled connection with nothing pending and no transaction open goes back to the pool as it
+  drops, so the next checkout finds it idle instead of opening another; reads no longer copy a
+  message's bytes, and MySQL reuses a prepared statement's column definitions
+  (`tideorm-driver-core` 0.1.4, `-postgres` 0.1.5, `-mysql` 0.1.7, `-sqlite` 0.1.3).
+- Requires tideorm-engine 0.1.7.
+
 ## [0.17.8] - 2026-11-15
 
 ### Added

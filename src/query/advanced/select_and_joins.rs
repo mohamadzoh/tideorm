@@ -1,5 +1,6 @@
 use super::*;
 use crate::columns::{IntoColumnName, IntoColumnNames, map_columns};
+use crate::orm::sql_builder::{LockBehavior, LockType};
 
 impl<M: Model> QueryBuilder<M> {
     /// Select specific columns.
@@ -143,7 +144,84 @@ impl<M: Model> QueryBuilder<M> {
     /// User::query().lock_for_update().validate().unwrap();
     /// ```
     pub fn lock_for_update(mut self) -> Self {
-        self.clauses.lock_for_update = true;
+        self.clauses.lock = Some(LockType::Update);
+        self
+    }
+
+    /// Lock the rows this query reads against changes until the transaction
+    /// ends, while other transactions may still read and share-lock them
+    /// (`SELECT ... FOR SHARE`, MariaDB's `LOCK IN SHARE MODE`).
+    ///
+    /// Use it to keep a row the transaction depends on, such as a parent it
+    /// is adding children to, from changing or being deleted under it.
+    /// [`lock_for_update()`](Self::lock_for_update) wins when both are
+    /// called. SQLite renders nothing, as for `lock_for_update()`. TiDB
+    /// refuses a shared lock unless its `tidb_enable_noop_functions` is on.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users")]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String }
+    /// User::query().where_eq("id", 1).lock_for_share().validate().unwrap();
+    /// ```
+    pub fn lock_for_share(mut self) -> Self {
+        self.clauses.lock.get_or_insert(LockType::Share);
+        self
+    }
+
+    /// Leave out the rows another transaction holds locked instead of waiting
+    /// for them (`... SKIP LOCKED`), with
+    /// [`lock_for_update()`](Self::lock_for_update) or
+    /// [`lock_for_share()`](Self::lock_for_share).
+    ///
+    /// Workers taking jobs from one table each get a different row:
+    ///
+    /// ```rust,ignore
+    /// let job = db.atomically(async {
+    ///     let Some(mut job) = Job::query()
+    ///         .where_eq("status", "pending")
+    ///         .order_asc("id")
+    ///         .lock_for_update()
+    ///         .skip_locked()
+    ///         .first()
+    ///         .await?
+    ///     else {
+    ///         return Ok(None);
+    ///     };
+    ///     job.status = "running".into();
+    ///     Ok(Some(job.update().await?))
+    /// }).await?;
+    /// ```
+    ///
+    /// Without a lock the query fails when it runs, and so it does on TiDB,
+    /// which ignores `SKIP LOCKED`. MariaDB takes it from 10.6. SQLite has no
+    /// row locks and renders nothing.
+    pub fn skip_locked(mut self) -> Self {
+        self.clauses.lock_behavior = Some(LockBehavior::SkipLocked);
+        self
+    }
+
+    /// Fail at once instead of waiting for a row another transaction holds
+    /// locked (`... NOWAIT`), with [`lock_for_update()`](Self::lock_for_update)
+    /// or [`lock_for_share()`](Self::lock_for_share). The error is a
+    /// [`LockNotAvailable`](crate::error::DbFailureKind::LockNotAvailable)
+    /// failure, which [`Error::is_retryable`](crate::Error::is_retryable)
+    /// counts as retryable.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users")]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String }
+    /// User::query().lock_for_update().nowait().validate().unwrap();
+    /// assert!(User::query().nowait().validate().is_err());
+    /// ```
+    ///
+    /// Without a lock the query fails when it runs. SQLite has no row locks
+    /// and renders nothing. CockroachDB takes no shared lock under
+    /// `SERIALIZABLE`, so with `lock_for_share()` it waits as a plain read
+    /// does.
+    pub fn nowait(mut self) -> Self {
+        self.clauses.lock_behavior = Some(LockBehavior::Nowait);
         self
     }
 

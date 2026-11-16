@@ -6,6 +6,7 @@ use super::advanced::HavingClause;
 use super::builder::DISTINCT_SELECT_MARKER;
 use super::structure::SubquerySelect;
 use super::{CTE, JoinClause, OrGroup, Order, UnionClause, WhereCondition, WindowFunction};
+use crate::orm::sql_builder::{LockBehavior, LockType};
 
 /// Every clause of a query: what a [`QueryBuilder`](super::QueryBuilder)
 /// holds besides its database, and all a
@@ -80,9 +81,11 @@ pub(crate) struct Clauses {
     pub(crate) include_trashed: bool,
     /// `only_trashed()`, which takes precedence over `include_trashed`.
     pub(crate) only_trashed: bool,
-    /// `lock_for_update()`. **Sticky**: merged clauses that lock make the
-    /// query lock.
-    pub(crate) lock_for_update: bool,
+    /// `lock_for_update()` or `lock_for_share()`. **Sticky**: merged clauses
+    /// that lock make the query lock, and an exclusive lock beats a shared one.
+    pub(crate) lock: Option<LockType>,
+    /// `skip_locked()` or `nowait()`. **Last-wins.**
+    pub(crate) lock_behavior: Option<LockBehavior>,
     /// Which project rules the query is held to. **Not merged**: a query
     /// keeps its own.
     pub(crate) rule_scope: crate::rules::RuleScope,
@@ -113,7 +116,8 @@ impl Clauses {
             && self.invalid_page.is_none()
             && !self.include_trashed
             && !self.only_trashed
-            && !self.lock_for_update
+            && self.lock.is_none()
+            && self.lock_behavior.is_none()
     }
 
     /// Whether `distinct()` was called.
@@ -191,7 +195,10 @@ impl Clauses {
             self.only_trashed = false;
         }
 
-        self.lock_for_update |= other.lock_for_update;
+        if self.lock != Some(LockType::Update) {
+            self.lock = other.lock.or(self.lock);
+        }
+        self.lock_behavior = other.lock_behavior.or(self.lock_behavior);
     }
 
     /// Append `other`'s OR groups, merging the group its `or_where_*` calls

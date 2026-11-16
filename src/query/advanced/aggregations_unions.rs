@@ -333,7 +333,7 @@ impl<M: Model> QueryBuilder<M> {
             || !self.clauses.ctes.is_empty()
             || self.clauses.limit_value.is_some()
             || self.clauses.offset_value.is_some()
-            || self.clauses.lock_for_update
+            || self.clauses.lock.is_some()
             || self.is_distinct()
     }
 

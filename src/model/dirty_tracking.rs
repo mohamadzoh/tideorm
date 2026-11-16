@@ -21,6 +21,8 @@ type Origin = Option<u64>;
 type Slot = (Origin, Option<Task>);
 /// Each field's value, by field name, shared so a reader copies no values.
 type SnapshotValues = Arc<HashMap<&'static str, Value>>;
+/// One row's baselines, by slot.
+type Slots = HashMap<Slot, SnapshotEntry>;
 
 /// An async task. Two requests a server handles side by side run in two
 /// tasks, so each compares its copy of a row with the one it read or wrote,
@@ -67,12 +69,13 @@ struct SnapshotEntry {
 
 /// Bounded, insertion-ordered store of dirty-tracking baselines.
 ///
-/// `entries` holds each row's snapshots by slot (pool and task), and `order`
-/// maps insertion sequence to row and slot, one per snapshot, so eviction is
+/// `entries` holds each row's snapshots by model type, key and slot (pool and
+/// task), so invalidating a model touches only its own rows, and `order` maps
+/// insertion sequence to row and slot, one per snapshot, so eviction is
 /// O(log n) instead of an O(n) scan. Every mutation keeps the two in sync, so
 /// `order` can never accumulate stale keys.
 struct SnapshotStore {
-    entries: HashMap<RowKey, HashMap<Slot, SnapshotEntry>>,
+    entries: HashMap<TypeId, HashMap<Vec<ValueKey>, Slots>>,
     order: BTreeMap<u64, (RowKey, Slot)>,
     next_sequence: u64,
     capacity: usize,
@@ -98,7 +101,7 @@ impl SnapshotStore {
     /// inspected in need not be the one it was loaded through, and guessing
     /// would report another row's values.
     fn get(&self, row: &RowKey, task: Option<Task>) -> Option<&SnapshotValues> {
-        let slots = self.entries.get(row)?;
+        let slots = self.slots(row)?;
         let task = task.filter(|task| slots.keys().any(|(_, owner)| *owner == Some(*task)));
         let mut baselines = slots
             .iter()
@@ -106,6 +109,21 @@ impl SnapshotStore {
             .map(|(_, entry)| entry.values.as_ref());
         let first = baselines.next()??;
         baselines.all(|other| other == Some(first)).then_some(first)
+    }
+
+    /// The baselines of `row`, by slot.
+    fn slots(&self, (model, key): &RowKey) -> Option<&Slots> {
+        self.entries.get(model)?.get(key)
+    }
+
+    /// Drop `row`'s emptied slots, and its model's rows once they are empty.
+    fn remove_row(&mut self, (model, key): &RowKey) {
+        if let Some(rows) = self.entries.get_mut(model) {
+            rows.remove(key);
+            if rows.is_empty() {
+                self.entries.remove(model);
+            }
+        }
     }
 
     /// Store one slot's baseline of `row` and return its sequence.
@@ -118,7 +136,14 @@ impl SnapshotStore {
 
     fn put(&mut self, row: RowKey, slot: Slot, entry: SnapshotEntry) {
         self.order.insert(entry.sequence, (row.clone(), slot));
-        if let Some(previous) = self.entries.entry(row).or_default().insert(slot, entry) {
+        let (model, key) = row;
+        let slots = self
+            .entries
+            .entry(model)
+            .or_default()
+            .entry(key)
+            .or_default();
+        if let Some(previous) = slots.insert(slot, entry) {
             self.order.remove(&previous.sequence);
         }
 
@@ -129,7 +154,11 @@ impl SnapshotStore {
             let Some((_, (row, (_, task)))) = self.order.pop_first() else {
                 break;
             };
-            let Some(slots) = self.entries.get_mut(&row) else {
+            let Some(slots) = self
+                .entries
+                .get_mut(&row.0)
+                .and_then(|rows| rows.get_mut(&row.1))
+            else {
                 continue;
             };
             slots.retain(|(_, owner), entry| {
@@ -140,17 +169,17 @@ impl SnapshotStore {
                 keep
             });
             if slots.is_empty() {
-                self.entries.remove(&row);
+                self.remove_row(&row);
             }
         }
     }
 
     /// Remove one slot's baseline of `row`.
     fn take(&mut self, row: &RowKey, slot: Slot) -> Option<SnapshotEntry> {
-        let baselines = self.entries.get_mut(row)?;
+        let baselines = self.entries.get_mut(&row.0)?.get_mut(&row.1)?;
         let entry = baselines.remove(&slot)?;
         if baselines.is_empty() {
-            self.entries.remove(row);
+            self.remove_row(row);
         }
         self.order.remove(&entry.sequence);
         Some(entry)
@@ -172,7 +201,7 @@ impl SnapshotStore {
             // of the key for the same task: that baseline must not become
             // the key's.
             None if previous.as_ref().is_some_and(|previous| {
-                self.entries.get(&row).is_some_and(|others| {
+                self.slots(&row).is_some_and(|others| {
                     others
                         .iter()
                         .filter(|((_, owner), _)| *owner == slot.1)
@@ -202,8 +231,7 @@ impl SnapshotStore {
         previous: Option<SnapshotEntry>,
     ) {
         let current = self
-            .entries
-            .get(&row)
+            .slots(&row)
             .and_then(|baselines| baselines.get(&slot))
             .map(|entry| entry.sequence);
         if current != standing {
@@ -263,41 +291,46 @@ fn capture_snapshot<M: Model>(model: &M) -> SnapshotValues {
     Arc::new(field_values(model).collect())
 }
 
-/// Remember `model`'s current persisted state as the dirty-tracking baseline
-/// of the pool `origin` it was read from.
+/// Remember each of `models`' current persisted state as its dirty-tracking
+/// baseline of the pool `origin` it was read from, all under one lock.
 ///
 /// The baseline store is capacity-bounded; remembering past that point evicts
 /// the oldest baselines rather than growing without limit.
-pub(crate) fn remember_model_from<M: Model>(model: &M, origin: Origin) {
-    if let Some(row) = row_key_for_model(model) {
-        set_baseline(row, origin, Some(capture_snapshot(model)));
-    }
+pub(crate) fn remember_models_from<M: Model>(models: &[M], origin: Origin) {
+    // Captured before the lock is taken, so no model is read under it.
+    let baselines: Vec<_> = models
+        .iter()
+        .filter_map(|model| Some((row_key_for_model(model)?, Some(capture_snapshot(model)))))
+        .collect();
+    set_baselines(baselines, origin);
 }
 
-/// Set the pool `origin`'s baseline of `row`, or drop it for `None`, for the
-/// current task and for the shared one, which a task that never read the row
-/// falls back to.
+/// Set the pool `origin`'s baseline of each row, or drop it for `None`, for
+/// the current task and for the shared one, which a task that never read the
+/// row falls back to.
 ///
 /// A row read or written inside a transaction is only what the database
 /// holds once it commits, so if it rolls back instead, the baselines this
 /// replaced come back, unless the slot's baseline of the row changed again
 /// in the meantime.
-fn set_baseline(row: RowKey, origin: Origin, values: Option<SnapshotValues>) {
+fn set_baselines(baselines: Vec<(RowKey, Option<SnapshotValues>)>, origin: Origin) {
+    if baselines.is_empty() {
+        return;
+    }
     let own = current_task().map(|task| (origin, Some(task)));
     let mut store = snapshot_store().write();
-    let undo: Vec<_> = own
-        .into_iter()
-        .chain([(origin, None)])
-        .map(|slot| {
+    let mut undo = Vec::with_capacity(baselines.len() * 2);
+    for (row, values) in baselines {
+        for slot in own.into_iter().chain([(origin, None)]) {
             let (previous, standing) = store.replace(row.clone(), slot, values.clone());
-            (slot, standing, previous)
-        })
-        .collect();
+            undo.push((row.clone(), slot, standing, previous));
+        }
+    }
     drop(store);
     crate::cache::undo_on_rollback(move || {
         let mut store = snapshot_store().write();
-        for (slot, standing, previous) in undo.into_iter().rev() {
-            store.restore(row.clone(), slot, standing, previous);
+        for (row, slot, standing, previous) in undo.into_iter().rev() {
+            store.restore(row, slot, standing, previous);
         }
     });
 }
@@ -310,7 +343,7 @@ pub fn forget_model<M: Model>(model: &M) {
 /// Forget `model`'s baseline as read from the pool `origin`.
 pub(crate) fn forget_model_from<M: Model>(model: &M, origin: Origin) {
     if let Some(row) = row_key_for_model(model) {
-        set_baseline(row, origin, None);
+        set_baselines(vec![(row, None)], origin);
     }
 }
 
@@ -323,13 +356,14 @@ pub fn invalidate_model<M: Model>() {
     let mut store = snapshot_store().write();
     let keys: Vec<_> = store
         .entries
-        .iter()
-        .filter(|((type_id, _), _)| *type_id == model_type)
-        .flat_map(|(row, baselines)| {
+        .get(&model_type)
+        .into_iter()
+        .flatten()
+        .flat_map(|(key, baselines)| {
             baselines
                 .keys()
                 .filter(|(_, owner)| owner.is_none() || *owner == task)
-                .map(move |slot| (row.clone(), *slot))
+                .map(move |slot| ((model_type, key.clone()), *slot))
         })
         .collect();
     let mut undo = Vec::with_capacity(keys.len());
@@ -359,10 +393,7 @@ impl Drop for InvalidatedBaselines {
         }
         let mut store = snapshot_store().write();
         for (row, slot, standing, _) in self.0.drain(..) {
-            let current = store
-                .entries
-                .get(&row)
-                .and_then(|baselines| baselines.get(&slot));
+            let current = store.slots(&row).and_then(|baselines| baselines.get(&slot));
             if current.is_some_and(|entry| entry.sequence == standing) {
                 store.take(&row, slot);
             }

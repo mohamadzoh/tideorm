@@ -56,6 +56,10 @@ conflicts with another (SQLSTATE `40001`, "restart transaction"). That error's `
 `SerializationFailure` and `is_retryable()` is true: run the transaction again (see
 [Retrying a Transaction](errors.md#retrying-a-transaction)).
 
+**Shared locks.** Under `SERIALIZABLE` CockroachDB takes no lock for `lock_for_share()` (unless
+its `enable_shared_locking_for_serializable` setting is on), so such a read waits for a row locked
+`FOR UPDATE` as a plain read does, and `nowait()` does not make it fail.
+
 **Decimals in a list.** CockroachDB reads each value of an `IN` list as the column's type, so
 against an integer column it would round a decimal `5.4` to `5`, and fail on a `u64` past
 `i64::MAX` (which TideORM binds as a decimal). TideORM casts a decimal in a `where_in` list to
@@ -129,6 +133,12 @@ are unique but not consecutive, and not in insertion order across servers.
 
 **CHECK constraints** are neither stored nor enforced unless `tidb_enable_check_constraint` is on
 (`SET GLOBAL tidb_enable_check_constraint = ON`); foreign keys are enforced from TiDB 8.5.
+
+**Row locks.** A locking read outside a transaction takes no lock and waits for none, so lock rows
+inside [a transaction](transactions.md); there `nowait()` fails with `LockNotAvailable` as on MySQL.
+TiDB parses `SKIP LOCKED` but ignores it, returning rows other transactions hold, so
+`skip_locked()` fails the query on TiDB. `lock_for_share()` fails unless
+`tidb_enable_noop_functions` is on, and then takes no lock.
 
 **Not available on TiDB:** `SERIALIZABLE` transactions (error 8048), `FULLTEXT` indexes and so
 full-text search, `JSON_TABLE` and so `array_remove` on a JSON array column, invisible columns,

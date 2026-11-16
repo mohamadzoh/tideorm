@@ -3,21 +3,12 @@ use super::*;
 #[test]
 fn only_postgres_reads_a_schema_from_a_dotted_name() {
     assert_eq!(
-        table_parts(DatabaseType::Postgres, "app.users"),
-        (Some("app"), "users")
+        schema_split(DatabaseType::Postgres, "app.users"),
+        Some(("app", "users"))
     );
-    assert_eq!(
-        table_parts(DatabaseType::Postgres, "users"),
-        (None, "users")
-    );
-    assert_eq!(
-        table_parts(DatabaseType::MySQL, "app.users"),
-        (None, "app.users")
-    );
-    assert_eq!(
-        table_parts(DatabaseType::SQLite, "app.users"),
-        (None, "app.users")
-    );
+    assert_eq!(schema_split(DatabaseType::Postgres, "users"), None);
+    assert_eq!(schema_split(DatabaseType::MySQL, "app.users"), None);
+    assert_eq!(schema_split(DatabaseType::SQLite, "app.users"), None);
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]

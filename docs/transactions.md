@@ -201,26 +201,23 @@ A connection goes back to the pool with no transaction open: one left open is ro
 | `DbFailureKind` | Typically |
 |---|---|
 | `Deadlock` | SQLSTATE `40P01`, MySQL 1213 |
-| `SerializationFailure` | SQLSTATE `40001`, under `SERIALIZABLE`, and on CockroachDB, which runs every transaction `SERIALIZABLE` |
+| `SerializationFailure` | SQLSTATE `40001`, under `SERIALIZABLE`, and on CockroachDB, which runs every transaction `SERIALIZABLE`; TiDB's write conflict (9007) |
 | `LockNotAvailable` | SQLSTATE `55P03`, a MySQL lock wait timeout, SQLite's busy or locked database |
 | `StatementTimeout` | SQLSTATE `57014` |
 | `ConnectionTimeout`, `ConnectionClosed`, `ConnectionRefused` | No connection, or a lost one |
 
-Retry the whole transaction, never the one statement that failed:
+Retry the whole transaction, never the one statement that failed. `transaction_retrying` runs the closure again in a new transaction after a deadlock, a serialization failure or a lock it could not take, up to the given number of runs in all, with a short random wait between them:
 
 ```rust
 async fn transfer_with_retry(db: &Database, from: i64, to: i64, amount: i64) -> tideorm::Result<()> {
-    let mut attempts = 0;
-    loop {
-        match db.atomically(transfer(from, to, amount)).await {
-            Err(error) if error.is_retryable() && attempts < 3 => attempts += 1,
-            result => return result,
-        }
-    }
+    db.transaction_retrying(TransactionOptions::default(), 4, async |_tx| {
+        transfer(from, to, amount).await
+    })
+    .await
 }
 ```
 
-A connection lost while the `COMMIT` is on the wire leaves the outcome unknown: the database may have committed. Make retried work safe to repeat, or check for its effect first. See [Compatible Servers](compatible-servers.md) for the transaction behaviour of CockroachDB, TiDB and Vitess.
+The closure can run more than once, so send emails and other effects outside the database after it returns. Inside another transaction on the same pool it runs once, as a savepoint that ignores `options` (the enclosing transaction began with its own): a deadlock or a serialization failure aborts the enclosing transaction, so retry that one. It never retries a lost connection: one lost while the `COMMIT` is on the wire leaves the outcome unknown, and the database may have committed. Make retried work safe to repeat, or check for its effect first. [Errors](errors.md#retrying-a-transaction) has the details. See [Compatible Servers](compatible-servers.md) for the transaction behaviour of CockroachDB, TiDB and Vitess.
 
 ## Leaked Handles
 

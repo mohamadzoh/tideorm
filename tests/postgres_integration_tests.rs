@@ -445,3 +445,83 @@ async fn migration_integers_keep_their_width() {
         .await
         .expect("drop failed");
 }
+
+/// The catalog reads a table back by the name `tables()` lists: a table of
+/// the current schema whose name holds a dot is listed bare, and another
+/// schema's as `schema.table`.
+#[tokio::test]
+async fn catalog_reads_a_dotted_table_name_as_listed() {
+    if !backend::connect().await {
+        return;
+    }
+    for sql in [
+        "DROP TABLE IF EXISTS \"catalog.dotted\"",
+        "DROP SCHEMA IF EXISTS catalog_other CASCADE",
+        "CREATE TABLE \"catalog.dotted\" (id INT PRIMARY KEY, label TEXT)",
+        "CREATE SCHEMA catalog_other",
+        "CREATE TABLE catalog_other.plain (code INT PRIMARY KEY)",
+    ] {
+        Database::execute(sql).await.expect(sql);
+    }
+
+    let db = tideorm::require_db().expect("database should be available");
+    let catalog = db.catalog();
+    let tables = catalog.tables().await.expect("tables read");
+    for (table, columns) in [
+        ("catalog.dotted", &["id", "label"][..]),
+        ("catalog_other.plain", &["code"]),
+    ] {
+        assert!(
+            tables.iter().any(|listed| listed == table),
+            "{table} in {tables:?}"
+        );
+        let read: Vec<_> = catalog
+            .columns(table)
+            .await
+            .expect("columns read")
+            .into_iter()
+            .map(|column| column.name)
+            .collect();
+        assert_eq!(read, columns, "{table}");
+        let indexes = catalog.indexes(table).await.expect("indexes read");
+        assert!(
+            indexes.iter().any(|index| index.primary),
+            "{table}: {indexes:?}"
+        );
+    }
+
+    Database::execute("DROP TABLE \"catalog.dotted\"")
+        .await
+        .expect("drop failed");
+    Database::execute("DROP SCHEMA catalog_other CASCADE")
+        .await
+        .expect("drop failed");
+}
+
+/// A notification for a `LISTEN` run as plain SQL, which no listener takes,
+/// leaves the session's next statement alone.
+#[tokio::test]
+async fn an_unheard_notification_leaves_the_next_statement_alone() {
+    if !backend::connect().await {
+        return;
+    }
+    let db = tideorm::require_db().expect("database should be available");
+    // CockroachDB and YugabyteDB have no LISTEN.
+    if db.server() != Some(tideorm::DatabaseServer::Postgres) {
+        return;
+    }
+    let session = db.pin_session().await.expect("pin a session");
+    session
+        .exec_raw("LISTEN tideorm_unheard")
+        .await
+        .expect("listen");
+    session
+        .exec_raw("NOTIFY tideorm_unheard, 'payload'")
+        .await
+        .expect("notify");
+    let rows = session
+        .query_raw_json("SELECT 1 AS one")
+        .await
+        .expect("the statement after the notification");
+    assert_eq!(rows[0]["one"], 1);
+}

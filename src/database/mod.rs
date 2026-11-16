@@ -26,7 +26,10 @@ mod builder;
 pub(crate) mod cache_scope;
 mod core;
 pub(crate) mod json_rows;
+mod pool_status;
 mod raw;
+#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+mod retry;
 mod state;
 mod transaction;
 
@@ -34,6 +37,7 @@ mod transaction;
 pub use crate::orm::{AccessMode, IsolationLevel, SqliteTransactionMode, TransactionOptions};
 pub use builder::DatabaseBuilder;
 pub use core::Database;
+pub use pool_status::PoolStatus;
 #[cfg(feature = "dirty-tracking")]
 pub(crate) use state::scope_origin;
 pub use state::{__current_connection, __current_db, db, has_global_db, require_db};

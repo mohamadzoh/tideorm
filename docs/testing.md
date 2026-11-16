@@ -58,7 +58,7 @@ db.scope(async {
 
 ## Rolling a Test Back
 
-On a server database every test shares, run the test in a transaction that ends with an error, which rolls back everything it wrote. Code under test that opens its own transaction runs as a savepoint inside it:
+On a server database every test shares, run the test in `test_transaction`, which always rolls back everything it wrote and returns what the test returned. Every TideORM call inside joins it, and code under test that opens its own transaction runs as a savepoint inside it, whose commit the rollback undoes too:
 
 ```rust
 use tideorm::prelude::*;
@@ -69,19 +69,16 @@ async fn ships_an_order() -> tideorm::Result<()> {
         .url(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL"))
         .build()
         .await?;
-    let outcome = db
-        .transaction(async move |_tx| {
-            let order = Order::create(Order { quantity: 2, ..Default::default() }).await?;
-            assert!(ship(order.id).await?);
-            Err::<(), _>(tideorm::Error::query("rolled back after the test"))
-        })
-        .await;
-    assert!(outcome.is_err_and(|error| error.to_string().contains("rolled back after the test")));
-    Ok(())
+    db.test_transaction(async {
+        let order = Order::create(Order { quantity: 2, ..Default::default() }).await?;
+        assert!(ship(order.id).await?);
+        Ok(())
+    })
+    .await
 }
 ```
 
-A failed assertion panics, which rolls the transaction back too. See [Transactions](transactions.md) for savepoints and how calls join the transaction.
+A failed assertion panics, which rolls the transaction back too. A task the test spawns does not join the transaction. See [Transactions](transactions.md) for savepoints and how calls join the transaction.
 
 ## The Same Test on Several Backends
 

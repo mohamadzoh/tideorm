@@ -153,7 +153,7 @@ impl Catalog<'_> {
         let connection = self.db.__get_connection()?;
         let executor = connection.executor();
         let backend = executor.get_database_backend();
-        let (schema, name) = table_parts(backend, table);
+        let (schema, name) = table_parts(&executor, backend, table).await?;
         table_indexes(&executor, backend, schema, name).await
     }
 
@@ -196,7 +196,7 @@ impl Catalog<'_> {
         let connection = self.db.__get_connection()?;
         let executor = connection.executor();
         let backend = executor.get_database_backend();
-        let (schema, name) = table_parts(backend, table);
+        let (schema, name) = table_parts(&executor, backend, table).await?;
         table_rows(&executor, backend, sql(queries(backend)), schema, name).await
     }
 }
@@ -229,13 +229,29 @@ fn queries(backend: DatabaseType) -> &'static Queries {
     }
 }
 
-/// `table`'s schema and name: PostgreSQL reads `schema.table`; the others
-/// name a table alone.
-fn table_parts(backend: DatabaseType, table: &str) -> (Option<&str>, &str) {
-    match table.rsplit_once('.') {
-        Some((schema, name)) if backend == DatabaseType::Postgres => (Some(schema), name),
-        _ => (None, table),
+/// `table`'s schema and name as [`Catalog::tables`] writes them: PostgreSQL
+/// writes a table of another schema `schema.table`, split at the first dot
+/// as migrations split it, and one of the current schema bare, so a name
+/// with a dot there is that table when it exists; the others name a table
+/// alone.
+async fn table_parts<'t>(
+    conn: &impl ConnectionTrait,
+    backend: DatabaseType,
+    table: &'t str,
+) -> Result<(Option<&'t str>, &'t str)> {
+    match schema_split(backend, table) {
+        Some((schema, name)) if !table_exists(conn, backend, None, table).await? => {
+            Ok((Some(schema), name))
+        }
+        _ => Ok((None, table)),
     }
+}
+
+/// The schema and name a PostgreSQL `schema.table` splits into.
+fn schema_split(backend: DatabaseType, table: &str) -> Option<(&str, &str)> {
+    (backend == DatabaseType::Postgres)
+        .then(|| table.split_once('.'))
+        .flatten()
 }
 
 fn table_params(backend: DatabaseType, schema: Option<&str>, name: &str) -> Vec<Value> {

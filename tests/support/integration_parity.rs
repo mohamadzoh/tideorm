@@ -987,6 +987,27 @@ async fn query_builder_comparisons() {
             &[21, 23, 25],
         ),
         ("where_like", query().where_like("email", "%1%"), &[21, 30]),
+        // A fraction on an integer column compares exactly, as a decimal.
+        (
+            "where_gt a decimal",
+            query().where_gt("age", Decimal::new(275, 1)),
+            &[28, 29, 30],
+        ),
+        (
+            "where_between decimals",
+            query().where_between("age", Decimal::new(225, 1), Decimal::new(2500, 2)),
+            &[23, 24, 25],
+        ),
+        (
+            "where_in decimals",
+            query().where_in("age", vec![Decimal::new(2100, 2), Decimal::new(215, 1)]),
+            &[21],
+        ),
+        (
+            "where_lt decimal text",
+            query().where_lt("age", "22.5"),
+            &[21, 22],
+        ),
     ] {
         let found: Vec<i32> = filtered
             .order_asc("age")
@@ -2502,6 +2523,99 @@ async fn a_locked_read_check_write_does_not_oversell() {
     assert_eq!((shipped, left), (1, 1));
 }
 
+/// While another transaction holds a row locked, `skip_locked()` reads past
+/// it and `nowait()` is refused at once with a retryable error.
+#[tokio::test]
+async fn a_held_row_lock_is_skipped_or_refused_at_once() {
+    if !setup().await {
+        return;
+    }
+    if backend::DATABASE_TYPE == DatabaseType::SQLite {
+        println!("Skipping on SQLite, which has no row locks");
+        return;
+    }
+
+    let mut ids = Vec::new();
+    for name in ["held", "free"] {
+        let saved = user(&format!("{name}@example.com"), name, 30, true)
+            .save()
+            .await
+            .expect("save failed");
+        ids.push(saved.id);
+    }
+    let held = ids[0];
+
+    let (locked, on_locked) = tokio::sync::oneshot::channel();
+    let (release, on_release) = tokio::sync::oneshot::channel::<()>();
+    let holder = tokio::spawn(tideorm::db().transaction(async move |_tx| {
+        TestUser::query()
+            .where_eq("id", held)
+            .lock_for_update()
+            .first_or_fail()
+            .await?;
+        let _ = locked.send(());
+        let _ = on_release.await;
+        Ok(())
+    }));
+    on_locked.await.expect("the holder locks its row");
+
+    let free = TestUser::query()
+        .where_in("id", ids.clone())
+        .order_asc("id")
+        .lock_for_update()
+        .skip_locked()
+        .get()
+        .await;
+    if on(DatabaseServer::TiDb) {
+        // TiDB would ignore SKIP LOCKED and hand out the held row.
+        let error = free.expect_err("skip_locked() is refused on TiDB");
+        assert!(error.to_string().contains("SKIP LOCKED"), "{error}");
+    } else {
+        let free: Vec<i64> = free
+            .expect("skip_locked() reads the free rows")
+            .into_iter()
+            .map(|user| user.id)
+            .collect();
+        assert_eq!(free, [ids[1]]);
+    }
+
+    // In a transaction: TiDB's locking read outside one takes no lock.
+    let locked = |share: bool| async move {
+        tideorm::db()
+            .transaction(async move |_tx| {
+                let query = TestUser::query().where_eq("id", held);
+                let query = if share {
+                    query.lock_for_share()
+                } else {
+                    query.lock_for_update()
+                };
+                query.nowait().first().await
+            })
+            .await
+    };
+    let mut refusals = vec![("lock_for_update", locked(false).await)];
+    // TiDB refuses a shared lock outright unless its no-op functions are on,
+    // and CockroachDB takes none under SERIALIZABLE, so the read waits.
+    if !on(DatabaseServer::TiDb) && !on(DatabaseServer::CockroachDb) {
+        refusals.push(("lock_for_share", locked(true).await));
+    }
+    for (lock, refused) in refusals {
+        let error = refused.expect_err(lock);
+        assert_eq!(
+            error.failure_kind(),
+            tideorm::error::DbFailureKind::LockNotAvailable,
+            "{lock}: {error}"
+        );
+        assert!(error.is_retryable(), "{lock}: {error}");
+    }
+
+    let _ = release.send(());
+    holder
+        .await
+        .unwrap()
+        .expect("the holder's transaction commits");
+}
+
 #[tideorm::model(table = "stamped_accounts")]
 pub struct StampedAccount {
     #[tideorm(primary_key, auto_increment)]
@@ -3279,6 +3393,96 @@ async fn attach_fails_when_another_unique_key_refuses_the_pair() {
     assert_eq!(links, vec![articles[0].id]);
 }
 
+/// `attach_many` and `sync` write several pairs with one statement, skip the
+/// pairs already linked, and fail, linking none of the batch, when another
+/// unique key of the pivot keeps one pair out.
+#[tokio::test]
+async fn batched_attaches_fail_when_another_unique_key_refuses_a_pair() {
+    if !setup().await {
+        return;
+    }
+    fresh_linked_tables().await;
+    fresh_table("linked_article_labels", |t| {
+        t.id();
+        t.big_integer("article_id").not_null();
+        t.big_integer("label_id").not_null();
+        t.unique_index(&["label_id"]);
+    })
+    .await;
+    let mut articles = Vec::new();
+    for title in ["first", "second"] {
+        articles.push(
+            LinkedArticle {
+                id: 0,
+                title: title.into(),
+                labels: Default::default(),
+            }
+            .save()
+            .await
+            .expect("save article failed"),
+        );
+    }
+    let mut labels = Vec::new();
+    for name in ["a", "b", "c"] {
+        let label = LinkedLabel {
+            id: 0,
+            name: name.into(),
+        }
+        .save()
+        .await
+        .expect("save label failed");
+        labels.push(label.id);
+    }
+    let links = || async {
+        let mut links: Vec<(i64, i64)> = LinkedArticleLabel::query()
+            .get()
+            .await
+            .expect("pivot read failed")
+            .into_iter()
+            .map(|link| (link.article_id, link.label_id))
+            .collect();
+        links.sort_unstable();
+        links
+    };
+    let (first, second) = (articles[0].id, articles[1].id);
+
+    for _ in 0..2 {
+        articles[0]
+            .labels
+            .attach_many(labels[..2].to_vec())
+            .await
+            .expect("attach_many failed");
+    }
+    assert_eq!(links().await, [(first, labels[0]), (first, labels[1])]);
+
+    // `b` may belong to the first article only.
+    let refused = vec![labels[2], labels[1]];
+    assert!(
+        articles[1]
+            .labels
+            .attach_many(refused.clone())
+            .await
+            .is_err()
+    );
+    assert!(articles[1].labels.sync(refused).await.is_err());
+    assert_eq!(links().await, [(first, labels[0]), (first, labels[1])]);
+
+    articles[1]
+        .labels
+        .sync(vec![labels[2]])
+        .await
+        .expect("sync failed");
+    articles[0]
+        .labels
+        .sync(labels[..2].iter().rev().copied())
+        .await
+        .expect("sync of linked pairs failed");
+    assert_eq!(
+        links().await,
+        [(first, labels[0]), (first, labels[1]), (second, labels[2])]
+    );
+}
+
 #[tideorm::model(table = "binned_articles")]
 pub struct BinnedArticle {
     #[tideorm(primary_key, auto_increment)]
@@ -3391,6 +3595,23 @@ async fn a_soft_deleted_pivot_row_unlinks_its_pair() {
 
     // Attaching the pair again restores its row instead of adding one.
     article.labels.attach(news).await.expect("re-attach failed");
+    assert_eq!(
+        names(article.labels.load().await.expect("load failed")),
+        ["draft", "news"]
+    );
+    assert_eq!(pivot_rows().await, 2);
+
+    // So does attaching several together.
+    BinnedArticleLabel::query()
+        .where_in("label_id", vec![news, draft])
+        .soft_delete()
+        .await
+        .expect("soft delete failed");
+    article
+        .labels
+        .attach_many(vec![draft, news])
+        .await
+        .expect("re-attach of both failed");
     assert_eq!(
         names(article.labels.load().await.expect("load failed")),
         ["draft", "news"]

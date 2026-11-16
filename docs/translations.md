@@ -6,7 +6,7 @@ Translations keep per-language values of a model's fields in a JSON column. The 
 
 ```toml
 [dependencies]
-tideorm = { version = "0.17.8", default-features = false, features = ["postgres", "runtime-tokio", "translations"] }
+tideorm = { version = "0.17.9", default-features = false, features = ["postgres", "runtime-tokio", "translations"] }
 ```
 
 ## Model Setup

@@ -365,6 +365,33 @@ let shipped = Database::current()?.atomically(async {
 
 Outside a transaction the lock ends with the statement. `count()`, `exists()` and the aggregates lock the rows they read too, and a locked query never reads from the query cache. PostgreSQL refuses the lock on a query with `DISTINCT`, `GROUP BY` or a union. SQLite has no row locks and writes nothing: the first write of a transaction locks the whole database, so the second of two competing read-check-write transactions fails with a retryable `LockNotAvailable` error instead of racing.
 
+`lock_for_share()` takes a shared lock instead (`FOR SHARE`; MariaDB's `LOCK IN SHARE MODE`): other transactions can still read and share-lock the rows, but not change them. A query with both locks takes `lock_for_update()`'s.
+
+Two options change what a lock does when another transaction holds the row; each needs one of the two locks, and a query with only the option fails:
+
+- `skip_locked()` leaves locked rows out (`SKIP LOCKED`), so workers sharing a job table each take different rows instead of queueing behind one another. TiDB ignores `SKIP LOCKED`, so there it fails the query (see [Compatible Servers](compatible-servers.md#tidb)).
+- `nowait()` fails at once with a `LockNotAvailable` error (`NOWAIT`) instead of waiting. CockroachDB takes no shared lock under `SERIALIZABLE`, so with `lock_for_share()` it waits as a plain read does (see [Compatible Servers](compatible-servers.md#cockroachdb)).
+
+```rust,ignore
+// Each worker claims up to 10 pending jobs no other worker holds.
+let jobs = Database::current()?.atomically(async {
+    let jobs = Job::query()
+        .where_eq("status", "pending")
+        .order_asc("id")
+        .limit(10)
+        .lock_for_update()
+        .skip_locked()
+        .get()
+        .await?;
+    for job in &jobs {
+        Job::update_all().set("status", "running").where_eq("id", job.id).execute().await?;
+    }
+    Ok(jobs)
+}).await?;
+```
+
+MariaDB takes `SKIP LOCKED` from 10.6. SQLite writes neither option, as it writes no lock.
+
 ## Bulk Updates and Deletes
 
 A query can update or delete every row it matches in one statement. These statements skip model callbacks, validation and automatic timestamps, and load no rows:

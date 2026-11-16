@@ -212,27 +212,22 @@ An error's `Display` text can hold the server's message, table, column and const
 
 ## Retrying a Transaction
 
-Retry the whole transaction, never one statement inside it: after a deadlock or a serialization failure the server has already rolled the whole transaction back.
+Retry the whole transaction, never one statement inside it: after a deadlock or a serialization failure the server has already rolled the whole transaction back. `transaction_retrying` does that:
 
 ```rust
-use std::time::Duration;
 use tideorm::prelude::*;
 
 async fn place_order_with_retry(db: &Database, cart: &Cart) -> tideorm::Result<Order> {
-    let mut attempt = 0u64;
-    loop {
-        match db.transaction(async |_tx| place_order(cart).await).await {
-            Err(e) if e.is_retryable() && attempt < 3 => {
-                attempt += 1;
-                tokio::time::sleep(Duration::from_millis(50 * attempt)).await;
-            }
-            outcome => return outcome,
-        }
-    }
+    db.transaction_retrying(TransactionOptions::default(), 4, async |_tx| place_order(cart).await)
+        .await
 }
 ```
 
-CockroachDB runs every transaction at `SERIALIZABLE` and asks clients to retry with SQLSTATE `40001` ("restart transaction"), which is `SerializationFailure`, so the same loop serves it (see [Compatible Servers](compatible-servers.md)). PostgreSQL's `SERIALIZABLE` and `REPEATABLE READ` isolation levels report the same code.
+It runs the closure in a new transaction after a `Deadlock`, a `SerializationFailure` or a `LockNotAvailable`, up to the given number of runs in all, waiting 10 ms before the second, doubling up to 1 s, each wait shortened by a random part so competing transactions spread out. Any other failure, and the last attempt's, comes back as it is. It never retries a lost connection, whose commit may have gone through. Inside another transaction on the same pool it runs the closure once, as a savepoint that ignores the options the enclosing transaction began with its own: a deadlock or a serialization failure aborts the enclosing transaction, so that is the one to retry. The closure can run more than once, so do what happens outside the database, such as sending an email, after it returns.
+
+CockroachDB runs every transaction at `SERIALIZABLE` and asks clients to retry with SQLSTATE `40001` ("restart transaction"), which is `SerializationFailure`, as is TiDB's write conflict (error 9007), so the same call serves them (see [Compatible Servers](compatible-servers.md)). PostgreSQL's `SERIALIZABLE` and `REPEATABLE READ` isolation levels report the same code.
+
+To retry on other failures too, such as a statement timeout, write the loop yourself around `is_retryable()`.
 
 Retryable means a new attempt can succeed, not that the failed one wrote nothing. A `ConnectionClosed` that cuts off the `COMMIT` leaves it unknown whether the transaction committed, and the retry then writes it a second time. The same holds for a single `create()` retried outside a transaction. Make a retried write idempotent: insert with a key the request carries (a client-chosen UUID, an idempotency key under a unique index) or use an upsert, so a second run finds the first one's row instead of adding another.
 

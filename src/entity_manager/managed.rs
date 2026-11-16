@@ -340,8 +340,8 @@ struct FieldChanges<T> {
 impl<T: crate::model::Model> FieldChanges<T> {
     /// Put back each field still holding the stored value: a field edited
     /// since keeps the edit.
-    fn undo(self, target: &mut T) {
-        for field in self.fields {
+    fn undo(&self, target: &mut T) {
+        for &field in &self.fields {
             if target.field_value(field) == self.after.field_value(field) {
                 // An undo has no caller to report to; the field keeps its value.
                 let _ = target.copy_field_from(&self.before, field);

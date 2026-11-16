@@ -368,12 +368,24 @@ pub(crate) fn invalidate_dirty_snapshots<M: Model>() {
 /// so it goes back if the transaction rolls back.
 #[doc(hidden)]
 pub fn __finish_load<M: Model>(model: &mut M, connection: &crate::database::ConnectionRef) {
-    model.__attach_query_database(&crate::database::Database::from_handle(
+    finish_loads(std::slice::from_mut(model), connection);
+}
+
+/// [`__finish_load`] for `models`, read together through `connection`: their
+/// baselines are recorded under one lock and undone together.
+pub(crate) fn finish_loads<M: Model>(
+    models: &mut [M],
+    connection: &crate::database::ConnectionRef,
+) {
+    let database = crate::database::Database::from_handle(
         crate::database::ConnectionRef::Database(connection.pool().clone()),
-    ));
+    );
+    for model in models.iter_mut() {
+        model.__attach_query_database(&database);
+    }
     #[cfg(feature = "dirty-tracking")]
     connection
-        .recording(|| dirty_tracking::remember_model_from(model, Some(connection.identity())));
+        .recording(|| dirty_tracking::remember_models_from(models, Some(connection.identity())));
 }
 
 #[cfg(test)]

@@ -5,6 +5,11 @@ fn remember_model<M: Model>(model: &M) {
     remember_model_from(model, crate::database::scope_origin())
 }
 
+/// Remember `model` as read from the pool `origin`.
+fn remember_model_from<M: Model>(model: &M, origin: Origin) {
+    remember_models_from(std::slice::from_ref(model), origin)
+}
+
 #[tideorm::model(table = "dirty_tracking_baseline_users")]
 struct BaselineUser {
     #[tideorm(primary_key, auto_increment)]
@@ -237,9 +242,120 @@ fn eviction_drops_every_databases_baseline_of_a_key_together() {
     // Past capacity, the oldest baseline goes, and with it the key's other.
     store.replace(store_row(2), (Some(1), None), Some(named("Dave")));
 
-    assert!(!store.entries.contains_key(&row));
+    assert!(store.slots(&row).is_none());
     assert_eq!(store.order.len(), 1);
     assert_eq!(store.get(&store_row(2), None), Some(&named("Dave")));
+    // A model whose last row goes keeps no map behind.
+    store.take(&store_row(2), (Some(1), None));
+    assert!(store.entries.is_empty());
+}
+
+#[tideorm::model(table = "dirty_tracking_invalidated_users")]
+struct InvalidatedUser {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    name: String,
+}
+
+#[tideorm::model(table = "dirty_tracking_kept_users")]
+struct KeptUser {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    name: String,
+}
+
+/// Invalidating a model forgets every pool's baselines of its rows, and
+/// leaves another model's rows under the same key alone.
+#[test]
+fn invalidating_a_model_forgets_only_its_own_rows() {
+    let invalidated = InvalidatedUser {
+        id: 5,
+        name: "Ada".into(),
+    };
+    let kept = KeptUser {
+        id: 5,
+        name: "Ada".into(),
+    };
+    for origin in [Some(801), Some(802)] {
+        remember_model_from(&invalidated, origin);
+        remember_model_from(&kept, origin);
+    }
+
+    invalidate_model::<InvalidatedUser>();
+
+    assert_eq!(changed_fields(&invalidated), None);
+    assert_eq!(changed_fields(&kept), Some(Vec::new()));
+    let row = (
+        TypeId::of::<InvalidatedUser>(),
+        vec![ValueKey::new(Value::from(5_i64))],
+    );
+    let store = snapshot_store().read();
+    assert!(store.slots(&row).is_none());
+    assert!(store.order.values().all(|(other, _)| *other != row));
+}
+
+/// Another task's own baseline of a row outlives an invalidation in this
+/// one, while the shared baseline goes.
+#[cfg(feature = "runtime-tokio")]
+#[test]
+fn invalidating_a_model_leaves_another_tasks_baseline() {
+    let user = InvalidatedUser {
+        id: 6,
+        name: "Bo".into(),
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (read, invalidate) = tokio::sync::oneshot::channel();
+        let (invalidated, check) = tokio::sync::oneshot::channel();
+        let reader = {
+            let user = user.clone();
+            tokio::spawn(async move {
+                remember_model_from(&user, Some(803));
+                read.send(()).unwrap();
+                check.await.unwrap();
+                changed_fields(&user)
+            })
+        };
+        let writer = tokio::spawn(async move {
+            invalidate.await.unwrap();
+            invalidate_model::<InvalidatedUser>();
+            invalidated.send(()).unwrap();
+        });
+        writer.await.unwrap();
+        assert_eq!(reader.await.unwrap(), Some(Vec::new()));
+    });
+    assert_eq!(changed_fields(&user), None);
+}
+
+/// Rows remembered together go back together when their transaction rolls
+/// back, each to the baseline it had, a row read twice in the batch too.
+#[test]
+fn a_rolled_back_batch_restores_each_rows_baseline() {
+    let user = |id, name: &str| InvalidatedUser {
+        id,
+        name: name.into(),
+    };
+    remember_models_from(&[user(11, "Ada"), user(12, "Bo")], Some(810));
+    let pending = std::sync::Arc::new(parking_lot::Mutex::new(
+        crate::cache::PendingInvalidations::new(None),
+    ));
+    let scope = crate::cache::install_pending_invalidations(&pending);
+    remember_models_from(&[user(11, "Cy"), user(12, "Di"), user(11, "Ed")], Some(810));
+    assert_eq!(
+        original_value(&user(11, "Ada"), "name").unwrap(),
+        Some(Some(Value::from("Ed")))
+    );
+    drop(scope);
+    drop(pending);
+
+    for (id, name) in [(11, "Ada"), (12, "Bo")] {
+        assert_eq!(
+            original_value(&user(id, name), "name").unwrap(),
+            Some(Some(Value::from(name)))
+        );
+    }
 }
 
 #[test]

@@ -39,7 +39,7 @@ impl<M: Model> QueryBuilder<M> {
             && count_query.clauses.group_by.is_empty()
             && count_query.clauses.having_conditions.is_empty()
             && count_query.clauses.raw_select_expressions.is_empty()
-            && !count_query.clauses.lock_for_update
+            && count_query.clauses.lock.is_none()
         {
             return db_sql::built(
                 db_type,
@@ -82,7 +82,7 @@ impl<M: Model> QueryBuilder<M> {
                 exists_query.clauses.window_functions.clear();
             }
 
-            if exists_query.clauses.ctes.is_empty() && !exists_query.clauses.lock_for_update {
+            if exists_query.clauses.ctes.is_empty() && exists_query.clauses.lock.is_none() {
                 let mut inner = exists_query.select_statement(db_type)?;
                 inner.limit(1);
                 let mut select = SelectStatement::new();

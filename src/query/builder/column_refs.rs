@@ -228,7 +228,11 @@ impl<M: Model> QueryBuilder<M> {
             None => (trimmed, true),
         };
 
-        if !direction_is_valid || Self::simple_column_reference(reference).is_none() {
+        // An alias is the select list's alone; ORDER BY and GROUP BY would
+        // write it as given.
+        let aliased =
+            M::own_column_name(reference).is_none() && Self::split_alias(reference).1.is_some();
+        if aliased || !direction_is_valid || Self::simple_column_reference(reference).is_none() {
             let hint = if allow_raw_and_direction {
                 "expected a column or table.column reference, optionally followed by ASC or DESC; use order_by_raw() for trusted SQL expressions and never pass user input to it"
             } else {

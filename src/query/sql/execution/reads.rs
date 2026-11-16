@@ -168,7 +168,7 @@ impl<M: Model> QueryBuilder<M> {
         // cached: the copy read back would lack those values.
         let cache = (self.clauses.cache_options.is_some()
             && M::__serde_round_trips()
-            && !self.clauses.lock_for_update
+            && self.clauses.lock.is_none()
             && !self.runs_in_transaction())
         .then(crate::cache::QueryCache::global);
         if let Some(cache) = cache {
@@ -179,14 +179,7 @@ impl<M: Model> QueryBuilder<M> {
             let key = self.generate_cache_key();
             if let Some(cached) = cache.get::<Vec<M>>(&key) {
                 let connection = self.current_db()?.__get_connection()?;
-                return Ok(cached
-                    .into_iter()
-                    .map(|model| {
-                        let mut model = M::__rebuild_relations(model);
-                        crate::model::__finish_load(&mut model, &connection);
-                        model
-                    })
-                    .collect());
+                return Ok(crate::internal::models_read_through(&connection, cached));
             }
             // Taken before the read: a write that lands while it runs may
             // replace the rows it returns.

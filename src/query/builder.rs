@@ -348,6 +348,11 @@ impl<M: Model> QueryBuilder<M> {
         if let Some((field, message)) = &self.clauses.invalid_page {
             return Err(Error::validation(*field, message.clone()));
         }
+        if self.clauses.lock_behavior.is_some() && self.clauses.lock.is_none() {
+            return Err(Error::query(
+                "skip_locked() and nowait() change a row lock: add lock_for_update() or lock_for_share()",
+            ));
+        }
 
         self.validate_query_fragments()?;
 

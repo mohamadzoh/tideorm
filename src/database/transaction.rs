@@ -180,6 +180,38 @@ impl Database {
         scope.end(outcome, transaction_error).await
     }
 
+    /// Run `future` inside a database transaction that is always rolled
+    /// back, returning what the future returned: a test's writes vanish when
+    /// it ends, so tests can share one database.
+    ///
+    /// ```ignore
+    /// #[tokio::test]
+    /// async fn signing_up_creates_a_profile() -> tideorm::Result<()> {
+    ///     require_db()?.test_transaction(async {
+    ///         let user = sign_up("ada@example.com").await?;
+    ///         assert!(user.profile.load().await?.is_some());
+    ///         Ok(())
+    ///     }).await
+    /// }
+    /// ```
+    ///
+    /// As in [`Database::atomically`], every TideORM call inside joins the
+    /// transaction, and a `Database::transaction` inside opens a savepoint,
+    /// whose commit the rollback undoes too. A task spawned inside does not
+    /// join it. Inside a transaction on this database's pool, it rolls back
+    /// a savepoint.
+    pub async fn test_transaction<F, T>(&self, future: F) -> Result<T>
+    where
+        F: Future<Output = Result<T>>,
+    {
+        let connection = self.__get_connection()?;
+        let scope = TransactionScope::begin(&connection, TransactionOptions::default())
+            .await
+            .map_err(transaction_error)?;
+        let outcome = with_connection_override(scope.connection(), future).await;
+        scope.roll_back(outcome).await
+    }
+
     /// Run `future` with this database as the ambient connection, without
     /// opening a transaction.
     ///
@@ -274,15 +306,34 @@ impl TransactionScope {
                 roll_back_failed(txn).await;
                 Err(e)
             }
-            (Err(txn), outcome) => {
-                // A caller bug the enclosing transaction does not commit
-                // past.
-                txn.abort("a nested transaction's handle leaked outside its scope");
-                let rollback = end_leaked_transaction(txn.as_ref()).await;
-                Err(leaked_transaction_error(rollback, outcome.err()))
-            }
+            (Err(txn), outcome) => end_leaked(txn, outcome).await,
         }
     }
+
+    /// Roll the transaction back whatever `outcome` is, and return
+    /// `outcome`, or the rollback's failure after a success: the caller
+    /// relies on nothing having been written.
+    pub(crate) async fn roll_back<T>(self, outcome: Result<T>) -> Result<T> {
+        match (Arc::try_unwrap(self.txn), outcome) {
+            (Ok(txn), Ok(result)) => {
+                txn.rollback().await.map_err(transaction_error)?;
+                Ok(result)
+            }
+            (Ok(txn), Err(e)) => {
+                roll_back_failed(txn).await;
+                Err(e)
+            }
+            (Err(txn), outcome) => end_leaked(txn, outcome).await,
+        }
+    }
+}
+
+/// End a transaction whose handle escaped its scope, a caller bug the
+/// enclosing transaction does not commit past.
+async fn end_leaked<T>(txn: Arc<crate::internal::OrmTransaction>, outcome: Result<T>) -> Result<T> {
+    txn.abort("a nested transaction's handle leaked outside its scope");
+    let rollback = end_leaked_transaction(txn.as_ref()).await;
+    Err(leaked_transaction_error(rollback, outcome.err()))
 }
 
 /// Roll back a transaction that failed. The failure is the one the caller

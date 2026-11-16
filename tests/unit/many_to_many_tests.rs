@@ -101,7 +101,7 @@ fn test_pivot_keys_resolve_renamed_columns() {
         "post_id",
         "tag_id",
         &Value::BigInt(Some(1)),
-        &Value::BigInt(Some(2)),
+        &[Value::BigInt(Some(2))],
     );
     assert!(insert.contains("(\"pid\", \"tid\")"), "{insert}");
 }
@@ -138,7 +138,7 @@ fn attach_inserts_only_a_missing_pivot_row_and_tolerates_a_key_conflict() {
         "post_id",
         "tag_id",
         &Value::BigInt(Some(7)),
-        &Value::BigInt(Some(9)),
+        &[Value::BigInt(Some(9))],
     );
     assert_eq!(
         sql,
@@ -156,13 +156,45 @@ fn attach_inserts_only_a_missing_pivot_row_and_tolerates_a_key_conflict() {
         "post_id",
         "tag_id",
         &Value::BigInt(Some(7)),
-        &Value::BigInt(Some(9)),
+        &[Value::BigInt(Some(9))],
     );
     assert_eq!(
         sql,
         "INSERT INTO `m2m_render_post_tags` (`post_id`, `tag_id`) VALUES (?, ?)"
     );
     assert_eq!(params.len(), 2);
+}
+
+/// Several pairs go in one statement, each checked on its own on PostgreSQL
+/// and SQLite.
+#[test]
+fn several_pivot_rows_are_inserted_with_one_statement() {
+    let ids = [Value::BigInt(Some(8)), Value::BigInt(Some(9))];
+    let insert = |db_type| {
+        super::mutations::build_pivot_insert::<M2mRenderPostTag>(
+            db_type,
+            "post_id",
+            "tag_id",
+            &Value::BigInt(Some(7)),
+            &ids,
+        )
+    };
+    let (sql, params) = insert(DatabaseType::SQLite);
+    assert_eq!(
+        sql,
+        "INSERT INTO \"m2m_render_post_tags\" (\"post_id\", \"tag_id\") SELECT ?, ? \
+         WHERE NOT EXISTS (SELECT 1 FROM \"m2m_render_post_tags\" WHERE \"post_id\" = ? \
+         AND \"tag_id\" = ?) UNION ALL SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM \
+         \"m2m_render_post_tags\" WHERE \"post_id\" = ? AND \"tag_id\" = ?) ON CONFLICT DO NOTHING"
+    );
+    assert_eq!(params.len(), 8);
+
+    let (sql, params) = insert(DatabaseType::MariaDB);
+    assert_eq!(
+        sql,
+        "INSERT INTO `m2m_render_post_tags` (`post_id`, `tag_id`) VALUES (?, ?), (?, ?)"
+    );
+    assert_eq!(params.len(), 4);
 }
 
 #[tideorm::model(table = "user_roles", schema = "billing")]
@@ -180,7 +212,7 @@ fn a_pivot_model_with_a_schema_is_quoted_part_by_part() {
         "post_id",
         "tag_id",
         &Value::BigInt(Some(7)),
-        &Value::BigInt(Some(9)),
+        &[Value::BigInt(Some(9))],
     );
     assert!(
         sql.starts_with("INSERT INTO \"billing\".\"user_roles\" "),

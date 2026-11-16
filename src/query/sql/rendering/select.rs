@@ -1,6 +1,6 @@
 use super::*;
 use crate::orm::sql_builder::{
-    CommonTableExpression, LockType, OrderedStatement, SelectExpr, SelectExprTrait, WithClause,
+    CommonTableExpression, OrderedStatement, SelectExpr, SelectExprTrait, WithClause,
 };
 
 impl<M: Model> QueryBuilder<M> {
@@ -420,8 +420,14 @@ impl<M: Model> QueryBuilder<M> {
         db_type: DatabaseType,
     ) -> Result<SelectStatement> {
         let mut select = self.unlocked_statement(db_type)?;
-        if self.clauses.lock_for_update {
-            select.lock(LockType::Update);
+        match (self.clauses.lock, self.clauses.lock_behavior) {
+            (Some(lock), Some(behavior)) => {
+                select.lock_with_behavior(lock, behavior);
+            }
+            (Some(lock), None) => {
+                select.lock(lock);
+            }
+            (None, _) => {}
         }
         Ok(select)
     }
