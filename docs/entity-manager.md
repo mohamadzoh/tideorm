@@ -6,7 +6,7 @@ An `EntityManager` is an explicit persistence context: one database handle, an i
 
 ```toml
 [dependencies]
-tideorm = { version = "0.17.9", default-features = false, features = ["postgres", "runtime-tokio", "entity-manager"] }
+tideorm = { version = "0.18.0", default-features = false, features = ["postgres", "runtime-tokio", "entity-manager"] }
 ```
 
 Use the backend feature you need (`postgres`, `mysql` or `sqlite`) alongside `entity-manager`.

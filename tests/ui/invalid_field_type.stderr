@@ -99,7 +99,7 @@ note: required by a bound in `tideorm::orm::entity::ActiveValue`
   | where
   |     V: Into<Value>,
   |        ^^^^^^^^^^^ required by this bound in `ActiveValue`
-  = note: this error originates in the derive macro `tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
+  = note: this error originates in the derive macro `::tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: `Status` is not a type a column can hold
   --> tests/ui/invalid_field_type.rs:12:13
@@ -379,7 +379,7 @@ error[E0277]: the trait bound `tideorm::orm::entity::Value: From<Status>` is not
             From<u64>
             From<u8>
   = note: required for `Status` to implement `Into<tideorm::orm::entity::Value>`
-  = note: this error originates in the derive macro `tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
+  = note: this error originates in the derive macro `::tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: `Status` is not a type a column can hold
  --> tests/ui/invalid_field_type.rs:8:1
@@ -403,7 +403,7 @@ help: the trait `tideorm::orm::sql_builder::ValueType` is not implemented for `S
             Vec<std::option::Option<T>>
             Vec<u8>
           and $N others
-  = note: this error originates in the derive macro `tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
+  = note: this error originates in the derive macro `::tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0599]: the method `into_wrapped_value` exists for enum `tideorm::orm::entity::ActiveValue<Status>`, but its trait bounds were not satisfied
  --> tests/ui/invalid_field_type.rs:8:1
@@ -422,7 +422,7 @@ error[E0599]: the method `into_wrapped_value` exists for enum `tideorm::orm::ent
   = note: the following trait bounds were not satisfied:
           `tideorm::orm::entity::Value: From<Status>`
           which is required by `Status: Into<tideorm::orm::entity::Value>`
-  = note: this error originates in the derive macro `tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
+  = note: this error originates in the derive macro `::tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0599]: the method `clone` exists for enum `tideorm::orm::entity::ActiveValue<Status>`, but its trait bounds were not satisfied
  --> tests/ui/invalid_field_type.rs:8:1
@@ -443,7 +443,7 @@ error[E0599]: the method `clone` exists for enum `tideorm::orm::entity::ActiveVa
           which is required by `tideorm::orm::entity::ActiveValue<Status>: Clone`
 note: the trait `Into` must be implemented
  --> $RUST/core/src/convert/mod.rs
-  = note: this error originates in the derive macro `tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
+  = note: this error originates in the derive macro `::tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0599]: the method `set_if_not_equals` exists for enum `tideorm::orm::entity::ActiveValue<Status>`, but its trait bounds were not satisfied
  --> tests/ui/invalid_field_type.rs:8:1
@@ -462,7 +462,7 @@ error[E0599]: the method `set_if_not_equals` exists for enum `tideorm::orm::enti
   = note: the following trait bounds were not satisfied:
           `tideorm::orm::entity::Value: From<Status>`
           which is required by `Status: Into<tideorm::orm::entity::Value>`
-  = note: this error originates in the derive macro `tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
+  = note: this error originates in the derive macro `::tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: the trait bound `tideorm::orm::entity::Value: From<Status>` is not satisfied
  --> tests/ui/invalid_field_type.rs:8:1
@@ -537,7 +537,7 @@ note: required by a bound in `tideorm::orm::entity::ActiveValue::Set`
   |        ^^^^^^^^^^^ required by this bound in `tideorm::orm::entity::ActiveValue::Set`
 ...
   |     Set(V),
-  = note: this error originates in the derive macro `tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
+  = note: this error originates in the derive macro `::tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: the trait bound `tideorm::orm::entity::Value: From<Status>` is not satisfied
  --> tests/ui/invalid_field_type.rs:8:1
@@ -612,7 +612,7 @@ note: required by a bound in `tideorm::orm::entity::ActiveValue::NotSet`
   |        ^^^^^^^^^^^ required by this bound in `tideorm::orm::entity::ActiveValue::NotSet`
 ...
   |     NotSet,
-  = note: this error originates in the derive macro `tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
+  = note: this error originates in the derive macro `::tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0599]: the method `is_not_set` exists for enum `tideorm::orm::entity::ActiveValue<Status>`, but its trait bounds were not satisfied
  --> tests/ui/invalid_field_type.rs:8:1
@@ -631,7 +631,7 @@ error[E0599]: the method `is_not_set` exists for enum `tideorm::orm::entity::Act
   = note: the following trait bounds were not satisfied:
           `tideorm::orm::entity::Value: From<Status>`
           which is required by `Status: Into<tideorm::orm::entity::Value>`
-  = note: this error originates in the derive macro `tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
+  = note: this error originates in the derive macro `::tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0599]: the method `reset` exists for enum `tideorm::orm::entity::ActiveValue<Status>`, but its trait bounds were not satisfied
  --> tests/ui/invalid_field_type.rs:8:1
@@ -650,7 +650,7 @@ error[E0599]: the method `reset` exists for enum `tideorm::orm::entity::ActiveVa
   = note: the following trait bounds were not satisfied:
           `tideorm::orm::entity::Value: From<Status>`
           which is required by `Status: Into<tideorm::orm::entity::Value>`
-  = note: this error originates in the derive macro `tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
+  = note: this error originates in the derive macro `::tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0599]: the method `default_value` exists for reference `&tideorm::orm::entity::ActiveValue<Status>`, but its trait bounds were not satisfied
  --> tests/ui/invalid_field_type.rs:8:1
@@ -685,7 +685,7 @@ note: the traits `Into`, `tideorm::orm::sql_builder::Nullable`,  and `tideorm::o
 ...
   | pub trait Nullable {
   | ^^^^^^^^^^^^^^^^^^
-  = note: this error originates in the derive macro `tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
+  = note: this error originates in the derive macro `::tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0599]: the method `unwrap` exists for enum `tideorm::orm::entity::ActiveValue<Status>`, but its trait bounds were not satisfied
  --> tests/ui/invalid_field_type.rs:8:1
@@ -704,4 +704,4 @@ error[E0599]: the method `unwrap` exists for enum `tideorm::orm::entity::ActiveV
   = note: the following trait bounds were not satisfied:
           `tideorm::orm::entity::Value: From<Status>`
           which is required by `Status: Into<tideorm::orm::entity::Value>`
-  = note: this error originates in the derive macro `tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
+  = note: this error originates in the derive macro `::tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)

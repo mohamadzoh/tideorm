@@ -50,6 +50,17 @@ jobs:
         uses: actions/configure-pages@v5
       - name: Build with mdBook
         run: mdbook build
+      # The cheat sheet and every page, in the book's order, as one Markdown
+      # file that tools can read in a single fetch (docs/llms.txt links it).
+      - name: Write llms-full.txt
+        run: |
+          {
+            cat API.md
+            for page in $(grep -o '([a-z-]*\.md)' docs/SUMMARY.md | tr -d '()'); do
+              printf '\n\n'
+              cat "docs/$page"
+            done
+          } > site/llms-full.txt
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:

@@ -180,7 +180,7 @@ A generated name longer than 63 bytes is shortened with a hash. Columns may be n
 |---|---|
 | `primary_key` | Part of the primary key. Mark each field of a composite key. |
 | `auto_increment` | The database numbers this key. Only on a single-column integer primary key. |
-| `column = "name"` | The column name, when it is not the field name in snake case. |
+| `column = "name"` | The column name, when it is not the field name in snake case. Two fields cannot share a column; that is a compile error. |
 | `nullable` | The column accepts NULL. An `Option` field is nullable without it. |
 | `default = "value"` | The column's `DEFAULT` in tables that schema sync creates. Inserts send every field's value, so a model built with `..Default::default()` stores the field's Rust default, not this one. |
 | `skip` | Not a column. It is never read or written, holds its `Default` on every model a query or write returns, and may be left out when deserializing. |

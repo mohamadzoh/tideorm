@@ -27,7 +27,7 @@ Every method runs on the database the surrounding code chooses; see [Choosing th
 
 ## Create
 
-`Model::create(model)` always inserts. `model.save()` inserts a new model and updates a saved one (see [How save() Decides](#how-save-decides)). Both return the row as stored, with its generated key, column defaults and timestamps.
+`Model::create(model)` always inserts. `model.save()` inserts a new model and updates a saved one (see [How save() Decides](#how-save-decides)). Both return the row as stored, with its generated key and timestamps. An insert sends every field, so a column's database default never takes the place of a field's value.
 
 ```rust
 use tideorm::prelude::*;

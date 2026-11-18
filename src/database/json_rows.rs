@@ -89,7 +89,13 @@ impl Database {
                         None => Self::decoded_json(row, index, column.document)
                             .map_err(|declared| Self::unreadable(&column.name, &declared))?,
                     };
-                    object.insert(column.name.clone(), value);
+                    // a join's two `id`s would otherwise keep whichever came last
+                    if object.insert(column.name.clone(), value).is_some() {
+                        return Err(Error::conversion(format!(
+                            "more than one result column is named '{}'; give each an alias",
+                            column.name
+                        )));
+                    }
                 }
                 Ok(serde_json::Value::Object(object))
             })
@@ -162,7 +168,7 @@ impl Database {
             ColumnType::Float => Self::try_get_float_json::<f32>(row, index),
             ColumnType::Double => Self::try_get_float_json::<f64>(row, index),
             // PostgreSQL and MySQL declare exact numerics, whose declared type
-            // reads every digit; `Decimal` rounds past 28.
+            // reads every digit; `Decimal` holds 28 at most.
             ColumnType::Decimal(_) | ColumnType::Money(_) => {
                 #[cfg(feature = "sqlite")]
                 if row.try_as_sqlite_row().is_some() {

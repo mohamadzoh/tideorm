@@ -6,7 +6,7 @@ File attachments keep references to files, such as a product's thumbnail or its 
 
 ```toml
 [dependencies]
-tideorm = { version = "0.17.9", default-features = false, features = ["postgres", "runtime-tokio", "attachments"] }
+tideorm = { version = "0.18.0", default-features = false, features = ["postgres", "runtime-tokio", "attachments"] }
 ```
 
 ## Model Setup

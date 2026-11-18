@@ -9,6 +9,7 @@
 
 mod case;
 mod context;
+mod crate_name;
 mod entity_gen;
 mod meta_support;
 mod model_trait;
@@ -50,7 +51,12 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
         Err(error) => return error.write_errors().into(),
     };
 
-    generate_model_impl(&model_input, indexes, &existing_derives).into()
+    crate_name::resolve(generate_model_impl(
+        &model_input,
+        indexes,
+        &existing_derives,
+    ))
+    .into()
 }
 
 fn generate_model_impl(
@@ -91,18 +97,20 @@ pub fn model(attr: TokenStream, item: TokenStream) -> TokenStream {
     let model_attr = TokenStream2::from(attr);
     let input = parse_macro_input!(item as DeriveInput);
 
-    expand_model(model_attr, input)
-        .unwrap_or_else(|error| error.to_compile_error())
-        .into()
+    crate_name::resolve(
+        expand_model(model_attr, input).unwrap_or_else(|error| error.to_compile_error()),
+    )
+    .into()
 }
 
 #[proc_macro_attribute]
 pub fn scopes(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as syn::ItemImpl);
 
-    generate_query_scope_support(input)
-        .unwrap_or_else(|error| error.to_compile_error())
-        .into()
+    crate_name::resolve(
+        generate_query_scope_support(input).unwrap_or_else(|error| error.to_compile_error()),
+    )
+    .into()
 }
 
 fn expand_model(model_attr: TokenStream2, input: DeriveInput) -> syn::Result<TokenStream2> {
@@ -146,14 +154,15 @@ fn expand_model(model_attr: TokenStream2, input: DeriveInput) -> syn::Result<Tok
     let struct_body = struct_body_tokens(generics, fields);
 
     Ok(quote! {
-        #[derive(tideorm::Model)]
+        #[derive(::tideorm::Model)]
         #inline_tide_attr
         #(#attrs)*
         #vis struct #name #struct_body
     })
 }
 
-/// Whether `attr` is a `#[derive(..)]` naming `Model` or `tideorm::Model`.
+/// Whether `attr` is a `#[derive(..)]` naming `Model` or `tideorm::Model`,
+/// by whatever name the crate gives the dependency.
 fn derives_model(attr: &syn::Attribute) -> bool {
     attr.path().is_ident("derive")
         && attr
@@ -169,7 +178,7 @@ fn derives_model(attr: &syn::Attribute) -> bool {
                         .collect();
                     match names.as_slice() {
                         [model] => model == "Model",
-                        [krate, model] => krate == "tideorm" && model == "Model",
+                        [krate, model] => crate_name::names_tideorm(krate) && model == "Model",
                         _ => false,
                     }
                 })
@@ -201,9 +210,11 @@ fn struct_body_tokens(generics: &syn::Generics, fields: &syn::Fields) -> TokenSt
 pub fn derive_active_enum(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as syn::DeriveInput);
 
-    orm::derives::expand_derive_active_enum(input)
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
+    crate_name::resolve(
+        orm::derives::expand_derive_active_enum(input)
+            .unwrap_or_else(syn::Error::into_compile_error),
+    )
+    .into()
 }
 
 /// Implements `Iterable` for an enum of unit variants: `ALL` lists them in
@@ -212,29 +223,33 @@ pub fn derive_active_enum(input: TokenStream) -> TokenStream {
 pub fn enum_iter(input: TokenStream) -> TokenStream {
     let ast = syn::parse_macro_input!(input as syn::DeriveInput);
 
-    orm::enum_iter::expand(&ast)
-        .unwrap_or_else(syn::Error::into_compile_error)
+    crate_name::resolve(orm::enum_iter::expand(&ast).unwrap_or_else(syn::Error::into_compile_error))
         .into()
 }
 
 /// Reads a struct from a raw result row, each named field from the column of
-/// its name, for `Database::raw_as`. An `Option` field takes SQL `NULL`.
+/// its name, for `Database::raw_as`. An `Option` field reads SQL `NULL`, or a
+/// column the row does not have, as `None`; a name two result columns share
+/// fails rather than read either.
 #[proc_macro_derive(FromQueryResult)]
 pub fn derive_from_query_result(input: TokenStream) -> TokenStream {
     let ast = syn::parse_macro_input!(input as syn::DeriveInput);
 
-    orm::from_query_result::expand(&ast)
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
+    crate_name::resolve(
+        orm::from_query_result::expand(&ast).unwrap_or_else(syn::Error::into_compile_error),
+    )
+    .into()
 }
 
 #[doc = include_str!("../docs/derive_value_type.md")]
 #[proc_macro_derive(DeriveValueType, attributes(orm))]
 pub fn derive_value_type(input: TokenStream) -> TokenStream {
     let derive_input = syn::parse_macro_input!(input as syn::DeriveInput);
-    orm::derives::expand_derive_value_type(derive_input)
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
+    crate_name::resolve(
+        orm::derives::expand_derive_value_type(derive_input)
+            .unwrap_or_else(syn::Error::into_compile_error),
+    )
+    .into()
 }
 
 #[cfg(test)]

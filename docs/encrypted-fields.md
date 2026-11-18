@@ -6,7 +6,7 @@ An encrypted field is stored encrypted in its column and holds plaintext in your
 
 ```toml
 [dependencies]
-tideorm = { version = "0.17.9", features = ["postgres", "encrypted-fields"] }
+tideorm = { version = "0.18.0", features = ["postgres", "encrypted-fields"] }
 ```
 
 List the fields in the model's `encrypted` option, by field name or column name:

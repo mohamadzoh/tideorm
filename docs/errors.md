@@ -73,7 +73,7 @@ match User::create(user).await {
 | `LockNotAvailable` | `55P03`, MySQL's lock wait timeout, a busy or locked SQLite database | Yes |
 | `StatementTimeout` | `57014` | Yes |
 | `ConnectionTimeout` | `53300`, or no pooled connection within `acquire_timeout` | Yes |
-| `ConnectionClosed` | Class `08`: the server closed the connection under a statement | Yes |
+| `ConnectionClosed` | Class `08` but `08P01`, and the server's own session timeouts (`57P05`, `25P03`, `25P04`, MySQL 4031): the server closed the connection | Yes |
 | `ConnectionRefused` | Nothing listens at the host and port, or the server is not up yet | Yes |
 | `AuthenticationFailed` | `28P01`, `28000`, MySQL 1045 | No |
 | `UnknownDatabase` | `3D000`, MySQL 1049 | No |

@@ -82,8 +82,6 @@ fn comment_introducers_inside_a_literal_are_still_accepted() {
         .expect("a comment introducer inside a literal is just data");
     validate_raw_sql_fragment("WHERE raw SQL", "\"note\" = 'issue #42'")
         .expect("MySQL's `#` comment introducer inside a literal is just data");
-    validate_raw_sql_fragment("WHERE raw SQL", "\"note\" = $1")
-        .expect("a bound placeholder carries no literal at all");
     validate_raw_sql_fragment("WHERE raw SQL", "\"note\" = ?")
         .expect("a bound placeholder carries no literal at all");
 }
@@ -124,11 +122,27 @@ fn dollar_quotes_and_bracketed_quotes_cannot_hide_a_comment() {
         );
     }
     for fragment in [
-        "\"note\" = $1",
+        "\"note\" = '$1'",
         "tags[1] = ?",
         "\"price$usd\" > 0",
         "a$b = 1",
     ] {
+        validate_raw_sql_fragment("WHERE raw SQL", fragment).expect(fragment);
+    }
+}
+
+/// The builder numbers a statement's values itself, so a `$1` written into a
+/// fragment would read on PostgreSQL whichever value the builder made first.
+#[test]
+fn a_positional_parameter_is_refused() {
+    for fragment in ["parent_id = $1", "a = ? AND b = $12", "$1::int > 0"] {
+        let error = validate_raw_sql_fragment("WHERE raw SQL", fragment).unwrap_err();
+        assert!(
+            error.contains("positional parameters"),
+            "{fragment}: {error}"
+        );
+    }
+    for fragment in ["note = '$1'", "\"$1\" = 1", "price$1 > 0"] {
         validate_raw_sql_fragment("WHERE raw SQL", fragment).expect(fragment);
     }
 }
@@ -142,7 +156,7 @@ fn a_keyword_glued_to_a_number_is_still_read() {
     validate_having_sql_fragment("HAVING raw SQL", "SUM(price) > 1.5e10 AND COUNT(*) > 1_000")
         .expect("numbers are no words");
     let error = validate_having_sql_fragment("HAVING raw SQL", "COUNT(*) > $1").unwrap_err();
-    assert!(error.contains("unexpected character '$'"), "{error}");
+    assert!(error.contains("positional parameters"), "{error}");
 }
 
 #[test]

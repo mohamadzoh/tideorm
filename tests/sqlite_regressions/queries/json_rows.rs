@@ -2,7 +2,7 @@
 //! a JSON function or a view over one produced it. How a statement's outputs
 //! are classified is unit-tested with `sqlite_outputs`; these read real rows.
 
-use crate::fixtures::memory_database;
+use crate::fixtures::{User, memory_database, users_and_posts};
 use tideorm::prelude::*;
 
 /// The `payload` of the first row `source` holds.
@@ -263,22 +263,58 @@ async fn json_scalar_functions_preserve_sql_text() {
     }
 }
 
-/// Each column of a repeated name decodes by its own type before the last
-/// one wins.
+/// A result with two columns of one name, a join's two `id`s, is read by that name neither into
+/// a model nor into a JSON row: either would take whichever came last, the post's `id` for the
+/// user's.
 #[tokio::test]
-async fn duplicate_json_aliases_decode_each_column_before_last_value_wins() {
-    let db = memory_database("").await;
-    for (sql, expected) in [
-        (
-            "SELECT json_array(1) AS value, '[2]' AS value",
-            json!("[2]"),
-        ),
-        ("SELECT '[2]' AS value, json_array(1) AS value", json!([1])),
-    ] {
-        assert_eq!(
-            db.query_raw_json(sql).await.unwrap()[0]["value"],
-            expected,
-            "{sql}"
+async fn a_name_two_result_columns_share_is_not_read_by_name() {
+    fn refused<T: std::fmt::Debug>(read: tideorm::Result<T>) {
+        let error = read.unwrap_err().to_string();
+        assert!(
+            error.contains("more than one result column is named") && error.contains("id"),
+            "{error}"
         );
     }
+    let db = users_and_posts("tenant", 10).await;
+    let joined = "FROM review_users u JOIN review_posts p ON p.user_id = u.id";
+
+    refused(
+        db.query_raw_as::<User>(&format!("SELECT u.*, p.id {joined}"))
+            .await,
+    );
+    refused(
+        db.query_raw_json(&format!("SELECT u.id, p.id {joined}"))
+            .await,
+    );
+    // the builder refuses a name it sees twice, but a table no model describes hides its `id`
+    db.exec_raw("CREATE TABLE review_tags(id INTEGER, user_id INTEGER); INSERT INTO review_tags VALUES (7, 1)")
+        .await
+        .unwrap();
+    let query = || {
+        User::query_with(&db)
+            .inner_join("review_tags", "review_users.id", "review_tags.user_id")
+            .select_raw("review_users.*")
+            .select_raw("review_tags.*")
+    };
+    refused(query().get().await);
+    refused(query().get_json().await);
+
+    // whichever type each column would decode as
+    for sql in [
+        "SELECT json_array(1) AS value, '[2]' AS value",
+        "SELECT '[2]' AS value, json_array(1) AS value",
+    ] {
+        let error = db.query_raw_json(sql).await.unwrap_err().to_string();
+        assert!(
+            error.contains("more than one result column is named 'value'"),
+            "{sql}: {error}"
+        );
+    }
+
+    // named apart, each reads as itself
+    let rows = db
+        .query_raw_json(&format!("SELECT u.id, p.id AS post_id {joined}"))
+        .await
+        .unwrap();
+    assert_eq!(rows, [serde_json::json!({"id": 1, "post_id": 10})]);
 }

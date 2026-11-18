@@ -390,7 +390,7 @@ fn model_attribute_accepts_inline_table_options() {
         .to_string();
     let normalized = normalize_tokens(&expanded);
 
-    assert!(normalized.contains("#[derive(tideorm::Model)]"));
+    assert!(normalized.contains("#[derive(::tideorm::Model)]"));
     assert!(normalized.contains("#[tideorm(table=\"users\",soft_delete)]"));
 }
 
@@ -425,7 +425,7 @@ fn model_attribute_preserves_user_derives() {
         .to_string();
     let normalized = normalize_tokens(&expanded);
 
-    assert!(normalized.contains("#[derive(tideorm::Model)]"));
+    assert!(normalized.contains("#[derive(::tideorm::Model)]"));
     assert!(normalized.contains("#[derive(PartialEq,Eq,Hash)]"));
 }
 

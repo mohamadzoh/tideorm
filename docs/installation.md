@@ -4,11 +4,13 @@ Add `tideorm` to your `Cargo.toml` with one backend feature and one runtime feat
 
 ```toml
 [dependencies]
-tideorm = { version = "0.17.9", default-features = false, features = ["postgres", "runtime-tokio"] }
+tideorm = { version = "0.18.0", default-features = false, features = ["postgres", "runtime-tokio"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
-That is all a project needs to define models and run queries. The [Quick Start](quick-start.md) builds a complete program on it.
+That is all a project needs to define models and run queries; serde, chrono and serde_json come through `tideorm` and its prelude. The [Quick Start](quick-start.md) builds a complete program on it.
+
+The dependency may be renamed (`orm = { package = "tideorm", .. }`, then `#[orm::model]`): the macros read the name from the crate's `Cargo.toml`, `[workspace.dependencies]` included. A crate that defines models must depend on `tideorm` itself, under whatever name; a re-export through another crate is not enough.
 
 ## Choosing a Backend
 
@@ -16,13 +18,13 @@ Each backend is a Cargo feature that builds its driver:
 
 ```toml
 # PostgreSQL
-tideorm = { version = "0.17.9", default-features = false, features = ["postgres", "runtime-tokio"] }
+tideorm = { version = "0.18.0", default-features = false, features = ["postgres", "runtime-tokio"] }
 
 # MySQL or MariaDB
-tideorm = { version = "0.17.9", default-features = false, features = ["mysql", "runtime-tokio"] }
+tideorm = { version = "0.18.0", default-features = false, features = ["mysql", "runtime-tokio"] }
 
 # SQLite
-tideorm = { version = "0.17.9", default-features = false, features = ["sqlite", "runtime-tokio"] }
+tideorm = { version = "0.18.0", default-features = false, features = ["sqlite", "runtime-tokio"] }
 ```
 
 The default feature set is `["postgres", "runtime-tokio"]`. Set `default-features = false` and name your features explicitly: a MySQL- or SQLite-only project that leaves the defaults on still compiles the whole PostgreSQL driver.
@@ -62,7 +64,7 @@ Six features unlock optional APIs. They add no dependencies; they only make the 
 | `encrypted-fields` | `#[tideorm(encrypted = "..")]` columns, encrypted on write and decrypted on load; see [Encrypted Fields](encrypted-fields.md) |
 
 ```toml
-tideorm = { version = "0.17.9", default-features = false, features = ["postgres", "runtime-tokio", "fulltext", "entity-manager"] }
+tideorm = { version = "0.18.0", default-features = false, features = ["postgres", "runtime-tokio", "fulltext", "entity-manager"] }
 ```
 
 Each page for a feature-gated API names its feature at the top.

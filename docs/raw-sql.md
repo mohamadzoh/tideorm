@@ -100,7 +100,8 @@ let totals: Vec<Totals> = Database::raw_as(
 ```
 
 - Each field is read from the column of its name, as the field's type, the way a model reads its columns, so alias a computed column to its field (`AS users`). A raw identifier field (`r#type`) reads the column `type`.
-- An `Option` field takes SQL `NULL`; any other field fails on one.
+- An `Option` field takes SQL `NULL`, and a column the row does not have, as `None`; any other field fails on either, so a misspelt alias empties an `Option` field silently.
+- A name two result columns share, such as a join's two `id`s, fails the row rather than read either: alias them (`p.id AS post_id`). The same holds for `raw_json` keys.
 - The derive takes structs with named fields and no attributes.
 - A row that does not read fails the call with a conversion error naming the type: `raw_as() could not read a row as ..`.
 

@@ -5,6 +5,92 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] - 2026-11-18
+
+A breaking release: reads and writes that gave a silently wrong result now give the right one
+or fail. Every sibling crate moves to 0.2.0 with it (`tideorm-engine`, `tideorm-sql-builder`,
+`tideorm-sql-builder-derive`, `tideorm-driver`, `tideorm-driver-core`, `-postgres`, `-mysql` and
+`-sqlite`), and `tideorm-macros` 0.18.0 pairs with `tideorm` 0.18.0.
+
+### Breaking Changes
+
+- A column read by a name two result columns share is an error ("more than one result column is
+  named `id`; give each an alias or read them by position") instead of the last of them: a join's
+  `SELECT u.*, p.id` read into a model took the post's `id` for the user's. Models,
+  `query_raw_as`/`raw_as`, `get_json()` and `query_raw_json` all refuse it; reads by position are
+  unchanged. Alias one of the columns (`p.id AS post_id`).
+- A query builder's raw fragment (`where_raw`, `select_raw`, `having_raw`, window expressions)
+  holding a positional parameter (`$1`) is refused: PostgreSQL read it as the statement's first
+  value, which the builder had numbered for a value of its own. Write `?` and pass the value to
+  the `*_raw_with` form. Whole raw statements (`query_raw` and the like) still take `$1`.
+- SQLite reads `"name"` as an identifier only: each connection turns off SQLite's double-quoted
+  string literals, so a misspelt column in double quotes is an error instead of a string constant
+  that a filter or an index compares with. Write string literals in single quotes. Schemas already
+  stored still open.
+- TLS: a configured certificate authority (PostgreSQL `sslrootcert`, MySQL `ssl_ca`) is the only
+  one trusted, instead of one more beside the public web roots. `verify-ca` without one refuses to
+  connect, as libpq does: that mode does not check the host name, and a public authority signs
+  for any host. PostgreSQL's `require` with `sslrootcert` checks the chain, as libpq does. A
+  refused certificate is a TLS error, no longer an I/O error.
+- Exact values: a `Decimal` read from a PostgreSQL `NUMERIC`, or from decimal text on any
+  backend, that it cannot hold exactly is an error instead of rounded (read such a column through
+  `get_json()`); an `f32` read from a value past its range (a MySQL `DOUBLE`, a SQLite `REAL`) is
+  an error instead of infinity; and a date past the year 9999 written to MySQL or MariaDB is an
+  error, where MariaDB stored the zero date.
+- Error classes: PostgreSQL's `08P01` (a protocol violation, such as a wrong number of bind
+  values) is no longer a closed connection that `is_retryable()` retries: the connection outlives
+  it, and a retry fails the same way. The servers' own session timeouts, PostgreSQL's `57P05`,
+  `25P03` and `25P04` and MySQL's 4031, are closed connections.
+- Two fields mapped to one column are a compile error; an insert dropped one of the values and
+  every read failed.
+- `tideorm-sql-builder` 0.2.0 refuses SQL its server would: `WITH .. INSERT` on MySQL and MariaDB
+  (give the `INSERT`'s `SELECT` the `WITH` clause), an `INSERT`, `UPDATE` or `DELETE` inside a
+  `WITH` clause off PostgreSQL, and `RETURNING` on a MariaDB `UPDATE` that joins other tables,
+  each a `RenderError`.
+
+### Added
+
+- The macros take a renamed dependency: with `orm = { package = "tideorm", .. }`, `#[orm::model]`
+  and `#[derive(orm::Model)]` work, the name read from the crate's `Cargo.toml`, its
+  `[workspace.dependencies]` included.
+- The book has an `llms.txt`, and publishes `llms-full.txt` beside it: the cheat sheet and every
+  page in one Markdown file, for tools to read in one fetch.
+
+### Fixed
+
+- A model named like a type parameter of the generated serde code (`A`, `D`, `E`, `S`) failed to
+  compile.
+- PostgreSQL logins: a role whose name holds `,` or `=` failed SCRAM authentication, and so did a
+  password SASLprep refuses (Latin and Hebrew together), which the server keeps unprepared; both
+  log in as they do with libpq.
+- MySQL and MariaDB accounts with an empty password log in.
+- PostgreSQL: after an `ALTER TABLE`, a statement cached for the old shape failed (`0A000`,
+  "cached plan must not change result type") on every run until its connection closed; the failed
+  run now drops it, and the next one prepares it again.
+- A query dropped part-way no longer fails the next statement on its connection with an error its
+  reply held (PostgreSQL, MySQL and MariaDB).
+- Malformed data from a server (a fixed-width PostgreSQL value of the wrong length: numbers,
+  `MONEY`, ranges, geometry, `CUBE`, times; a row with fewer values than columns) is a decode
+  error instead of a panic.
+- Dates and times: PostgreSQL text timestamps with a BC or five-digit year or an offset with
+  seconds, `TIMETZ` with an offset with seconds, and SQLite Julian-day numbers, which could read a
+  millisecond off.
+- SQLite: `:memory:` or `file::memory:` with `cache=shared` opened a database per pooled
+  connection, so a table one connection created was missing on the others; it is one database,
+  as SQLite's own URI makes it.
+
+### Changed
+
+- Reading a MySQL packet no longer allocates, and the drivers no longer turn on `rust_decimal`'s
+  `maths` feature.
+- Every public item is documented, and `missing_docs` warns for the whole crate.
+- The docs say what was unclear: `create()` returns the row with its generated key and
+  timestamps, never a column's default in place of a field; a join repeats a model per joined
+  row, in `count()` and `paginate()` too; dropping a running query does not stop it on the server;
+  scopes share the query's one `or_where_*` group; and how translations fall back, polymorphic
+  type names and tokens behave.
+- Requires tideorm-engine 0.2.0.
+
 ## [0.17.9] - 2026-11-16
 
 ### Added

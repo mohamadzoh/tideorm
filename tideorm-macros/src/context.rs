@@ -206,6 +206,7 @@ impl BuildContext {
             .collect();
 
         validate_primary_key_fields(&input.ident, &db_fields, input.tokenize)?;
+        validate_unique_columns(&db_fields)?;
         validate_relation_fields(&input.ident, &fields)?;
         validate_index_definitions(&indexes, &db_fields)?;
 

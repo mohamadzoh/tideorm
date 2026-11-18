@@ -1,5 +1,3 @@
-#![allow(missing_docs)]
-
 use crate::error::{Error, Result};
 
 use super::Model;

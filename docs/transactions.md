@@ -225,7 +225,7 @@ Do not move the transaction handle, or a `Database` taken from `Database::curren
 
 ## Pinned Sessions
 
-A pool hands each statement whichever connection is free, so what one statement sets for its session (`SET`, `PRAGMA`, MySQL's `GET_LOCK`) may not hold for the next. `pin_session()` returns a handle on one connection of its own:
+A pool hands each statement whichever connection is free, so what one statement sets for its session (`SET`, `PRAGMA`, MySQL's `GET_LOCK`) may not hold for the next, and stays on that connection for whatever statement takes it later. `pin_session()` returns a handle on one connection of its own:
 
 ```rust
 let session = db.pin_session().await?;

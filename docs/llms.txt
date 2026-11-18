@@ -1,0 +1,53 @@
+# TideORM
+
+> TideORM is an async, ActiveRecord-style ORM for Rust. A model is a plain struct with one attribute (`#[tideorm::model]`), its relations are fields of that struct, and rows are read and written through the model's own methods and a fluent query builder. It runs on PostgreSQL, MySQL, MariaDB and SQLite (and CockroachDB, YugabyteDB, TiDB and Vitess), on Tokio or async-std.
+
+- Import everything from `tideorm::prelude::*`; never depend on `tideorm-engine`, `tideorm-sql-builder` or `tideorm-driver` directly.
+- Prefer the typed column constants the macro generates (`User::EMAIL`) to string names.
+- Calls inside `db.transaction(..)` join the transaction without a handle being passed.
+- Optional modules are cargo features: `dirty-tracking`, `entity-manager`, `attachments`, `translations`, `fulltext`, `encrypted-fields`.
+
+## Docs
+
+- [Full guide and API cheat sheet in one file](https://tideorm.com/llms-full.txt): every page below, after the cheat sheet, as plain Markdown
+- [API cheat sheet](https://github.com/mohamadzoh/tideorm/blob/master/API.md): model shape, query methods, terminals and features on one page
+- [Introduction](https://tideorm.com/introduction.html): what TideORM is and a first look
+- [Installation](https://tideorm.com/installation.html): cargo features, backends and runtimes
+- [Quick Start](https://tideorm.com/quick-start.html): a complete SQLite program
+- [Configuration](https://tideorm.com/configuration.html): `TideConfig`, pools and global state
+- [Databases](https://tideorm.com/databases.html): backend differences and type mappings
+- [Compatible Servers](https://tideorm.com/compatible-servers.html): CockroachDB, YugabyteDB, TiDB and Vitess
+- [Defining Models](https://tideorm.com/models.html): struct and field options, keys and indexes
+- [Reading and Writing](https://tideorm.com/crud.html): `find`, `create`, `save`, `update`, `delete`, batches and upserts
+- [Validation](https://tideorm.com/validation.html): `#[validate]` rules
+- [Callbacks and Timestamps](https://tideorm.com/callbacks.html): lifecycle hooks and managed timestamps
+- [Soft Deletes and Scopes](https://tideorm.com/soft-deletes.html): trashed rows and reusable filters
+- [Typed Columns](https://tideorm.com/typed-columns.html): compile-time checked columns and values
+- [Encrypted Fields](https://tideorm.com/encrypted-fields.html): fields stored encrypted
+- [Tokenization](https://tideorm.com/tokenization.html): encrypted, URL-safe tokens for primary keys
+- [Query Builder](https://tideorm.com/queries.html): filters, OR groups, ordering and pagination
+- [Joins, Aggregates and Advanced SQL](https://tideorm.com/advanced-queries.html): joins, grouping, subqueries, unions, CTEs and window functions
+- [JSON and Arrays](https://tideorm.com/json-and-arrays.html): JSON and array columns
+- [Full-Text Search](https://tideorm.com/full-text-search.html): search modes, ranking and highlighting
+- [Raw SQL](https://tideorm.com/raw-sql.html): parameterized raw statements and their markers
+- [Query Cache](https://tideorm.com/caching.html): cached reads and invalidation
+- [Relations](https://tideorm.com/relations.html): relation fields, eager and lazy loading
+- [File Attachments](https://tideorm.com/attachments.html): attachment slots
+- [Translations](https://tideorm.com/translations.html): translated fields
+- [Entity Manager](https://tideorm.com/entity-manager.html): identity map, unit of work and `flush()`
+- [Transactions](https://tideorm.com/transactions.html): ambient transactions, savepoints and retries
+- [Migrations](https://tideorm.com/migrations.html): the `Schema` builder and `Migrator`
+- [Seeding](https://tideorm.com/seeding.html): seeders and their ledger
+- [Schema Sync and Export](https://tideorm.com/schema.html): development sync, schema export and the catalog reader
+- [Errors](https://tideorm.com/errors.html): `tideorm::Error` and how to classify it
+- [Logging and Profiling](https://tideorm.com/profiling.html): query logging and timing
+- [Project Rules](https://tideorm.com/project-rules.html): `tideorm.toml` rules checked at compile time
+- [Testing](https://tideorm.com/testing.html): testing applications that use TideORM
+- [Benchmarking](https://tideorm.com/benchmarking.html): TideORM's own benchmarks, for working on TideORM
+- [Troubleshooting](https://tideorm.com/troubleshooting.html): common errors and their fixes
+
+## Optional
+
+- [API reference](https://docs.rs/tideorm): every public item
+- [Examples](https://github.com/mohamadzoh/tideorm-examples): runnable programs, with an `AGENTS.md` for coding agents
+- [Command-line tool](https://github.com/mohamadzoh/tideorm-cli): scaffolding, migrations and seeding (`tideorm`)

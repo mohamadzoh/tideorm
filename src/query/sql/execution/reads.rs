@@ -2,7 +2,6 @@
 
 use super::*;
 
-#[allow(missing_docs)]
 impl<M: Model> QueryBuilder<M> {
     /// Run `statement`, which the engine does not log (`EngineLog::Off`),
     /// with query logging, attaching this query's error context to a failure.

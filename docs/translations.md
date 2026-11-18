@@ -6,7 +6,7 @@ Translations keep per-language values of a model's fields in a JSON column. The 
 
 ```toml
 [dependencies]
-tideorm = { version = "0.17.9", default-features = false, features = ["postgres", "runtime-tokio", "translations"] }
+tideorm = { version = "0.18.0", default-features = false, features = ["postgres", "runtime-tokio", "translations"] }
 ```
 
 ## Model Setup
@@ -180,7 +180,7 @@ let json = product.to_json_in("ar");
 let json = product.to_json_with_all_translations();
 ```
 
-A field with no translation in the requested language takes the fallback language's, and then keeps the model's own value. The plain forms log a failure and return `{}`; `try_to_translated_json`, `try_to_translated_json_in`, `try_to_json_with_all_translations` and `Model::try_to_json_in` return it instead.
+A field with no translation in the requested language takes the fallback language's, and then keeps the model's own value. A stored translation counts even when it is an empty string or `null`, so remove one rather than blanking it to fall back. Language codes match exactly: `en-US` and `en-us` are two languages, and only the spelling in the allowed list can be written. The plain forms log a failure and return `{}`; `try_to_translated_json`, `try_to_translated_json_in`, `try_to_json_with_all_translations` and `Model::try_to_json_in` return it instead.
 
 `Model::to_json()` itself renders translatable fields in the language its options name (`"language"`), else in the model's fallback language, and removes the raw `translations` column. A malformed field in the stored payload is skipped rather than failing the whole model, and a field that is both hidden and translatable stays hidden.
 

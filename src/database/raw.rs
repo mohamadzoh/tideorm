@@ -353,7 +353,9 @@ impl Database {
     /// For rows that are not a model's: a projection, a report, a join. `T`
     /// derives [`FromQueryResult`](crate::FromQueryResult), which reads each
     /// field from the column of its name as that field's type, the way a
-    /// model reads its columns; an `Option` field takes SQL `NULL`. Use
+    /// model reads its columns; an `Option` field reads SQL `NULL`, or a
+    /// column the row does not have, as `None`, and a name two result
+    /// columns share fails rather than read either. Use
     /// [`Database::query_raw_as`] to run against a specific handle.
     ///
     /// ```ignore

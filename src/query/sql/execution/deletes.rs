@@ -11,7 +11,6 @@ fn deletion_stamp() -> Value {
     Value::ChronoDateTimeUtc(Some(chrono::Utc::now()))
 }
 
-#[allow(missing_docs)]
 impl<M: Model> QueryBuilder<M> {
     /// Render `DELETE FROM <table> WHERE ..` for this query's filters.
     pub(super) fn build_delete_sql(

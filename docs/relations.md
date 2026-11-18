@@ -292,7 +292,7 @@ pub struct Post {
 }
 ```
 
-`morph_name = "imageable"` names the `imageable_type` and `imageable_id` columns, which the child model must declare; the derive fails if either is missing. The type column holds the owner's **table name** (`"posts"`), not the struct name. An owner that keys its children by another column names it with `local_key`, as `#[tideorm(morph_name = "imageable", local_key = "uuid")]`.
+`morph_name = "imageable"` names the `imageable_type` and `imageable_id` columns, which the child model must declare; the derive fails if either is missing. The type column holds the owner's **table name** (`"posts"`), not the struct name. It is the name without its schema, so two owners whose tables share a name in different schemas write the same type, and each would read the other's children: give owner tables distinct names. An owner that keys its children by another column names it with `local_key`, as `#[tideorm(morph_name = "imageable", local_key = "uuid")]`.
 
 `MorphOne` and `MorphMany` load like `HasOne` and `HasMany`, eagerly too (`with("images")`). `MorphTo<T>` loads the owner:
 

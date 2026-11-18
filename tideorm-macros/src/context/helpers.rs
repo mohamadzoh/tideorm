@@ -63,6 +63,32 @@ fn into_result(errors: Option<syn::Error>) -> syn::Result<()> {
     }
 }
 
+/// Refuse two fields that map to one column: an insert would keep one value
+/// and drop the other, and every read would name the column twice.
+pub(super) fn validate_unique_columns(fields: &[ModelField]) -> syn::Result<()> {
+    let mut errors = None;
+    for (index, field) in fields.iter().enumerate() {
+        let column = field.column_name();
+        if let Some(first) = fields[..index]
+            .iter()
+            .find(|earlier| earlier.column_name() == column)
+        {
+            combine_error(
+                &mut errors,
+                syn::Error::new_spanned(
+                    field.ident(),
+                    format!(
+                        "column '{column}' is already the column of field `{}`; two fields cannot \
+                         share a column, so rename one with #[tideorm(column = \"..\")]",
+                        first.name()
+                    ),
+                ),
+            );
+        }
+    }
+    into_result(errors)
+}
+
 pub(super) fn validate_primary_key_fields(
     struct_ident: &Ident,
     fields: &[ModelField],

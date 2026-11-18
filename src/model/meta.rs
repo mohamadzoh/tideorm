@@ -1,5 +1,3 @@
-#![allow(missing_docs)]
-
 /// Index definition for database schema generation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IndexDefinition {
@@ -42,8 +40,11 @@ pub type RelationPayloadFilter = fn(&mut serde_json::Value, &[String]);
 
 /// Metadata trait for model information.
 pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
+    /// The primary key's Rust type: the key field's type, or a tuple of the key
+    /// fields' types, in declaration order, for a composite key.
     type PrimaryKey: Send + Sync + Clone + std::fmt::Debug + serde::Serialize + 'static;
 
+    /// The table: `table = ".."`, or the struct name in snake case, pluralized.
     fn table_name() -> &'static str;
 
     /// The schema declared with `#[tideorm(schema = "..")]`, when there is one.
@@ -54,22 +55,30 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
         None
     }
 
+    /// The primary key's columns, in the order the key fields are declared.
     fn primary_key_names() -> &'static [&'static str];
 
+    /// The first primary-key column, the only one unless the key is composite.
     fn primary_key_name() -> &'static str {
         Self::primary_key_names().first().copied().unwrap_or("id")
     }
 
+    /// Whether the database numbers the key (`#[tideorm(auto_increment)]`).
     fn primary_key_auto_increment() -> bool {
         false
     }
 
+    /// The key as `column = value`, its columns joined with ` AND `, for error
+    /// messages. It is never run as SQL.
     fn primary_key_display(primary_key: &Self::PrimaryKey) -> String;
 
+    /// Whether `primary_key` still holds its type's default, so the row has no key
+    /// yet: `save()` inserts such a model. A composite key is new when any part is.
     fn primary_key_is_new(_primary_key: &Self::PrimaryKey) -> bool {
         false
     }
 
+    /// The database columns, in field order. Relation and `skip` fields are not columns.
     fn column_names() -> &'static [&'static str];
 
     /// The Rust field's integer range within a signed 64-bit one, the widest
@@ -80,6 +89,7 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
         None
     }
 
+    /// The Rust fields behind [`column_names`](Self::column_names), in the same order.
     fn field_names() -> &'static [&'static str];
 
     /// Fields a user-supplied serde implementation flattens into its parent.
@@ -98,6 +108,8 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
         &[]
     }
 
+    /// Resolve a database column name or a Rust field name to the column name. A
+    /// column name wins over a field name that happens to be spelled the same.
     fn canonical_column_name(name: &str) -> Option<&'static str> {
         if let Some(column_name) = Self::column_names()
             .iter()
@@ -204,6 +216,8 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
         }
     }
 
+    /// The fields `to_json()` leaves out: `hidden = ".."`, or else the soft-delete
+    /// field (`deleted_at`).
     fn hidden_attributes() -> Vec<&'static str> {
         vec!["deleted_at"]
     }
@@ -252,6 +266,7 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
         vec![]
     }
 
+    /// The columns of `searchable = ".."`, to pass to a full-text search.
     fn searchable_fields() -> Vec<&'static str> {
         vec![]
     }
@@ -266,6 +281,7 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
         None
     }
 
+    /// The fields of `translatable = ".."`.
     fn translatable_fields() -> Vec<&'static str> {
         vec![]
     }
@@ -275,6 +291,7 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
         &[]
     }
 
+    /// Whether the model has an encrypted field.
     fn has_encrypted_fields() -> bool {
         !Self::encrypted_fields().is_empty()
     }
@@ -296,10 +313,13 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
         false
     }
 
+    /// The languages of `languages = ".."`, or else the configured ones
+    /// (`TideConfig::languages`).
     fn allowed_languages() -> Vec<String> {
         crate::config::Config::get_languages()
     }
 
+    /// The language of `fallback_language = ".."`, or else the configured one.
     fn fallback_language() -> String {
         crate::config::Config::get_fallback_language()
     }
@@ -310,56 +330,70 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
         Ok(None)
     }
 
+    /// Whether the model has translatable fields; never without the `translations` feature.
     #[cfg(feature = "translations")]
     fn has_translations() -> bool {
         !Self::translatable_fields().is_empty()
     }
 
+    /// Whether the model has translatable fields; never without the `translations` feature.
     #[cfg(not(feature = "translations"))]
     fn has_translations() -> bool {
         false
     }
 
+    /// The single-file attachment slots of `has_one_files = ".."`.
     fn has_one_attached_file() -> Vec<&'static str> {
         vec![]
     }
 
+    /// The multi-file attachment slots of `has_many_files = ".."`.
     fn has_many_attached_files() -> Vec<&'static str> {
         vec![]
     }
 
+    /// Every attachment slot, the single-file ones first.
     fn files_relations() -> Vec<&'static str> {
         let mut relations = Self::has_one_attached_file();
         relations.extend(Self::has_many_attached_files());
         relations
     }
 
+    /// Whether the model has attachment slots; never without the `attachments` feature.
     #[cfg(feature = "attachments")]
     fn has_file_attachments() -> bool {
         !Self::files_relations().is_empty()
     }
 
+    /// Whether the model has attachment slots; never without the `attachments` feature.
     #[cfg(not(feature = "attachments"))]
     fn has_file_attachments() -> bool {
         false
     }
 
+    /// Whether the model is `soft_delete`: deletes mark rows, and reads leave marked
+    /// rows out.
     fn soft_delete_enabled() -> bool {
         false
     }
 
+    /// The soft-delete column: `deleted_at_column = ".."`, or `deleted_at`.
     fn deleted_at_column() -> &'static str {
         "deleted_at"
     }
 
+    /// Whether writes fill in timestamps: the model is `timestamps` or has a
+    /// `created_at` or `updated_at` field.
     fn has_timestamps() -> bool {
         false
     }
 
+    /// The model's `#[index(..)]` indexes, which schema sync creates.
     fn indexes() -> Vec<IndexDefinition> {
         vec![]
     }
 
+    /// The model's `#[unique_index(..)]` indexes, which schema sync creates.
     fn unique_indexes() -> Vec<IndexDefinition> {
         vec![]
     }

@@ -83,6 +83,8 @@ let posts = Post::query()
 
 An alias is how a table joins itself or joins the same table twice. A right join's unmatched rows have `NULL` in every model column, which `get()` cannot turn into models, so read such a query with `get_json()`. Two selected columns may not share an output name, since a row holds only one of them: alias one (`tags.id AS tag_id`).
 
+A join gives a model once per matching joined row, and `count()` and `paginate()` count those rows, so a user with three posts appears, and counts, three times. Add `distinct()` to read and count each model once.
+
 ```rust,ignore
 // Every user, with or without posts
 let rows = Post::query()

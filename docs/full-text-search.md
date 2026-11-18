@@ -5,7 +5,7 @@ Full-text search finds the rows whose text columns hold the words of a search, r
 It requires the `fulltext` feature:
 
 ```toml
-tideorm = { version = "0.17.9", features = ["postgres", "fulltext"] }
+tideorm = { version = "0.18.0", features = ["postgres", "fulltext"] }
 ```
 
 ```rust

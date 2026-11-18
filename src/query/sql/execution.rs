@@ -16,7 +16,6 @@ pub use shaped_reads::Paginated;
 
 use hash_helpers::{hash_or_group, hash_where_condition};
 
-#[allow(missing_docs)]
 impl<M: Model> QueryBuilder<M> {
     fn chunk_primary_key_column() -> Result<&'static str> {
         match M::primary_key_names() {

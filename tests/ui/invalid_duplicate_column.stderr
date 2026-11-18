@@ -1,0 +1,5 @@
+error: column 'name' is already the column of field `name`; two fields cannot share a column, so rename one with #[tideorm(column = "..")]
+ --> tests/ui/invalid_duplicate_column.rs:9:5
+  |
+9 |     display_name: String,
+  |     ^^^^^^^^^^^^

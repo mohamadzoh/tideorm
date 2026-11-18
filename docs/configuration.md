@@ -107,6 +107,8 @@ TideConfig::init()
 
 The two timeouts are independent. Whichever deadline passes first ends the wait, so raising `connect_timeout` does not extend the wait for a free slot.
 
+Dropping a running query, through a timeout or a cancelled task, does not stop it on the server: its connection goes back to the pool once the statement finishes, on SQLite once the connection's worker thread has run it. To bound a statement's work, set a server-side limit such as PostgreSQL's `statement_timeout` (below).
+
 `pool(..)` replaces every pool setting at once with a `PoolConfig`, which starts from the defaults above and has a setter of the same name for each one. Its fields are public, so the same values can feed `Database::builder()`:
 
 ```rust
@@ -174,7 +176,7 @@ SQLite connections enforce foreign keys, wait up to 5 s for a locked database, a
 
 The builder also takes a URL (`url(..)`) and the pool settings of the previous section. A setting left unset keeps the driver's default, which is not always `TideConfig`'s: the driver keeps no idle connection and waits 30 s for a free one, where `TideConfig` keeps one and waits 8. `build()` fails without a URL or driver options, with `max_connections(0)`, and with `min_connections` above `max_connections`. The builder's `{:?}` masks a URL's credentials and leaves driver options out, since they hold the password.
 
-An in-memory SQLite database lives only while a connection to it is open, so its pool keeps one connection open and closes none for being idle or old, whatever the settings say. With `cache=private` each connection gets a database of its own, so such a pool must hold one connection.
+An in-memory SQLite database lives only while a connection to it is open, so its pool keeps one connection open and closes none for being idle or old, whatever the settings say. With `cache=private` each connection gets a database of its own, so such a pool must hold one connection; so does SQLite's own URI, `sqlite:file::memory:`, unless it adds `?cache=shared`, which makes it one database for the whole process.
 
 ### Statement Cache
 
@@ -182,7 +184,7 @@ Each connection prepares a parameterized statement once and reuses it while it l
 
 ## Pinned Sessions
 
-A pool hands each statement whichever connection is free, so what one statement sets for its session (`SET`, `PRAGMA`, MySQL's `GET_LOCK`) may not hold for the next. `pin_session()` opens a connection of its own, with the pool's settings but outside its slots, and every statement through the returned handle runs on it, transactions included:
+A pool hands each statement whichever connection is free, so what one statement sets for its session (`SET`, `PRAGMA`, MySQL's `GET_LOCK`) may not hold for the next, and stays on that connection for whatever statement takes it later. `pin_session()` opens a connection of its own, with the pool's settings but outside its slots, and every statement through the returned handle runs on it, transactions included:
 
 ```rust
 let session = db.pin_session().await?;

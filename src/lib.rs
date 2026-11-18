@@ -1,5 +1,6 @@
-//! TideORM is a Rust ORM with macro-generated models, a query builder, and
-//! field-declared relation helpers.
+//! TideORM is an async, ActiveRecord-style ORM for Rust: macro-generated models, a
+//! fluent query builder, and field-declared relations, on PostgreSQL, MySQL, MariaDB,
+//! SQLite, CockroachDB, YugabyteDB, TiDB and Vitess.
 //!
 //! When you are trying to debug behavior, start with:
 //! - `query::QueryBuilder::debug()` to inspect generated SQL before execution

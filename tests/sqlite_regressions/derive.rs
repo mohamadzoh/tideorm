@@ -63,3 +63,28 @@ mod with_tideorm_result_in_scope {
         pub name: String,
     }
 }
+
+/// Models named like the generic parameters of the generated serde impls:
+/// `A` failed with E0574 and `D` with E0401 when those impls used them.
+mod with_one_letter_names {
+    #[tideorm::model(table = "a_rows")]
+    pub struct A {
+        #[tideorm(primary_key)]
+        pub id: i64,
+    }
+
+    #[tideorm::model(table = "d_rows")]
+    pub struct D {
+        #[tideorm(primary_key)]
+        pub id: i64,
+        pub e: Option<i64>,
+    }
+
+    #[test]
+    fn round_trip_through_serde() {
+        let a: A = serde_json::from_value(serde_json::json!({"id": 1})).unwrap();
+        let d: D = serde_json::from_value(serde_json::json!({"id": 2, "e": 3})).unwrap();
+        assert_eq!((a.id, d.id, d.e), (1, 2, Some(3)));
+        assert_eq!(serde_json::to_value(&d).unwrap()["e"], 3);
+    }
+}

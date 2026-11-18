@@ -4,7 +4,8 @@
 //! against a rules file. Its `broken` binary holds models that break the
 //! model rules, which must fail `cargo check`; its `queries` binary checks
 //! each query rule itself, and a copy with a mistake in the table must fail
-//! to compile.
+//! to compile. The same harness builds a crate that renames the dependency,
+//! whose models the generated code must still name.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -116,3 +117,80 @@ fn a_mistake_in_the_rules_fails_the_build() {
         "{printed}"
     );
 }
+
+/// The generated code names the crate as the user's manifest does:
+/// `orm = { package = "tideorm" }` failed with "cannot find `tideorm`".
+#[test]
+fn a_renamed_dependency_builds() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("project_rules/renamed");
+    std::fs::create_dir_all(dir.join("src")).expect("create the project");
+    let manifest = format!(
+        "[package]\nname = \"renamed-dependency\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n\
+         [dependencies]\n\
+         orm = {{ package = \"tideorm\", path = '{}', default-features = false, features = [\"sqlite\", \"runtime-tokio\"] }}\n\n\
+         [workspace]\n",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    std::fs::write(dir.join("Cargo.toml"), manifest).expect("write the manifest");
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock"),
+        dir.join("Cargo.lock"),
+    )
+    .expect("copy the lockfile");
+    std::fs::write(dir.join("src/main.rs"), RENAMED_MAIN).expect("write the source");
+
+    let check = cargo(&dir, &["check"]);
+    assert!(check.status.success(), "{}", text(&check));
+}
+
+const RENAMED_MAIN: &str = r#"
+use orm::orm::{DeriveActiveEnum, DeriveValueType, EnumIter};
+use orm::prelude::*;
+
+#[orm::model(table = "authors", soft_delete, tokenize)]
+pub struct Author {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    #[validate(min_length = 1)]
+    pub name: String,
+    pub deleted_at: Option<DateTime<Utc>>,
+    #[tideorm(has_many = "Book", foreign_key = "author_id")]
+    pub books: HasMany<Book>,
+}
+
+#[derive(orm::Model)]
+#[tideorm(table = "books")]
+pub struct Book {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub author_id: i64,
+    #[tideorm(belongs_to = "Author", foreign_key = "author_id")]
+    pub author: BelongsTo<Author>,
+}
+
+#[orm::scopes]
+impl Author {
+    pub fn named(query: QueryBuilder<Self>, name: &str) -> QueryBuilder<Self> {
+        query.where_eq(Author::columns.name, name)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DeriveValueType)]
+pub struct Isbn(pub String);
+
+#[derive(Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[orm(rs_type = "i32", db_type = "Integer")]
+pub enum Shelf {
+    Top = 0,
+    Bottom = 1,
+}
+
+#[derive(Debug, orm::FromQueryResult)]
+pub struct Total {
+    pub total: i64,
+}
+
+fn main() {
+    let _ = Author::query().named("Ann");
+}
+"#;

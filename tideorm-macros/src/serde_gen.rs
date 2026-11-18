@@ -89,9 +89,9 @@ fn generate_serialize_impl(ctx: &BuildContext) -> TokenStream2 {
     let relation_count = relation_fields.len();
     quote! {
         impl ::tideorm::serde::Serialize for #struct_name {
-            fn serialize<S>(&self, serializer: S) -> ::std::result::Result<S::Ok, S::Error>
+            fn serialize<__S>(&self, serializer: __S) -> ::std::result::Result<__S::Ok, __S::Error>
             where
-                S: ::tideorm::serde::Serializer,
+                __S: ::tideorm::serde::Serializer,
             {
                 use ::tideorm::serde::ser::SerializeStruct;
                 let positional = !serializer.is_human_readable();
@@ -202,9 +202,9 @@ fn generate_deserialize_impl(ctx: &BuildContext) -> TokenStream2 {
     quote! {
         #[allow(non_snake_case)]
         impl<'de> ::tideorm::serde::Deserialize<'de> for #struct_name {
-            fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+            fn deserialize<__D>(deserializer: __D) -> ::std::result::Result<Self, __D::Error>
             where
-                D: ::tideorm::serde::Deserializer<'de>,
+                __D: ::tideorm::serde::Deserializer<'de>,
             {
                 #[allow(non_camel_case_types)]
                 enum __Field { #(#temp_idents,)* __ignore }
@@ -215,9 +215,9 @@ fn generate_deserialize_impl(ctx: &BuildContext) -> TokenStream2 {
                     fn expecting(&self, formatter: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
                         formatter.write_str("field identifier")
                     }
-                    fn visit_str<E>(self, value: &str) -> ::std::result::Result<__Field, E>
+                    fn visit_str<__E>(self, value: &str) -> ::std::result::Result<__Field, __E>
                     where
-                        E: ::tideorm::serde::de::Error,
+                        __E: ::tideorm::serde::de::Error,
                     {
                         match value {
                             #(#field_names => Ok(__Field::#temp_idents),)*
@@ -227,9 +227,9 @@ fn generate_deserialize_impl(ctx: &BuildContext) -> TokenStream2 {
                 }
 
                 impl<'de> ::tideorm::serde::Deserialize<'de> for __Field {
-                    fn deserialize<D>(deserializer: D) -> ::std::result::Result<__Field, D::Error>
+                    fn deserialize<__D>(deserializer: __D) -> ::std::result::Result<__Field, __D::Error>
                     where
-                        D: ::tideorm::serde::Deserializer<'de>,
+                        __D: ::tideorm::serde::Deserializer<'de>,
                     {
                         deserializer.deserialize_identifier(__FieldVisitor)
                     }
@@ -241,9 +241,9 @@ fn generate_deserialize_impl(ctx: &BuildContext) -> TokenStream2 {
                     fn expecting(&self, formatter: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
                         formatter.write_str(concat!("struct ", #struct_name_str))
                     }
-                    fn visit_map<A>(self, mut map: A) -> ::std::result::Result<#struct_name, A::Error>
+                    fn visit_map<__A>(self, mut map: __A) -> ::std::result::Result<#struct_name, __A::Error>
                     where
-                        A: ::tideorm::serde::de::MapAccess<'de>,
+                        __A: ::tideorm::serde::de::MapAccess<'de>,
                     {
                         #(let mut #temp_idents: Option<_> = None;)*
                         while let Some(key) = map.next_key()? {
@@ -264,9 +264,9 @@ fn generate_deserialize_impl(ctx: &BuildContext) -> TokenStream2 {
                         };
                         Ok(model.with_relations())
                     }
-                    fn visit_seq<A>(self, mut seq: A) -> ::std::result::Result<#struct_name, A::Error>
+                    fn visit_seq<__A>(self, mut seq: __A) -> ::std::result::Result<#struct_name, __A::Error>
                     where
-                        A: ::tideorm::serde::de::SeqAccess<'de>,
+                        __A: ::tideorm::serde::de::SeqAccess<'de>,
                     {
                         #(#seq_field_resolutions)*
                         #(#unwritten_defaults)*

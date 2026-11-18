@@ -220,4 +220,6 @@ To build on the default format, wrap `tideorm::tokenization::default_encode` and
 - The table (or, without one, the model name) is authenticated with the token, so it opens only for that table.
 - A modified or truncated token fails authentication and decodes as invalid. A token longer than 4096 characters is refused before it is decoded.
 - The output is randomized: one record has many valid tokens, so tokens cannot be compared to find equal keys.
+- A token hides the key; it is not a permission. `from_token` loads whatever row the token names, so check that the caller may see that row as you would for a plain id.
+- Tokens are bound to the schema and table, not to the database: tenants that share an encryption key and a table name can open each other's tokens. Give each tenant its own key, or bind the tenant in with a [custom format](#custom-token-formats).
 - For high-security applications, plan how you rotate the key: rotation invalidates outstanding tokens.

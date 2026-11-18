@@ -66,7 +66,10 @@ fn find_forbidden_raw_sql_token(sql: &str) -> Option<&'static str> {
                 "*" if tokens.peek().is_some_and(|next| next.text == "/") => "SQL comments",
                 _ => continue,
             },
-            Kind::Word | Kind::Space | Kind::Parameter => continue,
+            // PostgreSQL reads `$1` as the statement's first value, which the
+            // builder has numbered for a value of its own.
+            Kind::Parameter => "positional parameters",
+            Kind::Word | Kind::Space => continue,
         };
         return Some(reason);
     }

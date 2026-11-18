@@ -1,5 +1,3 @@
-#![allow(missing_docs)]
-
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

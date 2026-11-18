@@ -11,4 +11,4 @@ note: found an item that was configured out
   |       ---------------------------- the item is gated behind the `encrypted-fields` feature
   | pub const fn __assert_encrypted_fields_feature_enabled() {}
   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  = note: this error originates in the derive macro `tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
+  = note: this error originates in the derive macro `::tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)

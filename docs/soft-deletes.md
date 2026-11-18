@@ -146,6 +146,8 @@ use crate::models::UserQueryScopes as _;
 
 Each scope must be a plain synchronous function with no `self` and no generic parameters, take `QueryBuilder<Self>` first and return it. Later parameters must be simple names; they can be `mut` and their types can name the model as `Self`. A scope cannot take the name of a `QueryBuilder` method (`latest`, `limit`, `distinct`, `where_eq`, `with_trashed`, ..): the builder's own method would answer the call, so such a name is a compile error. Doc comments and `#[cfg]` attributes carry over to the generated trait.
 
+A scope adds to the query it is given, so scopes chain in any order and keep the filters, ordering, limit and values set before them. The `or_where_*` shorthand is the exception to watch: every `or_where_*` call on a query joins its one OR group, so two scopes that each use it OR their conditions together. A scope that offers alternatives should keep them in a group of its own, with `where_any` or `begin_or()` (see [OR Conditions](queries.md#or-conditions)).
+
 ### Scopes as Plain Functions
 
 Ordinary functions over a `QueryBuilder` compose too, and can be generic over the model:
