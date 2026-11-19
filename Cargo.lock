@@ -2060,9 +2060,9 @@ dependencies = [
 
 [[package]]
 name = "tideorm-sql-builder"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77309f7c141cdd61fd91b6d83f07bbb0911e66e574ecdcd347403cbcdd75f968"
+checksum = "c20b96be39f0384e7b1fb67678f31099cd33706248da7ae65b28ae43842abf68"
 dependencies = [
  "chrono",
  "rust_decimal",
