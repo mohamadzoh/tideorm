@@ -5,6 +5,25 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.1] - 2026-11-19
+
+### Fixed
+
+- A filter on an encrypted column is refused when the query, batch update or delete runs, with
+  an error naming the column, except `where_null`/`where_not_null` (an encrypted `None` is
+  stored as NULL). It compared the stored ciphertext, so `where_eq` matched no row and
+  `where_not_eq` every row.
+
+### Tests
+
+- A transaction cancelled at each point it can stop (opening, between or inside statements,
+  committing) is all or nothing on every backend, and its pooled connection goes back with no
+  transaction open.
+- A connection the server kills in the middle of a transaction fails it with nothing committed,
+  and the pool goes on with a new connection (PostgreSQL, MySQL, MariaDB, YugabyteDB, TiDB).
+- Tenant scopes run at once on a multi-threaded runtime keep to their own databases, plainly,
+  in transactions and around another tenant's nested scope.
+
 ## [0.18.0] - 2026-11-18
 
 A breaking release: reads and writes that gave a silently wrong result now give the right one

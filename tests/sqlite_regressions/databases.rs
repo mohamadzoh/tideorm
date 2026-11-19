@@ -226,6 +226,81 @@ async fn read_and_written_rows_keep_their_database() {
     Database::reset_global();
 }
 
+/// Tenant scopes run at once on a multi-threaded runtime, their tasks moving
+/// between threads at every await, and each reads and writes only its own
+/// database: plainly, in a transaction, and around a nested scope of another
+/// tenant, after which its calls go back to its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_tenant_scopes_keep_to_their_own_databases() {
+    const TENANTS: usize = 4;
+    const ROUNDS: i64 = 6;
+    const STEPS: i64 = 8;
+    let mut tenants = Vec::new();
+    for index in 0..TENANTS {
+        tenants.push(users_and_posts(&format!("tenant {index}"), 10).await);
+    }
+    let mut tasks = Vec::new();
+    for round in 0..ROUNDS {
+        for (index, db) in tenants.iter().enumerate() {
+            let (db, next) = (db.clone(), tenants[(index + 1) % TENANTS].clone());
+            tasks.push(tokio::spawn(async move {
+                db.scope(async {
+                    let own = format!("tenant {index}");
+                    let user = |id| User {
+                        id,
+                        name: own.clone(),
+                        active: true,
+                        posts: Default::default(),
+                    };
+                    for step in 0..STEPS {
+                        let id = 100 + round * 100 + step * 2;
+                        User::create(user(id)).await?;
+                        tokio::task::yield_now().await;
+                        let names = User::query().pluck::<String>("name").await?;
+                        assert!(
+                            names.iter().all(|name| *name == own),
+                            "{own} read {names:?}"
+                        );
+                        if step % 3 == 0 {
+                            let row = user(id + 1);
+                            let found = db
+                                .transaction(async move |_| {
+                                    User::create(row).await?;
+                                    tokio::task::yield_now().await;
+                                    User::find(id + 1).await
+                                })
+                                .await?;
+                            assert_eq!(found.map(|user| user.name), Some(own.clone()));
+                        }
+                        if step == 5 {
+                            let theirs = next
+                                .scope(async { User::query().pluck::<String>("name").await })
+                                .await?;
+                            assert!(!theirs.contains(&own), "{own} read through {theirs:?}");
+                        }
+                        assert_eq!(
+                            User::find(id).await?.map(|user| user.name),
+                            Some(own.clone())
+                        );
+                    }
+                    Ok::<_, tideorm::Error>(())
+                })
+                .await
+            }));
+        }
+    }
+    for task in tasks {
+        task.await.unwrap().unwrap();
+    }
+    // Per tenant: its seeded row, and each round's rows and transaction rows.
+    let expected = 1 + ROUNDS * (STEPS + (0..STEPS).filter(|step| step % 3 == 0).count() as i64);
+    for (index, db) in tenants.iter().enumerate() {
+        let names = User::query_with(db).pluck::<String>("name").await.unwrap();
+        assert_eq!(names.len() as i64, expected, "tenant {index}");
+        assert!(names.iter().all(|name| *name == format!("tenant {index}")));
+    }
+}
+
 #[tokio::test]
 async fn composed_queries_reject_other_databases_before_mutation() {
     let a = chunk_projection_database().await;

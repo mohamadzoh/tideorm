@@ -2971,6 +2971,66 @@ async fn review_postgres_savepoint_after_a_failed_statement_aborts_the_transacti
     db.exec_raw("DROP TABLE review_abort_rows").await.unwrap();
 }
 
+/// A connection the server ends in the middle of a transaction fails that
+/// transaction with none of its work committed, and the pool goes on with a
+/// new connection.
+#[tokio::test]
+async fn review_a_connection_killed_mid_transaction_fails_it_and_the_pool_recovers() {
+    if !backend::connect().await
+        || super::parity::skip_on(
+            &[DatabaseServer::CockroachDb, DatabaseServer::Vitess],
+            "kill of one client session by id",
+        )
+    {
+        return;
+    }
+    let (db, table) = private_table("review_killed_session").await;
+    let observer = Database::builder()
+        .url(backend::database_url())
+        .max_connections(1)
+        .build()
+        .await
+        .unwrap();
+    let postgres = backend::DATABASE_TYPE == DatabaseType::Postgres;
+    let (handle, killer, name) = (db.clone(), observer.clone(), table.clone());
+    let result: tideorm::Result<()> = db
+        .transaction(async move |_| {
+            handle
+                .exec_raw(&format!("INSERT INTO {name} VALUES (1)"))
+                .await?;
+            let identity = if postgres {
+                "SELECT CAST(pg_backend_pid() AS BIGINT) AS n"
+            } else {
+                "SELECT CAST(CONNECTION_ID() AS SIGNED) AS n"
+            };
+            let session = handle.query_raw_json(identity).await?[0]["n"]
+                .as_i64()
+                .unwrap();
+            // PostgreSQL's timeout form waits until the backend has exited.
+            let kill = if postgres {
+                format!("SELECT pg_terminate_backend({session}, 10000)")
+            } else {
+                format!("KILL {session}")
+            };
+            killer.exec_raw(&kill).await?;
+            handle
+                .exec_raw(&format!("INSERT INTO {name} VALUES (2)"))
+                .await?;
+            Ok(())
+        })
+        .await;
+    assert!(
+        result.is_err(),
+        "a transaction on a killed session committed"
+    );
+    assert_eq!(table_ids(&observer, &table).await, Vec::<i64>::new());
+    db.exec_raw(&format!("INSERT INTO {table} VALUES (3)"))
+        .await
+        .unwrap();
+    assert_eq!(table_ids(&observer, &table).await, [3]);
+    db.exec_raw(&format!("DROP TABLE {table}")).await.unwrap();
+}
+
 /// A statement that fails on a transaction marks that transaction, even when
 /// it runs through an outer database's handle inside another database's
 /// transaction: PostgreSQL's aborted transaction must then refuse to commit

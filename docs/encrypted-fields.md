@@ -6,7 +6,7 @@ An encrypted field is stored encrypted in its column and holds plaintext in your
 
 ```toml
 [dependencies]
-tideorm = { version = "0.18.0", features = ["postgres", "encrypted-fields"] }
+tideorm = { version = "0.18.1", features = ["postgres", "encrypted-fields"] }
 ```
 
 List the fields in the model's `encrypted` option, by field name or column name:
@@ -99,7 +99,7 @@ Each write encrypts with a fresh random nonce, so the same value is stored diffe
 
 | Operation | Behaviour |
 |---|---|
-| `where_eq` and the other filters | compare the stored ciphertext, not the plaintext. A filter on an encrypted column does not find a row by its value |
+| `where_eq` and the other filters | refused; `where_null` and `where_not_null` work, since `None` is stored as NULL |
 | `DISTINCT`, `count_distinct`, `GROUP BY`, `ORDER BY` | refused |
 | `MIN`, `MAX`, `SUM`, `AVG`, `aggregates()`, HAVING comparisons | refused |
 | window functions: `MIN`/`MAX`/`SUM`/`AVG`, `PARTITION BY`, `ORDER BY` | refused |

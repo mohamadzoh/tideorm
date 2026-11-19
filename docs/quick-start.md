@@ -11,7 +11,7 @@ cd tide-quickstart
 
 ```toml
 [dependencies]
-tideorm = { version = "0.18.0", default-features = false, features = ["sqlite", "runtime-tokio"] }
+tideorm = { version = "0.18.1", default-features = false, features = ["sqlite", "runtime-tokio"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 

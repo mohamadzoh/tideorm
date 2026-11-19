@@ -288,6 +288,18 @@ impl<M: Model> QueryBuilder<M> {
 
         for condition in self.all_conditions() {
             Self::validate_condition(condition, qualifiers).map_err(Error::query)?;
+            // An encrypted `None` is stored as NULL, so only NULL tests mean anything.
+            if !condition.column.is_empty()
+                && !matches!(
+                    condition.operator,
+                    Operator::IsNull | Operator::IsNotNull | Operator::Raw
+                )
+            {
+                self.ensure_encrypted_input_is_comparable(
+                    &condition.column,
+                    "a filter other than where_null()/where_not_null()",
+                )?;
+            }
         }
 
         for (column, _) in &self.clauses.order_by {

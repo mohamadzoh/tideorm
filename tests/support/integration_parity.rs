@@ -5660,6 +5660,84 @@ async fn a_nested_transaction_cancelled_anywhere_leaves_a_consistent_outcome() {
     db.exec_raw(&format!("DROP TABLE {table}")).await.unwrap();
 }
 
+/// A transaction cancelled anywhere (opening, between or inside its
+/// statements, or committing) is all or nothing, and its pooled connection
+/// goes back with no transaction open: a write right after it is seen at once
+/// from another pool.
+#[tokio::test]
+async fn a_transaction_cancelled_anywhere_is_all_or_nothing() {
+    use std::future::Future;
+    use std::task::Poll;
+
+    if !backend::connect().await {
+        return;
+    }
+    let pool = || {
+        Database::builder()
+            .url(backend::database_url())
+            .max_connections(1)
+            .build()
+    };
+    let (db, observer) = (pool().await.unwrap(), pool().await.unwrap());
+    let table = format!("cancelled_outer_{}", uuid::Uuid::new_v4().simple());
+    db.exec_raw(&format!("CREATE TABLE {table}(id BIGINT PRIMARY KEY)"))
+        .await
+        .unwrap();
+    let (mut cancelled, mut finished) = (0, 0);
+    for polls in 1..=30 {
+        db.exec_raw(&format!("DELETE FROM {table}")).await.unwrap();
+        let (handle, name) = (db.clone(), table.clone());
+        let mut work = Box::pin(db.transaction(async move |_| {
+            for id in 1..=3 {
+                handle
+                    .exec_raw(&format!("INSERT INTO {name} VALUES ({id})"))
+                    .await?;
+                tokio::task::yield_now().await;
+            }
+            Ok(())
+        }));
+        // Polled only when woken, as an `.await` would, and dropped at the
+        // poll after its last, so each count cuts it at a later point.
+        let mut left = polls;
+        let done = std::future::poll_fn(|cx| {
+            if left == 0 {
+                return Poll::Ready(Ok(false));
+            }
+            left -= 1;
+            work.as_mut().poll(cx).map(|outcome| outcome.map(|()| true))
+        })
+        .await
+        .unwrap();
+        drop(work);
+        db.exec_raw(&format!("INSERT INTO {table} VALUES (9)"))
+            .await
+            .unwrap();
+        let rows: Vec<i64> = observer
+            .query_raw_json(&format!("SELECT id FROM {table} ORDER BY id"))
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_i64().unwrap())
+            .collect();
+        if done {
+            finished += 1;
+            assert_eq!(rows, [1, 2, 3, 9], "after {polls} polls");
+        } else {
+            // A commit cut off after the server ran it keeps the work.
+            cancelled += 1;
+            assert!(
+                rows == [9] || rows == [1, 2, 3, 9],
+                "after {polls} polls: {rows:?}"
+            );
+        }
+    }
+    assert!(
+        cancelled > 0 && finished > 0,
+        "{cancelled} cancelled, {finished} finished"
+    );
+    db.exec_raw(&format!("DROP TABLE {table}")).await.unwrap();
+}
+
 struct NamedSeed(&'static str);
 
 #[tideorm::async_trait::async_trait]

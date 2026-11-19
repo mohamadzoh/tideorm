@@ -266,3 +266,60 @@ async fn joined_encryption_metadata_keeps_schema_boundaries() {
         distinct("ordinary.projection_shared").validate().unwrap();
     }
 }
+
+#[tokio::test]
+async fn filters_on_encrypted_columns_are_refused_except_null_tests() {
+    let db = database().await;
+    let own = || Secret::query_with(&db);
+    encrypted_error(own().where_eq("secret", "same plaintext").get().await);
+    encrypted_error(
+        own()
+            .where_eq(Secret::PRIVATE_VALUE, "same plaintext")
+            .count()
+            .await,
+    );
+    encrypted_error(own().where_in("private_value", vec!["a", "b"]).get().await);
+    encrypted_error(own().where_like("secret", "same%").exists().await);
+    encrypted_error(
+        own()
+            .where_eq("id", 1)
+            .or_where_eq("secret", "x")
+            .get()
+            .await,
+    );
+    encrypted_error(own().where_eq("secret", "x").delete().await);
+    encrypted_error(
+        Secret::update_all()
+            .set("secret", "y")
+            .where_eq("secret", "x")
+            .execute()
+            .await,
+    );
+    for aliased in [false, true] {
+        let (query, column) = joined(&db, aliased);
+        encrypted_error(query.where_eq(column, "same plaintext").get().await);
+    }
+    encrypted_error(
+        Host::query_with(&db)
+            .where_has::<Secret>("id", "secret_id", |q| q.where_eq("secret", "x"))
+            .get()
+            .await,
+    );
+
+    assert_eq!(own().where_not_null("secret").count().await.unwrap(), 2);
+    assert_eq!(
+        own()
+            .where_null(Secret::PRIVATE_VALUE)
+            .count()
+            .await
+            .unwrap(),
+        0
+    );
+    let (query, column) = joined(&db, true);
+    assert_eq!(query.where_not_null(column).count().await.unwrap(), 2);
+    // Nothing was written by the refused update or delete.
+    assert_eq!(
+        own().pluck::<String>("secret").await.unwrap(),
+        vec!["same plaintext"; 2]
+    );
+}
