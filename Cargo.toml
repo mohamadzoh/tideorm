@@ -1,6 +1,6 @@
 [package]
 name = "tideorm"
-version = "0.18.1"
+version = "0.18.2"
 edition = "2024"
 authors = ["Mohamad Al Zohbie <alzoubi528@gmail.com>"]
 description = "Async ActiveRecord ORM and database framework for Rust: plain-struct models, relations declared as fields and a fluent query builder, on PostgreSQL, MySQL, MariaDB, SQLite, CockroachDB, YugabyteDB, TiDB and Vitess"
@@ -82,7 +82,7 @@ encrypted-fields = []
 # The execution engine, from its own repository (rust-ocean/tideorm-engine).
 # `src/orm.rs` re-exports it, with the ORM derive macros from `tideorm-macros`,
 # and macro-generated models reach both through that module's paths.
-tideorm-engine = { version = "0.2.0", default-features = false }
+tideorm-engine = { version = "0.2.1", default-features = false }
 
 # Async runtime
 async-trait = "0.1.92"
@@ -106,7 +106,7 @@ rust_decimal = { version = "1.43.0", features = ["serde"] }
 thiserror = "2.0.21"
 
 # Derive macros (our own crate)
-tideorm-macros = { version = "=0.18.1", path = "tideorm-macros" }
+tideorm-macros = { version = "=0.18.2", path = "tideorm-macros" }
 
 # Utils
 parking_lot = "0.12.5"

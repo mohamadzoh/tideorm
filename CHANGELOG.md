@@ -5,6 +5,16 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.2] - 2026-11-20
+
+### Fixed
+
+- On SQLite 3.54, which a fresh build of 0.18.1 resolves (libsqlite3-sys 0.40), a long
+  `where_in`/`where_not_in` list on a JSON column failed with "VIEWs and/or subqueries nested
+  too deep". `tideorm` now requires `tideorm-engine` 0.2.1, which requires `tideorm-sql-builder`
+  0.2.1, whose JSON number comparison opens no `WITH`, so `cargo update -p tideorm` brings the
+  fix in.
+
 ## [0.18.1] - 2026-11-19
 
 ### Fixed
